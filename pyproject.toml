@@ -53,7 +53,7 @@ scheduling = [
 ]
 
 [project.urls]
-Repository = "https://github.com/hu-yang/offerguide"
+Repository = "https://github.com/huy555huy/OfferGuide"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/offerguide"]

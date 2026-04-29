@@ -18,12 +18,14 @@ runtimes, profiles, and notifiers without touching env vars.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 from .. import inbox as inbox_mod
 from ..agent import build_graph
@@ -31,8 +33,10 @@ from ..agent.state import RequestedAction
 from ..config import Settings
 from ..llm import LLMClient, LLMError
 from ..memory import Store
+from ..platforms._spec import RawJob
 from ..profile import UserProfile, load_resume_pdf
 from ..skills import SkillRuntime, SkillSpec, discover_skills
+from ..workers import scout
 from .notify import Notifier, make_notifier
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -189,7 +193,61 @@ def create_app(
             request, "_inbox_list.html", _ctx(request, items=[item])
         )
 
+    # ── Browser extension ingest endpoint ──────────────────────────────
+
+    @app.post("/api/extension/ingest", response_class=JSONResponse)
+    def extension_ingest(payload: ExtensionJDPayload) -> dict:
+        """Accept JD data from the Boss browser extension and ingest as a job."""
+        raw_text_parts = [payload.description]
+        if payload.tags:
+            raw_text_parts.append("标签: " + ", ".join(payload.tags))
+        raw_text = "\n".join(raw_text_parts).strip()
+        if not raw_text:
+            raise HTTPException(400, "empty JD text")
+
+        extras: dict = {}
+        if payload.salary:
+            extras["salary"] = payload.salary
+        if payload.tags:
+            extras["tags"] = payload.tags
+
+        rj = RawJob(
+            source="boss_extension",
+            source_id=_extract_boss_id(payload.url) if payload.url else None,
+            url=payload.url,
+            title=payload.title,
+            company=payload.company,
+            location=payload.location,
+            raw_text=raw_text,
+            extras=extras,
+        )
+        is_new, job_id = scout.ingest(store, rj)
+        return {"is_new": is_new, "job_id": job_id}
+
     return app
+
+
+class ExtensionJDPayload(BaseModel):
+    """Request body from the Boss browser extension."""
+
+    url: str | None = None
+    title: str = "(untitled)"
+    company: str | None = None
+    location: str | None = None
+    salary: str | None = None
+    description: str
+    tags: list[str] = []
+
+
+_BOSS_ID_RE = re.compile(r"/job_detail/([^/.]+)")
+
+
+def _extract_boss_id(url: str | None) -> str | None:
+    """Pull the job id from a Boss URL like /job_detail/abc123.html."""
+    if not url:
+        return None
+    m = _BOSS_ID_RE.search(url)
+    return m.group(1) if m else None
 
 
 # -------------------- entry point used by `python -m offerguide.ui.web` --------------------
