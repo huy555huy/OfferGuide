@@ -1,0 +1,20 @@
+{% if error %}
+<div class="error">{{ error }}</div>
+{% else %}
+<div class="report">
+<pre>{{ response }}</pre>
+</div>
+<div class="actions" style="margin-top:1rem">
+    <form hx-post="/inbox/from-report" hx-target="#inbox-preview" hx-swap="innerHTML"
+          style="display:inline">
+        <input type="hidden" name="title" value="{{ inbox_title }}">
+        <input type="hidden" name="body" value="{{ inbox_body }}">
+        <input type="hidden" name="job_text" value="{{ job_text }}">
+        <input type="hidden" name="score_run_id" value="{{ score_run_id or '' }}">
+        <input type="hidden" name="gaps_run_id" value="{{ gaps_run_id or '' }}">
+        <button type="submit">考虑投递 → 加 inbox</button>
+    </form>
+    {% if score_run_id %}<span class="muted">score_run_id={{ score_run_id }}</span>{% endif %}
+    {% if gaps_run_id %}<span class="muted">· gaps_run_id={{ gaps_run_id }}</span>{% endif %}
+</div>
+{% endif %}

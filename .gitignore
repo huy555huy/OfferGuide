@@ -1,0 +1,38 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+.venv/
+venv/
+env/
+
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# OfferGuide local data (user-private — never commit)
+.offerguide/
+data/
+*.db
+*.sqlite
+*.sqlite3
+profile.yaml
+resume.pdf
+
+# Secrets
+.env
+.env.local
+*.key
+
+# OS
+.DS_Store
+.idea/
+.vscode/

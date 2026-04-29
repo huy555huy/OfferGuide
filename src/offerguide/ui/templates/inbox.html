@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Inbox{% endblock %}
+{% block content %}
+<div class="card">
+    <h2>Inbox — 待决策</h2>
+    {% include "_inbox_list.html" %}
+</div>
+{% if include_decided %}
+<div class="card">
+    <h2>已决策 (最近 50)</h2>
+    {% with items = decided %}
+        {% include "_inbox_list.html" %}
+    {% endwith %}
+</div>
+{% endif %}
+{% endblock %}

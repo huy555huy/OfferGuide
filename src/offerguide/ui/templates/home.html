@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Chat{% endblock %}
+{% block content %}
+<div class="card">
+    <h2>评估一个 JD</h2>
+    <p class="muted">
+        粘贴 JD 文本（来自牛客/Boss/官网），选要做什么。代理会调用 <code>score_match</code>
+        和/或 <code>analyze_gaps</code>，把结果直接渲染下来。
+    </p>
+    <form hx-post="/chat" hx-target="#report" hx-swap="innerHTML" hx-indicator="#spinner">
+        <textarea name="job_text" placeholder="把 JD 全文粘到这里…" required></textarea>
+        <div class="actions" style="margin-top: 1rem;">
+            <label>
+                <input type="radio" name="action" value="score_and_gaps" checked>
+                评分 + 差距分析（推荐）
+            </label>
+            <label>
+                <input type="radio" name="action" value="score">仅评分</label>
+            <label>
+                <input type="radio" name="action" value="gaps">仅差距分析</label>
+            <button type="submit" {% if not profile_loaded %}disabled title="先设 OFFERGUIDE_RESUME_PDF 加载简历"{% endif %}>跑一下</button>
+            <span id="spinner" class="muted htmx-indicator">… 调用 LLM 中（10-30 秒）</span>
+        </div>
+    </form>
+</div>
+
+<div id="report" class="card">
+    <p class="muted">结果将出现在这里。</p>
+</div>
+
+<div class="card">
+    <h2>最近 Inbox</h2>
+    <div id="inbox-preview">
+        {% include "_inbox_list.html" %}
+    </div>
+    <p class="muted" style="margin-top:1rem"><a href="/inbox">查看全部 →</a></p>
+</div>
+{% endblock %}
