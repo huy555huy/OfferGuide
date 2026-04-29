@@ -8,6 +8,14 @@ Public surface (kept small — most callers want either the metric or the runner
 - ``bump_version``, ``write_evolved_skill``, ``log_evolution`` — partial pipeline pieces
 """
 
+from .diff import (
+    DiffReport,
+    EvolutionRecord,
+    build_diff_report,
+    latest_evolution,
+    list_evolutions,
+    render_markdown,
+)
 from .golden_trainset import GOLDEN_EXAMPLES, GoldenExample, split_train_val
 from .metrics import MetricBreakdown, aggregate, score_match_metric
 from .runner import (
@@ -23,15 +31,21 @@ from .runner import (
 
 __all__ = [
     "GOLDEN_EXAMPLES",
+    "DiffReport",
+    "EvolutionRecord",
     "EvolutionResult",
     "GoldenExample",
     "MetricBreakdown",
     "aggregate",
+    "build_diff_report",
     "build_trainset",
     "bump_version",
     "evolve_skill",
+    "latest_evolution",
+    "list_evolutions",
     "log_evolution",
     "make_score_match_metric",
+    "render_markdown",
     "run_gepa",
     "score_match_metric",
     "split_train_val",

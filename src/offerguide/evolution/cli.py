@@ -1,9 +1,14 @@
-"""CLI: ``python -m offerguide.evolution evolve <skill_name>``.
+"""CLI for evolution commands.
 
-Wires the runner to environment-driven LLM config. Cheap default (`auto=light`)
-keeps a real run around the $2 mark per the user's W6 brief.
+Two subcommands::
 
-Examples:
+    python -m offerguide.evolution evolve <skill_name>   # run GEPA
+    python -m offerguide.evolution diff   <skill_name>   # before/after report
+
+The cheap default ``auto=light`` keeps a real evolve run around the $2 mark
+per the W6 brief.
+
+Examples::
 
     # Evolve the score_match SKILL with default 'light' GEPA budget
     python -m offerguide.evolution evolve score_match
@@ -11,10 +16,13 @@ Examples:
     # Heavier budget (more rollouts, more API spend)
     python -m offerguide.evolution evolve score_match --auto medium
 
-    # Reflection LM = Claude (env var must be set separately when wiring Anthropic)
-    python -m offerguide.evolution evolve score_match --reflection-model claude-sonnet-4-5
+    # Print the before/after diff for the latest score_match evolution
+    python -m offerguide.evolution diff score_match
 
-The output:
+    # Same, but as raw markdown — paste into README / blog
+    python -m offerguide.evolution diff score_match --markdown > evolution.md
+
+The evolve command output:
 - New SKILL.md content overwrites the original (parent kept in `*.bak` next to it)
 - One row appended to `evolution_log`
 - A short before/after metric table printed to stdout
@@ -26,17 +34,20 @@ import argparse
 import sys
 from pathlib import Path
 
-import dspy
-
 from ..config import Settings
 from ..memory import Store
-from .runner import evolve_skill
+from .diff import build_diff_report, render_markdown
+
+
+def _skills_root() -> Path:
+    return Path(__file__).parent.parent / "skills"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="offerguide.evolution")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    # ── evolve ──────────────────────────────────────────────────────
     p_evolve = sub.add_parser("evolve", help="Run GEPA on a SKILL")
     p_evolve.add_argument("skill_name", help="SKILL name (matches the directory under src/offerguide/skills/)")
     p_evolve.add_argument("--auto", default="light", choices=("light", "medium", "heavy"))
@@ -56,9 +67,30 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional directory for GEPA's per-trial logs.",
     )
 
+    # ── diff ────────────────────────────────────────────────────────
+    p_diff = sub.add_parser("diff", help="Show the latest GEPA before/after report for a SKILL")
+    p_diff.add_argument("skill_name")
+    p_diff.add_argument(
+        "--markdown",
+        action="store_true",
+        help="Output raw markdown (suitable for piping into a file) instead of the pretty header.",
+    )
+
     args = parser.parse_args(argv)
-    if args.cmd != "evolve":
-        parser.error(f"unknown command: {args.cmd}")
+    if args.cmd == "evolve":
+        return _cmd_evolve(args)
+    if args.cmd == "diff":
+        return _cmd_diff(args)
+    parser.error(f"unknown command: {args.cmd}")
+    return 2  # unreachable
+
+
+def _cmd_evolve(args: argparse.Namespace) -> int:
+    """Run GEPA evolution on a SKILL — the only path that touches LLMs."""
+    # Lazy imports so that `diff` works even when dspy isn't installed.
+    import dspy
+
+    from .runner import evolve_skill
 
     settings = Settings.from_env()
     if not settings.deepseek_api_key:
@@ -69,8 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    skills_root = Path(__file__).parent.parent / "skills"
-    skill_dir = skills_root / args.skill_name
+    skill_dir = _skills_root() / args.skill_name
     if not skill_dir.exists():
         print(f"ERROR: no SKILL directory at {skill_dir}", file=sys.stderr)
         return 2
@@ -114,6 +145,38 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  SKILL.md         = {result.new_skill_path}")
     print()
     print(_format_metric_table(result.metric_before, result.metric_after))
+    return 0
+
+
+def _cmd_diff(args: argparse.Namespace) -> int:
+    """Print the before/after diff for the latest evolution of a SKILL."""
+    settings = Settings.from_env()
+    skill_dir = _skills_root() / args.skill_name
+    if not skill_dir.exists():
+        print(f"ERROR: no SKILL directory at {skill_dir}", file=sys.stderr)
+        return 2
+
+    store = Store(settings.db_path)
+    store.init_schema()
+
+    report = build_diff_report(store, _skills_root(), args.skill_name)
+    if report is None:
+        print(
+            f"No evolution_log entries for '{args.skill_name}' yet.\n"
+            "Run `python -m offerguide.evolution evolve "
+            f"{args.skill_name}` first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    md = render_markdown(report)
+    if args.markdown:
+        # Pure markdown to stdout — for redirecting into a file
+        print(md)
+    else:
+        print()
+        print(md)
+        print()
     return 0
 
 
