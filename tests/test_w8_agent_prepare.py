@@ -99,6 +99,18 @@ class _FakeRuntime:
                 "cross_project_questions": [],
                 "behavioral_questions_tailored": [],
             }
+        elif spec.name == "write_cover_letter":
+            parsed = {
+                "opening_hook": "Looking at the JD ...",
+                "narrative_body": ["Para 1", "Para 2"],
+                "closing_call_to_action": "Available 5 月 onwards.",
+                "customization_signals": ["JD line 3"],
+                "ats_keywords_used": ["PyTorch"],
+                "ai_risk_warnings": [],
+                "suggested_tone": "warm_concise",
+                "personalization_score": 0.7,
+                "overall_word_count": 200,
+            }
         else:
             parsed = {}
         return SkillResult(
@@ -161,7 +173,7 @@ class TestPrepRouting:
         assert result.get("score_result") is None
         assert result.get("gaps_result") is None
 
-    def test_everything_action_runs_all_four(self, tmp_path: Path) -> None:
+    def test_everything_action_runs_all_five(self, tmp_path: Path) -> None:
         store = _make_store(tmp_path)
         skills = discover_skills(SKILLS_ROOT)
         runtime = _FakeRuntime()
@@ -183,11 +195,13 @@ class TestPrepRouting:
             "analyze_gaps",
             "prepare_interview",
             "deep_project_prep",
+            "write_cover_letter",
         ]
         assert result.get("score_result") is not None
         assert result.get("gaps_result") is not None
         assert result.get("prep_result") is not None
         assert result.get("deep_prep_result") is not None
+        assert result.get("cover_letter_result") is not None
 
     def test_score_and_gaps_does_not_run_prep(self, tmp_path: Path) -> None:
         store = _make_store(tmp_path)

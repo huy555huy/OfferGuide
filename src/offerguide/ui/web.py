@@ -260,6 +260,56 @@ def create_app(
             _ctx(request, app=rows[0]),
         )
 
+    @app.get("/stories", response_class=HTMLResponse)
+    def stories_view(request: Request) -> Any:
+        from .. import story_bank
+        return templates.TemplateResponse(
+            request, "stories.html",
+            _ctx(
+                request,
+                stories=story_bank.list_all(store, limit=50),
+                recommended_tags=story_bank.RECOMMENDED_TAGS,
+                active_tab="stories",
+            ),
+        )
+
+    @app.post("/api/stories/insert", response_class=HTMLResponse)
+    def stories_insert(
+        request: Request,
+        title: str = Form(...),
+        situation: str = Form(...),
+        task: str = Form(...),
+        action: str = Form(...),
+        result: str = Form(...),
+        reflection: str = Form(""),
+        tags: str = Form(""),
+        confidence: str = Form("0.5"),
+    ) -> Any:
+        from .. import story_bank
+        try:
+            conf = max(0.0, min(1.0, float(confidence or "0.5")))
+        except ValueError:
+            conf = 0.5
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        try:
+            new_story = story_bank.insert(
+                store, title=title, situation=situation, task=task,
+                action=action, result=result,
+                reflection=reflection or None,
+                tags=tag_list, confidence=conf,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+
+        return templates.TemplateResponse(
+            request, "_story_list.html",
+            _ctx(
+                request,
+                stories=story_bank.list_all(store, limit=50),
+                just_added=new_story.id,
+            ),
+        )
+
     @app.get("/interviews", response_class=HTMLResponse)
     def interviews_view(request: Request, company: str = "") -> Any:
         """List 面经 corpus + paste-in form for adding more."""
@@ -543,7 +593,7 @@ def create_app(
 
         valid_actions = (
             "score", "gaps", "score_and_gaps", "prepare_interview", "deep_prep",
-            "everything",
+            "cover_letter", "everything",
         )
         action_norm: RequestedAction = (
             action if action in valid_actions else "score_and_gaps"
@@ -551,7 +601,9 @@ def create_app(
 
         # If user picked an action that needs `company` and didn't provide one,
         # surface the requirement clearly rather than silently falling back.
-        company_required = ("prepare_interview", "deep_prep", "everything")
+        company_required = (
+            "prepare_interview", "deep_prep", "cover_letter", "everything",
+        )
         if action_norm in company_required and not company.strip():
             return templates.TemplateResponse(
                 request,
@@ -597,6 +649,7 @@ def create_app(
                 prep=result.get("prep_result"),
                 prep_used_experiences=result.get("prep_used_experiences", 0),
                 deep_prep=result.get("deep_prep_result"),
+                cover_letter=result.get("cover_letter_result"),
                 company=company.strip() or None,
                 inbox_title=f"考虑投递: {title_first_line}",
                 inbox_body=(result.get("final_response") or "")[:800],
@@ -605,6 +658,7 @@ def create_app(
                 gaps_run_id=result.get("gaps_run_id"),
                 prep_run_id=result.get("prep_run_id"),
                 deep_prep_run_id=result.get("deep_prep_run_id"),
+                cover_letter_run_id=result.get("cover_letter_run_id"),
             ),
         )
 

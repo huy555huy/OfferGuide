@@ -20,6 +20,7 @@ from . import (
     deep_project_prep,
     prepare_interview,
     score_match,
+    write_cover_letter,
 )
 from ._base import MetricBreakdown, SkillAdapter, aggregate, parse_json_output
 
@@ -29,6 +30,7 @@ REGISTRY: dict[str, ModuleType] = {
     "prepare_interview": prepare_interview,
     "deep_project_prep": deep_project_prep,
     "compare_jobs": compare_jobs,
+    "write_cover_letter": write_cover_letter,
 }
 
 
@@ -64,4 +66,5 @@ __all__ = [
     "parse_json_output",
     "prepare_interview",
     "score_match",
+    "write_cover_letter",
 ]

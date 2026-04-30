@@ -107,6 +107,34 @@ def build_graph(
             "gaps_run_id": result.skill_run_id,
         }
 
+    def cover_letter_node(state: AgentState) -> AgentState:
+        if runtime is None:
+            return {"error": "no SkillRuntime configured"}
+        try:
+            spec = _need("write_cover_letter")
+        except _MissingSkillError as e:
+            return {"error": str(e)}
+        company = (state.get("company") or "").strip()
+        if not company:
+            return {
+                "error": (
+                    "求职信生成需要 `company` 字段（从 web UI 表单或调用方传入），"
+                    " 但当前 state 里为空。"
+                )
+            }
+        result = runtime.invoke(
+            spec,
+            {
+                "company": company,
+                "job_text": state.get("job_text") or "",
+                "user_profile": state.get("user_profile_text") or "",
+            },
+        )
+        return {
+            "cover_letter_result": result.parsed,
+            "cover_letter_run_id": result.skill_run_id,
+        }
+
     def deep_prep_node(state: AgentState) -> AgentState:
         if runtime is None:
             return {"error": "no SkillRuntime configured"}
@@ -204,6 +232,8 @@ def build_graph(
             return "prep_node"
         if action == "deep_prep":
             return "deep_prep_node"
+        if action == "cover_letter":
+            return "cover_letter_node"
         return "summarize"
 
     def after_score_router(state: AgentState) -> str:
@@ -226,11 +256,18 @@ def build_graph(
         action = state.get("requested_action") or DEFAULT_ACTION
         return "deep_prep_node" if action == "everything" else "summarize"
 
+    def after_deep_prep_router(state: AgentState) -> str:
+        if state.get("error"):
+            return "summarize"
+        action = state.get("requested_action") or DEFAULT_ACTION
+        return "cover_letter_node" if action == "everything" else "summarize"
+
     g: StateGraph = StateGraph(AgentState)
     g.add_node("score_node", score_node)
     g.add_node("gaps_node", gaps_node)
     g.add_node("prep_node", prep_node)
     g.add_node("deep_prep_node", deep_prep_node)
+    g.add_node("cover_letter_node", cover_letter_node)
     g.add_node("summarize", summarize)
     g.add_conditional_edges(
         START,
@@ -240,6 +277,7 @@ def build_graph(
             "gaps_node": "gaps_node",
             "prep_node": "prep_node",
             "deep_prep_node": "deep_prep_node",
+            "cover_letter_node": "cover_letter_node",
             "summarize": "summarize",
         },
     )
@@ -258,7 +296,12 @@ def build_graph(
         after_prep_router,
         {"deep_prep_node": "deep_prep_node", "summarize": "summarize"},
     )
-    g.add_edge("deep_prep_node", "summarize")
+    g.add_conditional_edges(
+        "deep_prep_node",
+        after_deep_prep_router,
+        {"cover_letter_node": "cover_letter_node", "summarize": "summarize"},
+    )
+    g.add_edge("cover_letter_node", "summarize")
     g.add_edge("summarize", END)
     return g.compile()
 
@@ -390,6 +433,21 @@ def _format_summary(state: AgentState) -> str:
             parts.append("\n### 行为题（结合用户经历）")
             for q in deep["behavioral_questions_tailored"][:3]:
                 parts.append(f"  - {q.get('question', '?')}")
+
+    cover = state.get("cover_letter_result")
+    if cover:
+        parts.append("\n## 求职信 · write_cover_letter")
+        if cover.get("opening_hook"):
+            parts.append(f"\n{cover['opening_hook']}")
+        for para in (cover.get("narrative_body") or [])[:3]:
+            parts.append(f"\n{para}")
+        if cover.get("closing_call_to_action"):
+            parts.append(f"\n{cover['closing_call_to_action']}")
+        parts.append(
+            f"\n_(personalization {cover.get('personalization_score', '?')} · "
+            f"{cover.get('overall_word_count', '?')} words · "
+            f"{cover.get('suggested_tone', '?')})_"
+        )
 
     if not parts:
         return "(没有可显示的结果——请检查 `requested_action` 与输入。)"

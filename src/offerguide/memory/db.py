@@ -168,6 +168,27 @@ CREATE TABLE IF NOT EXISTS company_briefs (
     update_count      INTEGER NOT NULL DEFAULT 1
 );
 
+-- STAR + Reflection story bank — behavioral interview answers the user
+-- has rehearsed. Borrowed pattern from Career-Ops (MIT, santifer):
+-- accumulate 5-10 master narratives across evaluations rather than
+-- regenerating every time. Tagged so prepare_interview /
+-- deep_project_prep can pull thematically relevant ones at retrieval
+-- time. Theme tags: 'collaboration' | 'conflict' | 'failure' |
+-- 'learning' | 'leadership' | 'ambiguity' | 'tradeoff' | etc.
+CREATE TABLE IF NOT EXISTS behavioral_stories (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    title             TEXT NOT NULL,    -- short label ('法至产品分歧 / RemeDi 训练崩溃 / ...')
+    situation         TEXT NOT NULL,    -- S in STAR
+    task              TEXT NOT NULL,    -- T
+    action            TEXT NOT NULL,    -- A
+    result            TEXT NOT NULL,    -- R
+    reflection        TEXT,             -- + reflective learning the story conveys
+    tags_json         TEXT NOT NULL DEFAULT '[]',  -- list[str] — themes
+    used_count        INTEGER NOT NULL DEFAULT 0,  -- bumped when a SKILL retrieves this story
+    confidence        REAL NOT NULL DEFAULT 0.5,   -- user's self-rated readiness (0-1)
+    created_at        REAL DEFAULT (julianday('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_source         ON jobs(source);
 CREATE INDEX IF NOT EXISTS idx_apps_job            ON applications(job_id);
 CREATE INDEX IF NOT EXISTS idx_apps_status         ON applications(status);
@@ -244,5 +265,6 @@ class Store:
                 "inbox_items",
                 "interview_experiences",
                 "company_briefs",
+                "behavioral_stories",
             ]
             return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}

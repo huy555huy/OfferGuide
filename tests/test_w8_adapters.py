@@ -39,6 +39,7 @@ class TestRegistry:
             "prepare_interview",
             "deep_project_prep",
             "compare_jobs",
+            "write_cover_letter",
         }
 
     def test_get_adapter_returns_module(self) -> None:

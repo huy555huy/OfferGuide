@@ -73,3 +73,64 @@ HTML scraping, but ToS-fragile) is the no-API-key default in
 [Tavily](https://tavily.com), Google Custom Search, or another commercial
 search API. The ``SearchBackend`` Protocol abstraction means switching
 backends is a one-class change.
+
+## Career-Ops — STAR+Reflection story bank + cover letter framework (W8 +2)
+
+**[Career-Ops](https://github.com/santifer/career-ops)** (MIT, by santifer,
+13.3k★) — an open-source Claude-Code-driven job-hunt agent. We adopt two
+high-leverage patterns:
+
+1. **STAR + Reflection story bank** — Career-Ops' insight that 5-10 master
+   behavioral narratives accumulated across interview evaluations beats
+   regenerating answers each time. We implement this in
+   ``src/offerguide/story_bank.py`` with the ``behavioral_stories`` SQLite
+   table; ``prepare_interview`` and ``deep_project_prep`` SKILLs query by
+   tag at retrieval time. The ``+R`` (Reflection) extension to STAR is
+   directly from Career-Ops' methodology.
+
+2. **6-block evaluation framework for cover letters** — Career-Ops grades
+   cover letters across opening_hook / narrative / customization / ATS-keyword
+   density / closing-CTA / personalization-score. We adopt the six-block
+   schema in ``src/offerguide/skills/write_cover_letter/helpers.py``
+   (``CoverLetterResult`` Pydantic model). The ``ai_risk_warnings`` self-audit
+   field is our addition addressing the 49% AI-detection auto-dismiss rate.
+
+We do **not** vendor Career-Ops code; we adopt patterns and cite per its MIT
+license attribution requirement.
+
+## Resume-Matcher — cover letter + multi-provider LLM inspiration (W8 +2)
+
+**[Resume-Matcher](https://github.com/srbhr/Resume-Matcher)** (Apache 2.0,
+by srbhr) — open-source ATS resume matcher. We adopt:
+
+- **Cover letter generation as a primary feature** — confirmed our decision
+  to add ``write_cover_letter`` SKILL.
+- **Multi-provider LLM (LiteLLM)** — validates our DeepSeek-V4 default;
+  the abstraction we'd swap to if multi-provider became important.
+
+No code vendored. Pattern + product-decision references only.
+
+## Pytai / GPTInterviewer — interview question dynamics (W8 +2)
+
+**[Pytai](https://github.com/getFrontend/app-ai-interviews)** and
+**[GPTInterviewer](https://github.com/jiatastic/GPTInterviewer)** (MIT) —
+open-source AI mock interview platforms. We adopt the pattern of real-time
+question generation conditioned on role + tech stack (validates our
+``prepare_interview`` / ``deep_project_prep`` contracts) and comprehensive
+post-interview feedback (inspires a future ``post_interview_reflection``
+SKILL — W9 candidate).
+
+Reference / pattern-validation only — no code adopted.
+
+## mem0 — memory layer architecture validation
+
+**[mem0](https://github.com/mem0ai/mem0)** (Apache 2.0, by mem0ai) — universal
+memory layer for AI agents. Our ``company_briefs`` + ``briefs.refresh_brief``
+LLM-driven synthesis follows mem0's "agent reads observations → produces
+structured memory → upserts" pipeline. Reference paper:
+[Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory](https://arxiv.org/abs/2504.19413)
+by Chhikara et al.
+
+We don't import mem0 (single-user case doesn't justify their multi-tenant
+infra), but their architectural shape inspired our
+``effective_app_limit`` override-when-confident pattern.

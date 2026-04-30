@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Story Bank{% endblock %}
+{% block content %}
+
+<div class="page-title">
+    <div>
+        <h1>STAR + Reflection 故事库</h1>
+        <p>积累的行为题素材。借鉴 <a href="https://github.com/santifer/career-ops">Career-Ops</a> 的方法 —
+        5-10 个 master stories 跨评估复用，比每场面试现编强 10 倍。
+        <code>prepare_interview</code> / <code>deep_project_prep</code> 会按 tag 自动检索这些故事。</p>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>新建一条 STAR+R 故事</h2>
+    </div>
+    <form hx-post="/api/stories/insert" hx-target="#story-list" hx-swap="innerHTML"
+          hx-on::after-request="if(event.detail.successful) this.reset()">
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:0.625rem;margin-bottom:0.625rem;">
+            <label class="field">
+                <span class="label-text">标题（短标签）</span>
+                <input type="text" name="title" required
+                       placeholder="例: 法至产品分歧 / RemeDi 训练崩溃 / 学 GRPO 一周">
+            </label>
+            <label class="field">
+                <span class="label-text">置信度 (0-1)</span>
+                <input type="number" name="confidence" min="0" max="1" step="0.05" value="0.5">
+            </label>
+        </div>
+
+        <label class="field">
+            <span class="label-text">主题标签（逗号分隔）</span>
+            <input type="text" name="tags" placeholder="collaboration, conflict, learning, leadership"
+                   list="story-tag-suggestions">
+            <datalist id="story-tag-suggestions">
+                {% for t in recommended_tags %}<option value="{{ t }}">{% endfor %}
+            </datalist>
+        </label>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.625rem;margin-top:0.5rem;">
+            <label class="field">
+                <span class="label-text">S · Situation（情境）</span>
+                <textarea name="situation" rows="3" required placeholder="什么背景下发生的？"></textarea>
+            </label>
+            <label class="field">
+                <span class="label-text">T · Task（任务）</span>
+                <textarea name="task" rows="3" required placeholder="你需要解决什么具体问题？"></textarea>
+            </label>
+            <label class="field">
+                <span class="label-text">A · Action（行动）</span>
+                <textarea name="action" rows="3" required placeholder="你具体做了什么？方案 / 工具 / 推动"></textarea>
+            </label>
+            <label class="field">
+                <span class="label-text">R · Result（结果）</span>
+                <textarea name="result" rows="3" required placeholder="可量化的结果 / 关键数字"></textarea>
+            </label>
+        </div>
+
+        <label class="field" style="margin-top: 0.5rem;">
+            <span class="label-text">Reflection（反思）— 可空，但加了 +R 故事粘性更强</span>
+            <textarea name="reflection" rows="2" placeholder="从这件事学到什么？下次会怎么做？"></textarea>
+        </label>
+
+        <div class="actions" style="margin-top: 0.75rem;">
+            <button type="submit">入库</button>
+            <span class="muted small">SKILLs 会按 tag 自动检索这些故事用作 answer_outline 的真实素材</span>
+        </div>
+    </form>
+</div>
+
+<div id="story-list">
+    {% include "_story_list.html" %}
+</div>
+
+{% endblock %}

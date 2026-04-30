@@ -1,0 +1,39 @@
+<div class="card">
+    <div class="card-header">
+        <h2>故事库 · {{ stories|length }} 条</h2>
+        {% if just_added %}<span class="meta" style="color: var(--success);">✓ 新增 #{{ just_added }}</span>{% endif %}
+    </div>
+    {% if not stories %}
+    <div class="empty">
+        <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📖</div>
+        <div>故事库还空着</div>
+        <div class="small muted">面试前先准备 5-8 个 master stories，胜过每场临时编</div>
+    </div>
+    {% else %}
+    {% for s in stories %}
+    <div style="padding: 0.875rem 1rem; margin-bottom: 0.625rem; background: var(--bg-elev);
+                border: 1px solid var(--border); border-radius: var(--radius-sm);
+                border-left: 3px solid var(--primary);">
+        <div style="display:flex;gap:0.5rem;align-items:baseline;margin-bottom:0.5rem;">
+            <strong style="font-family: var(--font-serif); font-size: 1rem;">{{ s.title }}</strong>
+            {% for t in s.tags %}<span class="pill">{{ t }}</span>{% endfor %}
+            <span class="muted small" style="margin-left:auto;">
+                used {{ s.used_count }} 次 · conf {{ "%.2f"|format(s.confidence) }} · #{{ s.id }}
+            </span>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; font-size: 0.85rem;">
+            <div><strong style="color: var(--primary);">S:</strong> {{ s.situation }}</div>
+            <div><strong style="color: var(--primary);">T:</strong> {{ s.task }}</div>
+            <div><strong style="color: var(--primary);">A:</strong> {{ s.action }}</div>
+            <div><strong style="color: var(--primary);">R:</strong> {{ s.result }}</div>
+        </div>
+        {% if s.reflection %}
+        <div style="margin-top: 0.5rem; padding: 0.4rem 0.625rem; background: var(--bg-warm);
+                    border-radius: var(--radius-sm); font-size: 0.825rem; font-style: italic;">
+            <strong style="color: var(--text-muted);">+R:</strong> {{ s.reflection }}
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+</div>

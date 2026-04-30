@@ -280,8 +280,68 @@
     </section>
     {% endif %}
 
+    {# ─── write_cover_letter ─── #}
+    {% if cover_letter %}
+    <section>
+        <div class="section-title">## 求职信 · write_cover_letter</div>
+
+        {# Top meta strip #}
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.75rem;">
+            <span class="pill primary">tone: {{ cover_letter.suggested_tone }}</span>
+            <span class="pill">{{ cover_letter.overall_word_count }} words</span>
+            <span class="pill {% if cover_letter.personalization_score >= 0.7 %}low{% elif cover_letter.personalization_score >= 0.4 %}medium{% else %}high{% endif %}">
+                personalization {{ "%.0f"|format(cover_letter.personalization_score * 100) }}%
+            </span>
+            {% if cover_letter.ai_risk_warnings %}
+            <span class="pill high">⚠ AI 风险 × {{ cover_letter.ai_risk_warnings|length }}</span>
+            {% endif %}
+        </div>
+
+        {# The actual letter #}
+        <div style="padding: 1rem 1.25rem; background: var(--bg-warm);
+                    border-radius: var(--radius); font-size: 0.9rem; line-height: 1.7;
+                    border-left: 3px solid var(--primary);">
+            <p style="margin: 0 0 0.875rem;">{{ cover_letter.opening_hook }}</p>
+            {% for para in cover_letter.narrative_body %}
+            <p style="margin: 0 0 0.875rem;">{{ para }}</p>
+            {% endfor %}
+            <p style="margin: 0;">{{ cover_letter.closing_call_to_action }}</p>
+        </div>
+
+        {# Audit panel #}
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-top:0.75rem;">
+            {% if cover_letter.customization_signals %}
+            <div>
+                <div class="section-title" style="margin-top:0;">定制信号 ✦</div>
+                <ul style="margin:0;padding-left:1.125rem;font-size:0.82rem;">
+                    {% for s in cover_letter.customization_signals %}<li>{{ s }}</li>{% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+            {% if cover_letter.ats_keywords_used %}
+            <div>
+                <div class="section-title" style="margin-top:0;">ATS 关键词命中 ({{ cover_letter.ats_keywords_used|length }})</div>
+                <div>
+                    {% for k in cover_letter.ats_keywords_used %}
+                    <span class="pill" style="margin-right:0.25rem;margin-bottom:0.25rem;">{{ k }}</span>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        {% if cover_letter.ai_risk_warnings %}
+        <div style="margin-top:0.625rem;padding:0.5rem 0.75rem;background:var(--danger-soft);border-radius:var(--radius-sm);border-left:3px solid var(--danger);">
+            <div class="small" style="font-weight:600;color:var(--danger);margin-bottom:0.25rem;">⚠ AI 检测风险（自审）</div>
+            <ul style="margin:0;padding-left:1.125rem;font-size:0.82rem;">
+                {% for w in cover_letter.ai_risk_warnings %}<li>{{ w }}</li>{% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+    </section>
+    {% endif %}
+
     {# ─── nothing rendered? fall back to raw text ─── #}
-    {% if not score and not gaps and not prep and not deep_prep %}
+    {% if not score and not gaps and not prep and not deep_prep and not cover_letter %}
     <p class="muted">没有结构化结果——以下是 agent 的原始响应:</p>
     <pre style="background: var(--bg-subtle); padding: 0.75rem; border-radius: var(--radius-sm); white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.825rem;">{{ response }}</pre>
     {% endif %}
