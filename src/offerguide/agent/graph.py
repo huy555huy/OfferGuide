@@ -1,21 +1,22 @@
 """LangGraph single-agent dispatch graph.
 
-Topology (sequential, no parallelism — keeps state ownership obvious):
+Topology:
 
-    START ──(route)──┬──► score_node ──(after_score)──┬──► gaps_node ──► summarize ──► END
-                     │                                 └──► summarize ──► END
-                     ├──► gaps_node ──────────────────────► summarize ──► END
+    START ──(route)──┬──► score_node ──(after_score)──┬──► gaps_node ──(after_gaps)──┬──► prep_node ──► summarize ──► END
+                     │                                 └──► (skip)                    └──► (skip)
+                     ├──► gaps_node ─────────────────────────────────────────────────────► summarize ──► END
+                     ├──► prep_node ─────────────────────────────────────────────────────► summarize ──► END
                      └──► summarize ──► END
 
-`requested_action` from the inputs decides the path. Each skill node calls
-SkillRuntime → records to the `skill_runs` table → stashes parsed output and
-the run_id into state. `summarize` composes a Chinese assistant message from
-whichever results are populated.
+``requested_action`` from the inputs decides the path:
+- ``score`` → score_node only
+- ``gaps`` → gaps_node only
+- ``score_and_gaps`` → score → gaps → summarize
+- ``prepare_interview`` → prep_node only
+- ``everything`` → score → gaps → prep → summarize
 
-Why no parallel fan-out for score+gaps even though both could run together:
-LangGraph parallel branches need explicit reducers for any state field two
-branches write to. For W4 we want the simplest correct shape; W6 can revisit
-when GEPA's evaluator might want concurrent scoring of N candidate prompts.
+The prep node retrieves 面经 from ``interview_corpus`` when a Store is
+available and the caller didn't pre-fill ``past_experiences``.
 """
 
 from __future__ import annotations
@@ -25,10 +26,16 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
+from .. import interview_corpus
+from ..memory import Store
 from ..skills import SkillRuntime, SkillSpec
 from .state import AgentState
 
 DEFAULT_ACTION = "score_and_gaps"
+
+# How many 面经 snippets to pull from the corpus when prep_node retrieves
+_PREP_FETCH_LIMIT = 5
+_PREP_RENDER_BUDGET_CHARS = 4000
 
 
 class _MissingSkillError(RuntimeError):
@@ -39,12 +46,18 @@ def build_graph(
     *,
     skills: Iterable[SkillSpec],
     runtime: SkillRuntime | None = None,
+    store: Store | None = None,
 ):
     """Build the agent graph.
 
-    `runtime` is required for any node that actually calls an LLM; passing
-    None is acceptable when the caller only wants to inspect the topology
-    (e.g. tests that mock runtime entirely).
+    ``runtime`` is required for any node that actually calls an LLM;
+    passing None is acceptable when the caller only wants to inspect the
+    topology (e.g. tests that mock runtime entirely).
+
+    ``store`` is optional — if present, the prep node retrieves past
+    interview experiences from the corpus when ``past_experiences`` is
+    empty in state. If absent, the prep node sends an empty string and
+    relies on the SKILL's "no past experience" handling.
     """
     skill_index = {s.name: s for s in skills}
 
@@ -94,6 +107,54 @@ def build_graph(
             "gaps_run_id": result.skill_run_id,
         }
 
+    def prep_node(state: AgentState) -> AgentState:
+        if runtime is None:
+            return {"error": "no SkillRuntime configured"}
+        try:
+            spec = _need("prepare_interview")
+        except _MissingSkillError as e:
+            return {"error": str(e)}
+
+        company = (state.get("company") or "").strip()
+        if not company:
+            return {
+                "error": (
+                    "面试备战需要 `company` 字段（从 web UI 表单或调用方传入），"
+                    " 但当前 state 里为空。"
+                )
+            }
+
+        # Resolve past_experiences: caller-provided > corpus retrieval > empty
+        provided = (state.get("past_experiences") or "").strip()
+        used_count = 0
+        if provided:
+            past_experiences = provided
+        elif store is not None:
+            experiences = interview_corpus.fetch_for_company(
+                store, company, limit=_PREP_FETCH_LIMIT
+            )
+            past_experiences = interview_corpus.render_snippets(
+                experiences, max_chars=_PREP_RENDER_BUDGET_CHARS
+            )
+            used_count = len(experiences)
+        else:
+            past_experiences = ""
+
+        result = runtime.invoke(
+            spec,
+            {
+                "company": company,
+                "job_text": state.get("job_text") or "",
+                "user_profile": state.get("user_profile_text") or "",
+                "past_experiences": past_experiences,
+            },
+        )
+        return {
+            "prep_result": result.parsed,
+            "prep_run_id": result.skill_run_id,
+            "prep_used_experiences": used_count,
+        }
+
     def summarize(state: AgentState) -> AgentState:
         msg = _format_summary(state)
         return {
@@ -105,33 +166,54 @@ def build_graph(
 
     def start_router(state: AgentState) -> str:
         action = state.get("requested_action") or DEFAULT_ACTION
-        if action == "score" or action == "score_and_gaps":
+        if action in ("score", "score_and_gaps", "everything"):
             return "score_node"
         if action == "gaps":
             return "gaps_node"
+        if action == "prepare_interview":
+            return "prep_node"
         return "summarize"
 
     def after_score_router(state: AgentState) -> str:
-        action = state.get("requested_action") or DEFAULT_ACTION
         if state.get("error"):
             return "summarize"
-        return "gaps_node" if action == "score_and_gaps" else "summarize"
+        action = state.get("requested_action") or DEFAULT_ACTION
+        if action in ("score_and_gaps", "everything"):
+            return "gaps_node"
+        return "summarize"
+
+    def after_gaps_router(state: AgentState) -> str:
+        if state.get("error"):
+            return "summarize"
+        action = state.get("requested_action") or DEFAULT_ACTION
+        return "prep_node" if action == "everything" else "summarize"
 
     g: StateGraph = StateGraph(AgentState)
     g.add_node("score_node", score_node)
     g.add_node("gaps_node", gaps_node)
+    g.add_node("prep_node", prep_node)
     g.add_node("summarize", summarize)
     g.add_conditional_edges(
         START,
         start_router,
-        {"score_node": "score_node", "gaps_node": "gaps_node", "summarize": "summarize"},
+        {
+            "score_node": "score_node",
+            "gaps_node": "gaps_node",
+            "prep_node": "prep_node",
+            "summarize": "summarize",
+        },
     )
     g.add_conditional_edges(
         "score_node",
         after_score_router,
         {"gaps_node": "gaps_node", "summarize": "summarize"},
     )
-    g.add_edge("gaps_node", "summarize")
+    g.add_conditional_edges(
+        "gaps_node",
+        after_gaps_router,
+        {"prep_node": "prep_node", "summarize": "summarize"},
+    )
+    g.add_edge("prep_node", "summarize")
     g.add_edge("summarize", END)
     return g.compile()
 
@@ -140,11 +222,7 @@ def build_graph(
 
 
 def _format_summary(state: AgentState) -> str:
-    """Render a human-readable Chinese summary from whichever skill results landed.
-
-    Kept as a pure function so test cases can exercise the rendering against
-    canned dicts without spinning up the whole graph.
-    """
+    """Render a Chinese summary from whichever skill results landed."""
     parts: list[str] = []
     if state.get("error"):
         parts.append(f"⚠️ 出错：{state['error']}")
@@ -198,6 +276,45 @@ def _format_summary(state: AgentState) -> str:
         if gaps.get("ai_detection_warnings"):
             parts.append("\n**AI 检测风险提示:**")
             for w in gaps["ai_detection_warnings"]:
+                parts.append(f"  - {w}")
+
+    prep = state.get("prep_result")
+    if prep:
+        parts.append("\n## 面试备战")
+        used = state.get("prep_used_experiences", 0) or 0
+        parts.append(f"_(基于 {used} 篇面经；公司: {state.get('company') or '?'})_")
+        if prep.get("company_snapshot"):
+            parts.append(f"\n**公司画像**: {prep['company_snapshot']}")
+
+        questions = prep.get("expected_questions") or []
+        if questions:
+            sorted_q = sorted(
+                questions,
+                key=lambda q: float(q.get("likelihood", 0.0)),
+                reverse=True,
+            )
+            parts.append("\n**预测题目** (按概率降序，最多 6):")
+            for i, q in enumerate(sorted_q[:6], start=1):
+                cat = q.get("category", "?")
+                lik = _safe_float(q.get("likelihood"))
+                lik_s = f"{lik:.2f}" if lik is not None else "?"
+                parts.append(
+                    f"\n[{i}] **[{cat}] {q.get('question', '?')}**"
+                    f" — likelihood={lik_s}"
+                )
+                if q.get("rationale"):
+                    parts.append(f"  - 依据: {q['rationale']}")
+
+        focus = prep.get("prep_focus_areas") or []
+        if focus:
+            parts.append("\n**重点备战**:")
+            for f in focus:
+                parts.append(f"  - {f}")
+
+        weak = prep.get("weak_spots") or []
+        if weak:
+            parts.append("\n**用户弱点**:")
+            for w in weak:
                 parts.append(f"  - {w}")
 
     if not parts:

@@ -4,11 +4,21 @@
 <div class="card">
     <h2>评估一个 JD</h2>
     <p class="muted">
-        粘贴 JD 文本（来自牛客/Boss/官网），选要做什么。代理会调用 <code>score_match</code>
-        和/或 <code>analyze_gaps</code>，把结果直接渲染下来。
+        粘贴 JD 文本（来自牛客/Boss/官网），选要做什么。代理会调用
+        <code>score_match</code> / <code>analyze_gaps</code> /
+        <code>prepare_interview</code>，把结果直接渲染下来。
     </p>
     <form hx-post="/chat" hx-target="#report" hx-swap="innerHTML" hx-indicator="#spinner">
         <textarea name="job_text" placeholder="把 JD 全文粘到这里…" required></textarea>
+
+        <div style="margin-top: 0.6rem;">
+            <label class="muted" style="font-size: 0.85em;">
+                公司名（面试备战用，从 JD 里复制即可）：
+            </label><br>
+            <input type="text" name="company" placeholder="例: 字节跳动 / 阿里巴巴"
+                   style="width: 60%; padding: 4px 8px; margin-top: 4px;">
+        </div>
+
         <div class="actions" style="margin-top: 1rem;">
             <label>
                 <input type="radio" name="action" value="score_and_gaps" checked>
@@ -18,6 +28,10 @@
                 <input type="radio" name="action" value="score">仅评分</label>
             <label>
                 <input type="radio" name="action" value="gaps">仅差距分析</label>
+            <label>
+                <input type="radio" name="action" value="prepare_interview">仅面试备战</label>
+            <label>
+                <input type="radio" name="action" value="everything">三件套</label>
             <button type="submit" {% if not profile_loaded %}disabled title="先设 OFFERGUIDE_RESUME_PDF 加载简历"{% endif %}>跑一下</button>
             <span id="spinner" class="muted htmx-indicator">… 调用 LLM 中（10-30 秒）</span>
         </div>

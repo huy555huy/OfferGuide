@@ -107,23 +107,32 @@ agent 的 SKILL prompt。
 
 ## Self-evolution loop (the resume pitch in one paragraph)
 
-`prepare_interview / analyze_gaps / score_match` 三个 SKILL 都是 dogfood-driven 的进化对象。
+`score_match / analyze_gaps / prepare_interview` **三个** SKILL 都接入了 GEPA 进化基础设施，
+通过 `evolution/adapters/` 的 adapter 模式插入；想加第四个 SKILL，只需新建一个 `adapters/<skill>.py`
++ 注册到 REGISTRY。
+
 进化器是 [DSPy GEPA](https://dspy.ai/api/optimizers/GEPA/overview/) (Genetic-Pareto Prompt
 Evolution, ICLR 2026 Oral)——no gradient, no fine-tuning, 比 GRPO 强 6-20%, rollout 减少 35x。
 
-每个 SKILL 都有：
+每个 adapter 都提供：
 
-1. **golden trainset** —— 11 个手工标注的（JD, profile, expected_band, must_mention, must_not_mention）
-   元组，覆盖 fit / misfit / middle 三档，stratified split 出 train + val
-2. **3-axis 指标**（`offerguide.evolution.metrics`）——
-   `0.5 × prob_in_band  +  0.3 × keyword_recall  +  0.2 × anti_false_positive`
-   每个轴都返回 human-readable feedback 给 GEPA 的 reflection LM 用
+1. **手工 golden trainset**（按 SKILL 不同有不同字段）：
+   - `score_match`: 10 例，覆盖 fit/misfit/middle 三档（probability_range + must_mention + must_not_mention）
+   - `analyze_gaps`: 7 例，real + edge_case 两档（expected_keywords + ai_risk_floor + count range）
+   - `prepare_interview`: 6 例，with_面经/no_面经/edge_case 三档（profile_keywords + jd_keywords）
+2. **多轴 metric**，axes 因 SKILL 而异：
+   - `score_match`: 0.5 × prob_in_band + 0.3 × recall + 0.2 × anti_FP
+   - `analyze_gaps`: 0.40 × keyword_recall + 0.30 × schema_validity + 0.15 × ai_risk_floor + 0.15 × count_range
+   - `prepare_interview`: 0.30 × grounded + 0.25 × category_coverage + 0.20 × schema + 0.15 × calibration_spread + 0.10 × count
+   每个轴都返回 human-readable feedback 给 GEPA 的 reflection LM
 3. **进化产物**——一行 CLI 跑出新版 prompt，写回 `SKILL.md`，旧版自动 `.bak` 备份，
    所有指标 delta 入 `evolution_log` 表
 
 ```bash
-# 进化 score_match SKILL
+# 进化任意一个 SKILL
 $ DEEPSEEK_API_KEY=sk-... python -m offerguide.evolution evolve score_match
+$ DEEPSEEK_API_KEY=sk-... python -m offerguide.evolution evolve analyze_gaps
+$ DEEPSEEK_API_KEY=sk-... python -m offerguide.evolution evolve prepare_interview --auto medium
 
 # 看进化前后 prompt diff + 指标对比（适合贴博客 / README）
 $ python -m offerguide.evolution diff score_match --markdown > evolution.md
@@ -173,21 +182,26 @@ pip install -e ".[dev,ui,evolution,scheduling]"
 export DEEPSEEK_API_KEY=sk-...
 export OFFERGUIDE_RESUME_PDF=/path/to/your_resume.pdf
 
-# 3. ingest some JDs (manual paste mode — Boss 用浏览器扩展)
-python examples/quickstart.py
+# 3. quickstart — exercises every layer through W8 (offline by default)
+python examples/quickstart.py /path/to/your_resume.pdf
+# add --invoke-skills to actually call the LLM
+# add --invoke-agent to also build the LangGraph and run action='everything'
 
 # 4. start the conversational UI
 python -m offerguide.ui.web  # http://localhost:8000
 
-# 5. run the silence tracker (one-shot or as cron)
-python -c "from offerguide import Store; from offerguide.workers.tracker import tracker_run; \
-           from offerguide.config import Settings; from offerguide.ui.notify import make_notifier; \
-           s = Settings.from_env(); store = Store(s.db_path); store.init_schema(); \
-           print(tracker_run(store, notifier=make_notifier(s)))"
+# 5. workers (cron candidates)
+python -m offerguide.workers tracker run                   # 沉默扫描
+python -m offerguide.workers scout nowcoder --limit 50     # 牛客 sitemap
 
-# 6. (when there's enough dogfood data) evolve a SKILL
+# 6. evolve a SKILL (any of the 3 — adapters/ supports all)
 python -m offerguide.evolution evolve score_match --auto light
+python -m offerguide.evolution evolve analyze_gaps
+python -m offerguide.evolution evolve prepare_interview
+
+# 7. before/after report
 python -m offerguide.evolution diff score_match
+python -m offerguide.evolution diff score_match --markdown > evolution.md
 ```
 
 ### Boss browser extension
@@ -212,10 +226,15 @@ src/offerguide/
 ├── config.py             # env-driven Settings
 ├── evolution/
 │   ├── cli.py            # python -m offerguide.evolution {evolve,diff}
-│   ├── runner.py         # GEPA 编排
-│   ├── golden_trainset.py
-│   ├── metrics.py        # 3-axis weighted metric
-│   ├── dspy_module.py
+│   ├── runner.py         # SKILL-agnostic GEPA 编排 (W8' refactor)
+│   ├── adapters/         # one module per evolvable SKILL:
+│   │   ├── _base.py      #   - generic MetricBreakdown, aggregate
+│   │   ├── score_match.py     # 10 examples + 3-axis metric
+│   │   ├── analyze_gaps.py    # 7 examples + 4-axis metric
+│   │   └── prepare_interview.py # 6 examples + 5-axis metric
+│   ├── golden_trainset.py # back-compat shim → adapters/score_match
+│   ├── metrics.py        # back-compat shim → adapters/_base + score_match
+│   ├── dspy_module.py    # SkillSpec → dspy.Signature
 │   └── diff.py           # 进化前后对比报告
 ├── inbox.py              # HITL 队列
 ├── interview_corpus.py   # 面经 RAG
@@ -231,12 +250,13 @@ src/offerguide/
 │   ├── web.py            # FastAPI + HTMX
 │   └── notify/           # 飞书 / Telegram / console
 └── workers/
+    ├── __main__.py       # python -m offerguide.workers {tracker,scout}
     ├── scout.py          # 牛客 sitemap crawler + ingest
     └── tracker.py        # 沉默检测 + 状态机 + 提醒
 
 browser_extension/        # Manifest V3 Chrome 扩展（Boss 页面提取）
 docs/                     # strategy + architecture
-tests/                    # 223 tests, all green
+tests/                    # 290+ tests, all green
 ```
 
 ---
@@ -251,6 +271,8 @@ tests/                    # 223 tests, all green
 - [x] **W6** — GEPA 进化基础设施（11-case golden trainset + 3-axis metric + DSPy 模块 + writeback CLI）
 - [x] **W7** — Tracker worker（应用状态机 + 7/14/30d 沉默检测）+ Boss 浏览器扩展 v1
 - [x] **W8** — `prepare_interview` SKILL + `evolution diff` CLI + README 重写
+- [x] **W8'** — Generalize GEPA to all 3 SKILLs (adapter pattern); wire `prepare_interview`
+       into the agent (`graph.py` prep_node + `interview_corpus` retrieval); workers CLI
 - [ ] **dogfood** — 4 周持续投递收集真实 reply rate 数据；跑首次 GEPA 真活；填 `[TBD]` 数字
 
 ### What's still TBD（需 dogfood 数据）

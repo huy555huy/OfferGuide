@@ -12,7 +12,14 @@ from typing import Annotated, Any, Literal, TypedDict
 
 from langgraph.graph.message import add_messages
 
-RequestedAction = Literal["score", "gaps", "score_and_gaps"]
+RequestedAction = Literal[
+    "score",
+    "gaps",
+    "score_and_gaps",
+    "prepare_interview",
+    "everything",
+]
+"""Action selector. ``everything`` runs all 3 SKILLs sequentially."""
 
 
 class AgentState(TypedDict, total=False):
@@ -30,9 +37,19 @@ class AgentState(TypedDict, total=False):
     user_profile_text: str | None
     """Resume text passed as `user_profile` to SKILLs."""
 
+    company: str | None
+    """Optional company name for prepare_interview. When the action requires
+    it but it's not provided, the prep node returns an error rather than
+    guessing — accuracy beats convenience here."""
+
+    past_experiences: str | None
+    """Pre-rendered 面经 snippets for prepare_interview. The ``prep_node``
+    will retrieve from ``interview_corpus`` if this is empty and the agent
+    has store access."""
+
     job_id: int | None
-    """Optional foreign key into the `jobs` table — set when the JD came from
-    Scout/manual ingestion. Inbox items can reference this for traceability."""
+    """Optional foreign key into the `jobs` table — set when the JD came
+    from Scout/manual ingestion."""
 
     # ---- outputs (filled by skill nodes) --------------------------------
     score_result: dict[str, Any] | None
@@ -40,6 +57,11 @@ class AgentState(TypedDict, total=False):
 
     gaps_result: dict[str, Any] | None
     gaps_run_id: int | None
+
+    prep_result: dict[str, Any] | None
+    prep_run_id: int | None
+    prep_used_experiences: int | None
+    """Count of 面经 snippets the prep node used (for transparency in UI)."""
 
     # ---- terminal ------------------------------------------------------
     final_response: str | None

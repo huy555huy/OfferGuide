@@ -1,7 +1,7 @@
 """GEPA evolution orchestrator — compose trainset + metric + LM, run, write back.
 
 This module is the only one that imports DSPy. Tests outside this file run
-without a DSPy install. The runner is split into three pieces so each can be
+without a DSPy install. The runner is split into pieces so each can be
 tested in isolation:
 
 1. ``build_trainset(...)`` — pure: GoldenExample → list[dspy.Example]
@@ -9,8 +9,10 @@ tested in isolation:
 3. ``run_gepa(...)``       — the only path that hits real LLMs
 4. ``write_evolved_skill(...)`` + ``log_evolution(...)`` — pure file IO + DB IO
 
-A full end-to-end run is composed in ``evolve_skill(...)`` which is what the
-CLI invokes.
+W8': The runner is SKILL-agnostic — it dispatches to a per-SKILL adapter
+(``evolution.adapters.<skill_name>``) for the trainset and metric.
+``score_match`` is one such adapter; ``analyze_gaps`` and
+``prepare_interview`` plug in the same way.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import dspy
@@ -29,9 +32,11 @@ import dspy
 from ..memory import Store
 from ..skills import load_skill
 from ..skills._spec import SkillSpec
+from .adapters import get_adapter
+from .adapters._base import MetricBreakdown, aggregate
+from .adapters.score_match import ScoreMatchExample as GoldenExample
+from .adapters.score_match import metric as score_match_metric
 from .dspy_module import build_student, read_instructions
-from .golden_trainset import GOLDEN_EXAMPLES, GoldenExample, split_train_val
-from .metrics import MetricBreakdown, aggregate, score_match_metric
 
 
 @dataclass(frozen=True)
@@ -75,21 +80,22 @@ def build_trainset(
     return out
 
 
-def _golden_by_name(examples: list[GoldenExample]) -> dict[str, GoldenExample]:
+def _golden_by_name(examples: list) -> dict[str, Any]:
     return {ex.name: ex for ex in examples}
 
 
 # ---------- 2. Metric closure ------------------------------------------
 
 
-def make_score_match_metric(
-    examples: list[GoldenExample],
+def make_metric_for_adapter(
+    adapter: ModuleType,
+    examples: list,
 ) -> Callable[..., dspy.Prediction]:
-    """Return a GEPA-compatible metric callable.
+    """Return a GEPA-compatible metric callable for a given SKILL adapter.
 
-    The callable looks up the GoldenExample by name (round-tripped through
-    ``_golden_name`` on dspy.Example) and computes
-    :func:`score_match_metric`, returning a ``dspy.Prediction(score, feedback)``.
+    The callable looks up the example by name (round-tripped through
+    ``_golden_name`` on dspy.Example) and calls ``adapter.metric(...)``,
+    returning a ``dspy.Prediction(score, feedback)`` for GEPA.
     """
     by_name = _golden_by_name(examples)
 
@@ -107,10 +113,19 @@ def make_score_match_metric(
                 feedback="ERROR: example missing _golden_name; metric cannot lookup target.",
             )
         raw = getattr(prediction, "response_json", None) or ""
-        breakdown: MetricBreakdown = score_match_metric(golden, raw)
+        breakdown: MetricBreakdown = adapter.metric(golden, raw)
         return dspy.Prediction(score=breakdown.total, feedback=breakdown.feedback)
 
     return metric
+
+
+def make_score_match_metric(
+    examples: list[GoldenExample],
+) -> Callable[..., dspy.Prediction]:
+    """Backward-compat wrapper — same as ``make_metric_for_adapter(score_match_adapter, ...)``."""
+    from .adapters import score_match as score_match_adapter
+
+    return make_metric_for_adapter(score_match_adapter, examples)
 
 
 # ---------- 3. The actual GEPA call ------------------------------------
@@ -271,6 +286,7 @@ def log_evolution(
         },
         ensure_ascii=False,
     )
+    metric_name = f"{skill_name}_total"
     with store.connect() as conn:
         cur = conn.execute(
             "INSERT INTO evolution_log(skill_name, parent_version, new_version, "
@@ -279,7 +295,7 @@ def log_evolution(
                 skill_name,
                 parent_version,
                 new_version,
-                "score_match_total",
+                metric_name,
                 metric_before.get("total", 0.0),
                 metric_after.get("total", 0.0),
                 notes_full,
@@ -294,15 +310,20 @@ def log_evolution(
 def evaluate_module(
     *,
     student: dspy.Module,
-    examples: list[GoldenExample],
+    examples: list,
     input_names: list[str],
+    metric_fn: Callable[[Any, str], MetricBreakdown] = score_match_metric,
 ) -> dict[str, float]:
     """Run a student on all examples and aggregate per-axis metric scores.
 
     Used for both the pre-evolution baseline and the post-evolution comparison.
-    A forward() exception is treated as a hard parse failure (score 0) rather
-    than a soft signal — the model didn't even produce output, so partial
-    credit on recall/anti-FP would be misleading.
+    A ``forward()`` exception is treated as a hard parse failure (score 0)
+    rather than a soft signal — the model didn't even produce output, so
+    partial credit on individual axes would be misleading.
+
+    ``metric_fn`` defaults to score_match's metric for backward compat. For
+    other SKILLs, pass the adapter's ``metric`` function (or use
+    ``evolve_skill`` which dispatches automatically).
     """
     breakdowns: list[MetricBreakdown] = []
     for ex in examples:
@@ -311,10 +332,10 @@ def evaluate_module(
             pred = student(**kwargs)
             raw: str = getattr(pred, "response_json", None) or ""
         except Exception:
-            # Empty string forces score_match_metric into OUTPUT_PARSE_FAILURE branch
+            # Empty string forces metric into OUTPUT_PARSE_FAILURE branch
             # which returns a hard 0 across all axes.
             raw = ""
-        breakdowns.append(score_match_metric(ex, raw))
+        breakdowns.append(metric_fn(ex, raw))
     return aggregate(breakdowns)
 
 
@@ -328,38 +349,68 @@ def evolve_skill(
     main_lm: dspy.LM,
     reflection_lm: dspy.LM,
     auto: str = "light",
-    examples: list[GoldenExample] | None = None,
+    examples: list | None = None,
     val_fraction: float = 0.4,
     backup: bool = True,
     log_dir: str | None = None,
+    adapter: ModuleType | None = None,
 ) -> EvolutionResult:
     """Full evolution pipeline: load → baseline eval → GEPA → write back → log.
 
-    Returns an EvolutionResult with the metric delta — the headline number for
-    the W6 deliverable.
+    Dispatches to ``evolution.adapters.<skill_name>`` for the trainset
+    and metric. ``adapter`` can be passed explicitly to override; otherwise
+    it's looked up from the SKILL name.
+
+    Returns an EvolutionResult with the metric delta — the headline number
+    for the W6 deliverable.
     """
     parent_spec = load_skill(skill_dir)
     if not parent_spec.inputs:
         raise ValueError(f"{parent_spec.name} has no declared inputs; cannot evolve.")
 
-    if examples is None:
-        examples = list(GOLDEN_EXAMPLES)
-    train_examples, val_examples = split_train_val(val_fraction=val_fraction)
+    # Resolve adapter for this SKILL
+    if adapter is None:
+        try:
+            adapter = get_adapter(parent_spec.name)
+        except KeyError as e:
+            raise ValueError(
+                f"No evolution adapter registered for SKILL {parent_spec.name!r}. "
+                f"Add one in offerguide.evolution.adapters and register it in "
+                f"adapters/__init__.py::REGISTRY."
+            ) from e
 
+    if examples is None:
+        examples = list(adapter.EXAMPLES)
+    train_examples, val_examples = adapter.split_train_val(val_fraction=val_fraction)
+
+    # The adapter declares which input fields it produces. The SKILL declares
+    # which inputs it consumes. Sanity-check they match.
     input_names = list(parent_spec.inputs)
+    adapter_inputs = set(adapter.INPUT_NAMES)
+    spec_inputs = set(input_names)
+    if adapter_inputs != spec_inputs:
+        raise ValueError(
+            f"Adapter input mismatch for {parent_spec.name}: "
+            f"adapter declares {sorted(adapter_inputs)}, SKILL declares {sorted(spec_inputs)}."
+        )
+
+    metric_fn = adapter.metric
 
     # Baseline: how well does the original prompt do on val?
     dspy.configure(lm=main_lm)
     baseline_student = build_student(parent_spec)
     metric_before = evaluate_module(
-        student=baseline_student, examples=val_examples, input_names=input_names
+        student=baseline_student,
+        examples=val_examples,
+        input_names=input_names,
+        metric_fn=metric_fn,
     )
 
     # GEPA evolution
     student = build_student(parent_spec)
     trainset = build_trainset(train_examples, input_names=input_names)
     valset = build_trainset(val_examples, input_names=input_names)
-    metric = make_score_match_metric(examples)
+    metric = make_metric_for_adapter(adapter, examples)
     optimized = run_gepa(
         student=student,
         trainset=trainset,
@@ -376,7 +427,10 @@ def evolve_skill(
 
     # Post: how well does the evolved prompt do on val?
     metric_after = evaluate_module(
-        student=optimized, examples=val_examples, input_names=input_names
+        student=optimized,
+        examples=val_examples,
+        input_names=input_names,
+        metric_fn=metric_fn,
     )
 
     new_path = write_evolved_skill(

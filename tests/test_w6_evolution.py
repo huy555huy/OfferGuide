@@ -171,10 +171,14 @@ def test_metric_breakdown_feedback_is_human_readable() -> None:
 def test_aggregate_means_per_axis() -> None:
     bs = [
         MetricBreakdown(
-            total=0.8, prob_score=1.0, recall_score=0.6, anti_score=1.0, feedback=""
+            total=0.8,
+            breakdown={"prob": 1.0, "recall": 0.6, "anti": 1.0},
+            feedback="",
         ),
         MetricBreakdown(
-            total=0.6, prob_score=0.5, recall_score=0.8, anti_score=0.5, feedback=""
+            total=0.6,
+            breakdown={"prob": 0.5, "recall": 0.8, "anti": 0.5},
+            feedback="",
         ),
     ]
     agg = aggregate(bs)
@@ -183,6 +187,10 @@ def test_aggregate_means_per_axis() -> None:
     assert agg["recall"] == pytest.approx(0.7)
     assert agg["anti"] == pytest.approx(0.75)
     assert agg["n"] == 2
+
+    # Backward-compat properties on MetricBreakdown still work
+    assert bs[0].prob_score == 1.0
+    assert bs[1].recall_score == 0.8
 
 
 def test_aggregate_handles_empty_list() -> None:

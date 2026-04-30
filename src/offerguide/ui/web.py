@@ -96,6 +96,7 @@ def create_app(
         request: Request,
         job_text: str = Form(...),
         action: str = Form("score_and_gaps"),
+        company: str = Form(""),
     ) -> Any:
         if profile is None:
             return templates.TemplateResponse(
@@ -110,11 +111,28 @@ def create_app(
                 _ctx(request, error="未配置 LLM——设 DEEPSEEK_API_KEY 后重启。"),
             )
 
+        valid_actions = (
+            "score", "gaps", "score_and_gaps", "prepare_interview", "everything"
+        )
         action_norm: RequestedAction = (
-            action if action in ("score", "gaps", "score_and_gaps") else "score_and_gaps"
+            action if action in valid_actions else "score_and_gaps"
         )  # type: ignore[assignment]
 
-        graph = build_graph(skills=skills, runtime=runtime)
+        # If user picked an action that needs `company` and didn't provide one,
+        # surface the requirement clearly rather than silently falling back.
+        if action_norm in ("prepare_interview", "everything") and not company.strip():
+            return templates.TemplateResponse(
+                request,
+                "_report.html",
+                _ctx(
+                    request,
+                    error=(
+                        "面试备战 / 三件套需要填「公司名」字段。请在表单里补充后重试。"
+                    ),
+                ),
+            )
+
+        graph = build_graph(skills=skills, runtime=runtime, store=store)
         try:
             result = graph.invoke(
                 {
@@ -122,6 +140,7 @@ def create_app(
                     "requested_action": action_norm,
                     "job_text": job_text,
                     "user_profile_text": profile.raw_resume_text,
+                    "company": company.strip() or None,
                 }
             )
         except LLMError as e:
@@ -144,6 +163,7 @@ def create_app(
                 job_text=job_text[:2000],
                 score_run_id=result.get("score_run_id"),
                 gaps_run_id=result.get("gaps_run_id"),
+                prep_run_id=result.get("prep_run_id"),
             ),
         )
 

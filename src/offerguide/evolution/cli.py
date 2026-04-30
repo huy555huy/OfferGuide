@@ -101,6 +101,19 @@ def _cmd_evolve(args: argparse.Namespace) -> int:
         )
         return 2
 
+    # Validate the skill has an evolution adapter before any expensive setup
+    from .adapters import get_adapter, list_evolvable_skills
+
+    try:
+        adapter = get_adapter(args.skill_name)
+    except KeyError:
+        print(
+            f"ERROR: no evolution adapter for SKILL '{args.skill_name}'.\n"
+            f"  Evolvable SKILLs: {', '.join(list_evolvable_skills())}",
+            file=sys.stderr,
+        )
+        return 2
+
     skill_dir = _skills_root() / args.skill_name
     if not skill_dir.exists():
         print(f"ERROR: no SKILL directory at {skill_dir}", file=sys.stderr)
@@ -144,7 +157,11 @@ def _cmd_evolve(args: argparse.Namespace) -> int:
     print(f"  evolution_log.id = {result.evolution_log_id}")
     print(f"  SKILL.md         = {result.new_skill_path}")
     print()
-    print(_format_metric_table(result.metric_before, result.metric_after))
+    print(
+        _format_metric_table(
+            result.metric_before, result.metric_after, axes=adapter.METRIC_AXES
+        )
+    )
     return 0
 
 
@@ -180,15 +197,28 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return 0
 
 
-def _format_metric_table(before: dict[str, float], after: dict[str, float]) -> str:
-    lines = ["  metric  before   after    Δ"]
-    lines.append("  " + "─" * 32)
-    for axis in ("total", "prob", "recall", "anti"):
+def _format_metric_table(
+    before: dict[str, float],
+    after: dict[str, float],
+    *,
+    axes: list[str] | None = None,
+) -> str:
+    """Pretty-print a 4-column table over the given metric axes.
+
+    ``axes`` defaults to score_match's axes; pass the adapter's
+    ``METRIC_AXES`` for SKILL-specific axis naming.
+    """
+    if axes is None:
+        axes = ["total", "prob", "recall", "anti"]
+    width = max(8, max(len(a) for a in axes) + 2)
+    lines = [f"  {'metric':{width}} before   after    Δ"]
+    lines.append("  " + "─" * (width + 24))
+    for axis in axes:
         b = before.get(axis, 0.0)
         a = after.get(axis, 0.0)
         d = a - b
         sign = "+" if d >= 0 else ""
-        lines.append(f"  {axis:7s} {b:5.2f}    {a:5.2f}   {sign}{d:5.2f}")
+        lines.append(f"  {axis:{width}} {b:5.2f}    {a:5.2f}   {sign}{d:5.2f}")
     return "\n".join(lines)
 
 

@@ -156,7 +156,7 @@ def test_evolve_skill_end_to_end_with_mocked_gepa(
 
     eval_calls: list[dspy.Module] = []
 
-    def fake_evaluate(*, student, examples, input_names):
+    def fake_evaluate(*, student, examples, input_names, metric_fn=None):
         eval_calls.append(student)
         # First call (baseline) returns lower; second call (post) returns higher
         is_first = len(eval_calls) == 1
