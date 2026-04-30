@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Compare{% endblock %}
+{% block content %}
+
+<div class="page-title">
+    <div>
+        <h1>同公司多职位 — 投哪个</h1>
+        <p>有的公司只能投 1-3 个职位（字节校招 2 / 阿里 3 / 淘天 3）。
+        这页帮你从 DB 里同公司的所有 JD 里选最该投的那几个。</p>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>有 ≥ 2 个职位的公司</h2>
+        <span class="meta">{{ company_groups|length }} 家</span>
+    </div>
+
+    {% if not company_groups %}
+    <div class="empty">
+        <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📊</div>
+        <div>DB 里还没有 ≥ 2 个 JD 的公司</div>
+        <div class="small muted">从 Chat / Boss 扩展 / 牛客 crawler 多导入几个 JD 即可</div>
+    </div>
+    {% else %}
+    <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+        {% for g in company_groups %}
+        <a href="/compare?company={{ g.company|urlencode }}"
+           class="btn secondary"
+           style="text-decoration:none;{% if selected_company == g.company %}background:var(--primary-soft);color:var(--primary-hover);border-color:var(--primary);{% endif %}">
+            {{ g.company }} <span class="muted small">· {{ g.n }} 个</span>
+        </a>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+{% if selected_company and target_jobs %}
+<div class="card">
+    <div class="card-header">
+        <h2>{{ selected_company }} · {{ target_jobs|length }} 个职位</h2>
+        <span class="meta">已知投递限额: {{ target_limit }}</span>
+    </div>
+
+    <p class="muted small" style="margin-top: -0.5rem;">
+        勾选要比较的职位（≥ 2 个），SKILL 会输出"先投 X / 备选 Y / 跳过 Z"的决策表。
+    </p>
+
+    <form hx-post="/compare/run" hx-target="#compare-result" hx-swap="innerHTML"
+          hx-indicator="#compare-spinner" style="margin-top: 0.875rem;">
+        <input type="hidden" name="company" value="{{ selected_company }}">
+        <label class="field" style="max-width:200px;">
+            <span class="label-text">投递限额（可覆盖默认）</span>
+            <input type="number" name="application_limit" min="0" max="20" value="{{ target_limit }}">
+        </label>
+
+        <div style="margin: 0.875rem 0; display: flex; flex-direction: column; gap: 0.5rem;">
+            {% for j in target_jobs %}
+            <label class="job-row" style="display:flex;align-items:flex-start;gap:0.625rem;
+                   padding:0.625rem 0.875rem;border:1px solid var(--border);border-radius:var(--radius-sm);
+                   background:var(--bg-elev);cursor:pointer;">
+                <input type="checkbox" name="job_ids" value="{{ j.id }}" checked>
+                <div style="flex:1;">
+                    <div style="font-weight: 500;">#{{ j.id }} · {{ j.title or '(无标题)' }}</div>
+                    <div class="muted small">
+                        {% if j.location %}{{ j.location }} · {% endif %}{{ j.source }}
+                    </div>
+                    {% if j.raw_text %}
+                    <div class="muted small" style="margin-top:0.25rem;">
+                        {{ j.raw_text[:150] }}{% if j.raw_text|length > 150 %}…{% endif %}
+                    </div>
+                    {% endif %}
+                </div>
+            </label>
+            {% endfor %}
+        </div>
+
+        <div class="actions">
+            <button type="submit">运行比较</button>
+            <span id="compare-spinner" class="muted htmx-indicator">⏳ 调用 LLM 中…</span>
+        </div>
+    </form>
+</div>
+{% endif %}
+
+<div id="compare-result"></div>
+
+{% endblock %}

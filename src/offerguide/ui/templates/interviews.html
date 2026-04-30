@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — 面经{% endblock %}
+{% block content %}
+
+<div class="page-title">
+    <div>
+        <h1>面经库</h1>
+        <p>从 小红书 / 知乎 / 一亩三分地 / 牛客 复制 → 粘贴到这里 → 入 SQLite。
+        retrieval 在 prepare_interview 和 deep_project_prep 里被自动用作 ``past_experiences`` 信号。</p>
+    </div>
+</div>
+
+{% if companies %}
+<div class="card">
+    <div class="card-header">
+        <h2>已收录公司 · {{ companies|length }}</h2>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+        <a href="/interviews" class="btn secondary"
+           style="text-decoration:none;{% if not selected_company %}background:var(--primary-soft);color:var(--primary-hover);border-color:var(--primary);{% endif %}">
+            全部 <span class="muted small">· {{ experiences|length }}</span>
+        </a>
+        {% for c in companies %}
+        <a href="/interviews?company={{ c.company|urlencode }}" class="btn secondary"
+           style="text-decoration:none;{% if selected_company == c.company %}background:var(--primary-soft);color:var(--primary-hover);border-color:var(--primary);{% endif %}">
+            {{ c.company }} <span class="muted small">· {{ c.n }}</span>
+        </a>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-header">
+        <h2>粘贴新面经</h2>
+    </div>
+    <form hx-post="/api/interviews/paste" hx-target="#interview-list" hx-swap="innerHTML"
+          hx-on::after-request="if(event.detail.successful) this.reset()">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.625rem;margin-bottom:0.625rem;">
+            <label class="field">
+                <span class="label-text">公司</span>
+                <input type="text" name="company" placeholder="例: 字节跳动" required>
+            </label>
+            <label class="field">
+                <span class="label-text">岗位线索（可空）</span>
+                <input type="text" name="role_hint" placeholder="例: AI Agent 实习">
+            </label>
+            <label class="field">
+                <span class="label-text">来源</span>
+                <select name="source">
+                    <option value="manual_paste">manual_paste（默认）</option>
+                    <option value="xiaohongshu">小红书</option>
+                    <option value="zhihu">知乎</option>
+                    <option value="1point3acres">一亩三分地</option>
+                    <option value="nowcoder_discuss">牛客 discuss</option>
+                </select>
+            </label>
+        </div>
+        <label class="field">
+            <span class="label-text">面经全文</span>
+            <textarea name="raw_text" placeholder="粘贴面经原文…&#10;支持任意来源 — 平台禁止爬虫的，复制粘贴是合规路径"
+                      required style="min-height: 12rem;"></textarea>
+        </label>
+        <label class="field" style="margin-top: 0.5rem;">
+            <span class="label-text">来源 URL（可空，记录证据）</span>
+            <input type="text" name="source_url" placeholder="例: https://www.xiaohongshu.com/...">
+        </label>
+        <div class="actions" style="margin-top: 0.75rem;">
+            <button type="submit">入库</button>
+            <span class="muted small">同 (source, content_hash) 重复会被跳过</span>
+        </div>
+    </form>
+</div>
+
+<div id="interview-list">
+    {% include "_interview_list.html" %}
+</div>
+
+{% endblock %}

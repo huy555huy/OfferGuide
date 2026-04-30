@@ -1,0 +1,116 @@
+{% if error %}
+<div class="card"><div class="error">⚠ {{ error }}</div></div>
+{% elif comparison %}
+<div class="card">
+    <div class="card-header">
+        <h2>{{ comparison.company }} · 比较结果</h2>
+        <span class="meta">
+            限额={{ comparison.application_limit_estimate }}
+            ({{ comparison.application_limit_source }}) ·
+            推荐投递 {{ comparison.recommended_apply_count }} 个 ·
+            run #{{ run_id }}
+        </span>
+    </div>
+
+    <div style="margin-bottom: 1rem; padding: 0.75rem 1rem; background: var(--primary-soft);
+                border-radius: var(--radius-sm); border-left: 3px solid var(--primary);
+                font-size: 0.9rem; line-height: 1.6;">
+        <strong>策略</strong> · {{ comparison.strategic_summary }}
+    </div>
+
+    {% set rank_sorted = comparison.rankings | sort(attribute='rank') %}
+    {% for r in rank_sorted %}
+    {% set j = job_by_id.get(r.job_id, {}) %}
+    <div class="rank-card rank-{{ r.action }}">
+        <div class="rank-head">
+            <div class="rank-num">#{{ r.rank }}</div>
+            <div style="flex:1;">
+                <div style="font-family: var(--font-serif); font-size: 1.05rem; font-weight: 600;">
+                    {{ r.title or j.title or '(无标题)' }}
+                </div>
+                <div class="muted small">
+                    job_id={{ r.job_id }}
+                    {% if j.location %} · {{ j.location }}{% endif %}
+                    {% if j.source %} · {{ j.source }}{% endif %}
+                </div>
+            </div>
+            <div class="rank-meta">
+                <span class="action-pill action-{{ r.action }}">{{ r.action }}</span>
+                <div class="muted small" style="margin-top:0.25rem;text-align:right;">
+                    match {{ "%.0f"|format(r.match_probability * 100) }}%
+                    · 竞争 {{ "%.0f"|format(r.competitiveness_estimate * 100) }}%
+                </div>
+            </div>
+        </div>
+
+        {% if r.profile_alignment %}
+        <div class="dim-list" style="margin: 0.5rem 0;">
+            <div class="dim"><span class="name">tech</span>
+                <span class="val">{{ "%.2f"|format(r.profile_alignment.tech) }}</span></div>
+            <div class="dim"><span class="name">exp</span>
+                <span class="val">{{ "%.2f"|format(r.profile_alignment.exp) }}</span></div>
+            <div class="dim"><span class="name">culture</span>
+                <span class="val">{{ "%.2f"|format(r.profile_alignment.culture) }}</span></div>
+        </div>
+        {% endif %}
+
+        {% if r.distinguishing_factors %}
+        <div style="margin: 0.375rem 0 0.25rem;">
+            <span class="muted small" style="margin-right:0.375rem;">独有:</span>
+            {% for f in r.distinguishing_factors %}
+            <span class="pill primary" style="margin-right:0.25rem;">✦ {{ f }}</span>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if r.risk_factors %}
+        <div style="margin: 0.375rem 0;">
+            <span class="muted small" style="margin-right:0.375rem;">风险:</span>
+            {% for f in r.risk_factors %}
+            <span class="pill medium" style="margin-right:0.25rem;">⚠ {{ f }}</span>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if r.reasoning %}
+        <div class="muted small" style="margin-top: 0.5rem; line-height: 1.55;">
+            {{ r.reasoning }}
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+
+<style>
+.rank-card {
+    padding: 0.875rem 1rem; margin-bottom: 0.625rem;
+    background: var(--bg-elev); border: 1px solid var(--border);
+    border-radius: var(--radius); border-left: 4px solid var(--text-dim);
+}
+.rank-card.rank-apply_first       { border-left-color: var(--success); background: var(--success-soft); }
+.rank-card.rank-apply_backup      { border-left-color: var(--primary); }
+.rank-card.rank-apply_if_capacity { border-left-color: var(--warning); }
+.rank-card.rank-skip              { border-left-color: var(--text-dim); opacity: 0.7; }
+
+.rank-head { display: flex; gap: 0.875rem; align-items: flex-start; }
+.rank-num {
+    font-family: var(--font-serif);
+    font-size: 1.4rem; font-weight: 600;
+    color: var(--text-muted); line-height: 1; margin-top: 0.125rem;
+    min-width: 2rem;
+}
+.rank-meta { text-align: right; }
+
+.action-pill {
+    display: inline-block; padding: 0.25rem 0.625rem; border-radius: 999px;
+    font-size: 0.75rem; font-weight: 600;
+}
+.action-apply_first       { background: var(--success); color: white; }
+.action-apply_backup      { background: var(--primary); color: white; }
+.action-apply_if_capacity { background: var(--warning); color: white; }
+.action-skip              { background: var(--bg-subtle); color: var(--text-muted); }
+</style>
+
+{% else %}
+<div class="card"><div class="empty">运行后结果会显示在这里。</div></div>
+{% endif %}

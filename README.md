@@ -6,7 +6,11 @@
 
 ![dashboard](docs/screenshots/dashboard.png)
 
-> Claude-inspired warm cream + terracotta visual system. 来自跑活的服务器抓的真实截图，不是 mock。
+> Claude-inspired warm cream + terracotta + Source Serif 4。截图来自跑活的服务器，不是 mock。
+
+| Compare (同公司多职位投哪个) | 面经库 (小红书/知乎/牛客 paste-in) |
+|---|---|
+| ![compare](docs/screenshots/compare.png) | ![interviews](docs/screenshots/interviews.png) |
 
 | Applications (1-click 事件追踪) | Chat report (深度项目备战 + 评分 + 差距) |
 |---|---|
@@ -44,6 +48,7 @@ agent 的 SKILL prompt。
 │     ★ prepare_interview  — 公司画像 + 题目预测 + 备战重点              │
 │     ★ deep_project_prep  — 项目级深挖：每个项目 5+ 题 + 答题骨架       │
 │                            + 弱点应对 + behavioral STAR (W8'')        │
+│     ★ compare_jobs       — 同公司多职位投哪个 + 投递限额优化 (W8''')   │
 │                                                                     │
 │   utility SKILLs:                                                   │
 │       update_status     — 应用状态机                                 │
@@ -296,6 +301,12 @@ tests/                    # 329 tests, all green
        (4th evolvable SKILL): per-project deep-dive prep with answer outlines + weak-point
        mitigation + tailored behavioral questions; `docs/tracking_strategy.md` 诚实记录
        5 个信号源的实现状态
+- [x] **W8'''** — 投递组合优化 + 真实 HR 信号路径：**新 SKILL `compare_jobs`** (5th
+       evolvable SKILL) + `/compare` 页面，按公司投递限额（字节校招硬限 2 / 阿里 3 /
+       淘天 3 / 等真实 policy）做横向比较 → "先投 X / 备选 Y / 跳过 Z" 决策表；
+       `email_classifier` paste-in 邮件分类器（无 IMAP，不碰隐私）；`ics_parser` ICS
+       日历上传 → 自动 record interview 事件 + scheduled_at；`/interviews` 面经库 paste
+       UI（小红书 / 知乎 / 一亩三分地 / 牛客 discuss 全 source）
 - [ ] **dogfood** — 4 周持续投递收集真实 reply rate 数据；跑首次 GEPA 真活；填 `[TBD]` 数字
 
 ### What's still TBD（需 dogfood 数据）

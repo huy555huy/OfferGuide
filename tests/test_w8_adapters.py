@@ -38,6 +38,7 @@ class TestRegistry:
             "analyze_gaps",
             "prepare_interview",
             "deep_project_prep",
+            "compare_jobs",
         }
 
     def test_get_adapter_returns_module(self) -> None:

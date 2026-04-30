@@ -100,6 +100,119 @@ def create_app(
             ),
         )
 
+    @app.get("/compare", response_class=HTMLResponse)
+    def compare_view(request: Request, company: str = "") -> Any:
+        """List companies with ≥2 jobs; show comparison form for one company."""
+        from ..skills.compare_jobs.helpers import lookup_application_limit
+
+        company_groups = _list_company_groups(store)
+
+        target_jobs: list[dict] | None = None
+        target_limit: int | None = None
+        if company:
+            target_jobs = _list_jobs_for_company(store, company)
+            target_limit = lookup_application_limit(company)
+
+        return templates.TemplateResponse(
+            request,
+            "compare.html",
+            _ctx(
+                request,
+                company_groups=company_groups,
+                selected_company=company,
+                target_jobs=target_jobs,
+                target_limit=target_limit,
+                active_tab="compare",
+            ),
+        )
+
+    @app.post("/compare/run", response_class=HTMLResponse)
+    def compare_run(
+        request: Request,
+        company: str = Form(...),
+        application_limit: str = Form(""),
+        job_ids: list[str] = Form(...),  # noqa: B008
+    ) -> Any:
+        """Run compare_jobs SKILL on selected jobs."""
+        if profile is None:
+            return templates.TemplateResponse(
+                request, "_compare_result.html",
+                _ctx(request, error="未加载简历——设 OFFERGUIDE_RESUME_PDF 后重启。"),
+            )
+        if runtime is None:
+            return templates.TemplateResponse(
+                request, "_compare_result.html",
+                _ctx(request, error="未配置 LLM——设 DEEPSEEK_API_KEY 后重启。"),
+            )
+
+        # Resolve job_ids → full job records
+        try:
+            ids = [int(s) for s in job_ids if s]
+        except ValueError:
+            raise HTTPException(400, "job_ids must be integers") from None
+        if len(ids) < 2:
+            return templates.TemplateResponse(
+                request, "_compare_result.html",
+                _ctx(request, error="至少要选 2 个职位才有比较的意义。"),
+            )
+        if len(ids) > 10:
+            return templates.TemplateResponse(
+                request, "_compare_result.html",
+                _ctx(request, error="一次最多比较 10 个职位（避免 LLM 上下文过载）。"),
+            )
+
+        rows = _list_jobs_by_ids(store, ids)
+        import json as _json
+        jobs_json = _json.dumps(
+            [
+                {"job_id": r["id"], "title": r["title"] or "(无标题)",
+                 "raw_text": r["raw_text"][:1500],
+                 "source": r["source"]}
+                for r in rows
+            ],
+            ensure_ascii=False,
+        )
+
+        # Find SKILL spec
+        spec = next((s for s in skills if s.name == "compare_jobs"), None)
+        if spec is None:
+            return templates.TemplateResponse(
+                request, "_compare_result.html",
+                _ctx(request, error="compare_jobs SKILL 未加载，检查 skills/ 目录。"),
+            )
+
+        try:
+            result = runtime.invoke(
+                spec,
+                {
+                    "company": company,
+                    "user_profile": profile.raw_resume_text,
+                    "jobs_json": jobs_json,
+                },
+            )
+        except LLMError as e:
+            return templates.TemplateResponse(
+                request, "_compare_result.html",
+                _ctx(request, error=f"LLM 调用失败: {e}"),
+            )
+
+        # Build a job_id → full job record lookup so the template can
+        # link rankings back to the source jobs
+        job_by_id = {r["id"]: r for r in rows}
+
+        return templates.TemplateResponse(
+            request,
+            "_compare_result.html",
+            _ctx(
+                request,
+                comparison=result.parsed,
+                run_id=result.skill_run_id,
+                job_by_id=job_by_id,
+                company=company,
+                application_limit_user=application_limit,
+            ),
+        )
+
     @app.get("/applications", response_class=HTMLResponse)
     def applications_view(request: Request) -> Any:
         rows = _list_applications_with_events(store)
@@ -146,6 +259,157 @@ def create_app(
             "_application_card.html",
             _ctx(request, app=rows[0]),
         )
+
+    @app.get("/interviews", response_class=HTMLResponse)
+    def interviews_view(request: Request, company: str = "") -> Any:
+        """List 面经 corpus + paste-in form for adding more."""
+        companies = _list_interview_companies(store)
+        experiences = (
+            _list_interview_experiences(store, company=company)
+            if company
+            else _list_interview_experiences(store, limit=20)
+        )
+        return templates.TemplateResponse(
+            request, "interviews.html",
+            _ctx(
+                request,
+                companies=companies,
+                experiences=experiences,
+                selected_company=company,
+                active_tab="interviews",
+            ),
+        )
+
+    @app.post("/api/interviews/paste", response_class=HTMLResponse)
+    def interviews_paste(
+        request: Request,
+        company: str = Form(...),
+        raw_text: str = Form(...),
+        source: str = Form("manual_paste"),
+        role_hint: str = Form(""),
+        source_url: str = Form(""),
+    ) -> Any:
+        from .. import interview_corpus
+        if not company.strip() or not raw_text.strip():
+            raise HTTPException(400, "company 和 raw_text 都必填")
+        try:
+            was_new, exp_id = interview_corpus.insert(
+                store,
+                company=company.strip(),
+                raw_text=raw_text.strip(),
+                source=source.strip() or "manual_paste",
+                role_hint=role_hint.strip() or None,
+                source_url=source_url.strip() or None,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+
+        # Return the updated list fragment for HTMX swap
+        experiences = _list_interview_experiences(store, company=company.strip())
+        return templates.TemplateResponse(
+            request, "_interview_list.html",
+            _ctx(request, experiences=experiences, just_added=exp_id, was_new=was_new),
+        )
+
+    @app.post("/api/email/classify", response_class=JSONResponse)
+    def email_classify_endpoint(payload: EmailClassifyPayload) -> dict:
+        """Classify pasted-in email text(s) → application event kinds."""
+        from .. import email_classifier as ec
+
+        # Build the company → app_ids index from real DB state
+        with store.connect() as conn:
+            rows = conn.execute(
+                "SELECT j.company, a.id FROM applications a "
+                "JOIN jobs j ON j.id = a.job_id "
+                "WHERE j.company IS NOT NULL AND j.company != '' "
+                "AND a.status NOT IN ('rejected', 'offer', 'withdrawn')"
+            ).fetchall()
+        known_apps_by_company: dict[str, list[int]] = {}
+        known_companies: list[str] = []
+        for company, app_id in rows:
+            known_apps_by_company.setdefault(company, []).append(app_id)
+            if company not in known_companies:
+                known_companies.append(company)
+
+        if payload.batch:
+            chunks = ec.split_email_dump(payload.text)
+        else:
+            chunks = [payload.text] if payload.text.strip() else []
+
+        results = ec.classify_batch(
+            chunks,
+            known_companies=known_companies,
+            known_apps_by_company=known_apps_by_company,
+        )
+
+        return {
+            "count": len(results),
+            "results": [
+                {
+                    "kind": r.kind,
+                    "confidence": r.confidence,
+                    "matched_company": r.matched_company,
+                    "matched_application_id": r.matched_application_id,
+                    "evidence": r.evidence,
+                }
+                for r in results
+            ],
+        }
+
+    @app.post("/api/applications/{app_id}/events/ics", response_class=JSONResponse)
+    def applications_log_ics(
+        app_id: int,
+        ics_text: str = Form(...),
+    ) -> dict:
+        """Upload an ICS calendar file → record interview event(s)."""
+        from .. import application_events as ae
+        from .. import ics_parser
+        from ..state_machine import sync_status
+
+        events = ics_parser.parse_ics(ics_text)
+        chosen = ics_parser.select_first_interview(events)
+        if chosen is None:
+            raise HTTPException(
+                400,
+                "ICS file did not contain a recognizable interview event "
+                "(no 面试/interview keyword in summary/description).",
+            )
+
+        occurred_at = (
+            ics_parser.datetime_to_julianday(chosen.dtstart_utc)
+            if chosen.dtstart_utc
+            else None
+        )
+        try:
+            ae.record(
+                store,
+                application_id=app_id,
+                kind="interview",
+                source="calendar",
+                occurred_at=occurred_at,
+                payload={
+                    "summary": chosen.summary[:200],
+                    "scheduled_at": (
+                        chosen.dtstart_utc.isoformat()
+                        if chosen.dtstart_utc
+                        else None
+                    ),
+                    "description": chosen.description[:500],
+                    "ics_event_count": len(events),
+                },
+            )
+        except Exception as e:
+            raise HTTPException(400, f"failed to record: {e}") from None
+        sync_status(store, app_id, "interview")
+
+        return {
+            "ok": True,
+            "application_id": app_id,
+            "scheduled_at": (
+                chosen.dtstart_utc.isoformat() if chosen.dtstart_utc else None
+            ),
+            "summary": chosen.summary,
+        }
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard_view(request: Request) -> Any:
@@ -339,6 +603,18 @@ class ExtensionJDPayload(BaseModel):
     salary: str | None = None
     description: str
     tags: list[str] = []
+
+
+class EmailClassifyPayload(BaseModel):
+    """Request body for /api/email/classify.
+
+    ``text`` can be a single email or a multi-email dump (with
+    'From: ' separators or 2+ blank-line separators) — set
+    ``batch=True`` to split before classifying.
+    """
+
+    text: str
+    batch: bool = True
 
 
 _BOSS_ID_RE = re.compile(r"/job_detail/([^/.]+)")
@@ -588,6 +864,96 @@ def _julian_to_human(jd: float) -> str:
     age_days = max(0.0, now_jd - jd)
     seconds = age_days * 86400
     return _humanize_age(seconds)
+
+
+def _list_company_groups(store: Store) -> list[dict[str, Any]]:
+    """Companies with ≥ 2 jobs in the DB, with job counts.
+
+    Used by /compare to suggest which groups are worth comparing.
+    Sorted by job count desc.
+    """
+    with store.connect() as conn:
+        rows = conn.execute(
+            "SELECT company, COUNT(*) AS n FROM jobs "
+            "WHERE company IS NOT NULL AND company != '' "
+            "GROUP BY company HAVING COUNT(*) >= 2 ORDER BY n DESC, company ASC"
+        ).fetchall()
+    return [{"company": r[0], "n": r[1]} for r in rows]
+
+
+def _list_jobs_for_company(store: Store, company: str) -> list[dict[str, Any]]:
+    """All jobs in the DB for a company, newest first."""
+    with store.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, title, location, source, raw_text "
+            "FROM jobs WHERE company = ? ORDER BY fetched_at DESC, id DESC",
+            (company,),
+        ).fetchall()
+    return [
+        {
+            "id": r[0], "title": r[1], "location": r[2],
+            "source": r[3], "raw_text": r[4] or "",
+        }
+        for r in rows
+    ]
+
+
+def _list_interview_companies(store: Store) -> list[dict[str, Any]]:
+    """Companies with stored 面经, with counts."""
+    with store.connect() as conn:
+        rows = conn.execute(
+            "SELECT company, COUNT(*) FROM interview_experiences "
+            "GROUP BY company ORDER BY COUNT(*) DESC, company ASC"
+        ).fetchall()
+    return [{"company": r[0], "n": r[1]} for r in rows]
+
+
+def _list_interview_experiences(
+    store: Store, *, company: str | None = None, limit: int = 50
+) -> list[dict[str, Any]]:
+    """Recent 面经, optionally filtered by company."""
+    with store.connect() as conn:
+        if company:
+            rows = conn.execute(
+                "SELECT id, company, role_hint, raw_text, source, source_url, created_at "
+                "FROM interview_experiences WHERE company LIKE ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (f"%{company}%", limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, company, role_hint, raw_text, source, source_url, created_at "
+                "FROM interview_experiences ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [
+        {
+            "id": r[0], "company": r[1], "role_hint": r[2], "raw_text": r[3],
+            "source": r[4], "source_url": r[5], "created_at": r[6],
+        }
+        for r in rows
+    ]
+
+
+def _list_jobs_by_ids(store: Store, ids: list[int]) -> list[dict[str, Any]]:
+    """Fetch a specific set of jobs by id, in input order."""
+    if not ids:
+        return []
+    placeholders = ",".join("?" * len(ids))
+    with store.connect() as conn:
+        rows = conn.execute(
+            f"SELECT id, title, company, location, source, raw_text "
+            f"FROM jobs WHERE id IN ({placeholders})",
+            tuple(ids),
+        ).fetchall()
+    by_id = {
+        r[0]: {
+            "id": r[0], "title": r[1], "company": r[2], "location": r[3],
+            "source": r[4], "raw_text": r[5] or "",
+        }
+        for r in rows
+    }
+    return [by_id[i] for i in ids if i in by_id]
 
 
 def _to_julian(dt) -> float:

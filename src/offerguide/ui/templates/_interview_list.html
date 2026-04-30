@@ -1,0 +1,42 @@
+<div class="card">
+    <div class="card-header">
+        <h2>{% if selected_company %}{{ selected_company }} · {% endif %}最近面经 · {{ experiences|length }}</h2>
+        {% if just_added is defined %}
+        <span class="meta">
+            {% if was_new %}
+            <span style="color: var(--success);">✓ 新增 #{{ just_added }}</span>
+            {% else %}
+            <span style="color: var(--text-muted);">⊙ 已存在 #{{ just_added }} (重复)</span>
+            {% endif %}
+        </span>
+        {% endif %}
+    </div>
+
+    {% if not experiences %}
+    <div class="empty">
+        <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📚</div>
+        <div>还没有面经</div>
+        <div class="small muted">从 小红书 / 知乎 / 一亩三分地 找一篇粘进上面的表单</div>
+    </div>
+    {% else %}
+    {% for e in experiences %}
+    <div style="padding: 0.75rem 0.875rem; margin-bottom: 0.5rem; background: var(--bg-elev);
+                border: 1px solid var(--border); border-radius: var(--radius-sm);">
+        <div style="display:flex;gap:0.5rem;align-items:center;margin-bottom:0.375rem;">
+            <span class="pill primary">{{ e.company }}</span>
+            {% if e.role_hint %}<span class="pill">{{ e.role_hint }}</span>{% endif %}
+            <span class="pill">{{ e.source }}</span>
+            <span class="muted small" style="margin-left:auto;">#{{ e.id }}</span>
+        </div>
+        <div style="font-size: 0.875rem; line-height: 1.55; max-height: 8rem; overflow: hidden; position: relative;">
+            {{ e.raw_text[:600] }}{% if e.raw_text|length > 600 %}…{% endif %}
+        </div>
+        {% if e.source_url %}
+        <div class="muted small" style="margin-top: 0.375rem;">
+            🔗 <a href="{{ e.source_url }}" target="_blank">来源</a>
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+</div>
