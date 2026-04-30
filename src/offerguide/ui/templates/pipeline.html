@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Pipeline{% endblock %}
+{% block content %}
+
+<style>
+    /* Kanban board layout */
+    .kanban {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 0.625rem;
+        margin-top: 0.75rem;
+    }
+    .kanban-col {
+        background: var(--bg-subtle);
+        border: 1px solid var(--border-soft);
+        border-radius: var(--radius);
+        padding: 0.625rem;
+        min-height: 320px;
+        display: flex; flex-direction: column;
+    }
+    .kanban-col-head {
+        display: flex; align-items: baseline; gap: 0.5rem;
+        padding: 0 0.25rem 0.5rem;
+        border-bottom: 1px solid var(--border-soft);
+        margin-bottom: 0.5rem;
+    }
+    .kanban-col-head .name {
+        font-family: var(--font-serif);
+        font-size: 0.95rem; font-weight: 600;
+        letter-spacing: -0.01em;
+    }
+    .kanban-col-head .count {
+        font-family: var(--font-mono);
+        font-size: 0.75rem; color: var(--text-muted);
+        background: var(--bg-elev); padding: 0.05rem 0.45rem;
+        border-radius: 999px; border: 1px solid var(--border-soft);
+    }
+    .kanban-col[data-stage="contacted"] { border-top: 3px solid var(--warning); }
+    .kanban-col[data-stage="interview"] { border-top: 3px solid var(--primary); }
+    .kanban-col[data-stage="terminal"]  { opacity: 0.85; }
+
+    .kanban-cards {
+        display: flex; flex-direction: column; gap: 0.5rem;
+        flex: 1; min-height: 60px;
+    }
+    .kanban-empty {
+        font-size: 0.78rem; color: var(--text-dim);
+        text-align: center; padding: 1rem 0.25rem;
+        font-style: italic;
+        border: 1px dashed var(--border);
+        border-radius: var(--radius-sm);
+    }
+
+    /* Card body — defined here, used both inline + by HTMX swap */
+    .kcard {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 0.625rem 0.75rem;
+        font-size: 0.8rem;
+        position: relative;
+        transition: border-color 0.12s, transform 0.06s;
+    }
+    .kcard:hover {
+        border-color: var(--primary);
+        transform: translateY(-1px);
+    }
+    .kcard .company {
+        font-family: var(--font-serif); font-weight: 600;
+        font-size: 0.92rem; color: var(--text);
+        margin-bottom: 0.125rem;
+    }
+    .kcard .title {
+        color: var(--text-muted); font-size: 0.78rem;
+        line-height: 1.35; overflow: hidden;
+        display: -webkit-box; -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+    }
+    .kcard .badges {
+        display: flex; gap: 0.25rem; align-items: center;
+        margin-top: 0.5rem; flex-wrap: wrap;
+    }
+    .kcard .age {
+        font-family: var(--font-mono); font-size: 0.7rem;
+        color: var(--text-muted);
+    }
+    .kcard .age.urgent { color: var(--danger); font-weight: 600; }
+
+    /* Inline transition menu — show on hover for desktop, always for touch */
+    .kcard .menu {
+        margin-top: 0.5rem;
+        display: flex; gap: 0.25rem; flex-wrap: wrap;
+        opacity: 0; transition: opacity 0.15s;
+    }
+    .kcard:hover .menu, .kcard:focus-within .menu { opacity: 1; }
+    .kcard .menu form { display: inline; }
+    .kcard .menu button {
+        background: var(--bg-subtle); color: var(--text-muted);
+        border: 1px solid var(--border-soft);
+        padding: 0.18rem 0.45rem; font-size: 0.7rem;
+        border-radius: var(--radius-sm); cursor: pointer;
+        font-weight: 500;
+    }
+    .kcard .menu button:hover {
+        background: var(--primary-soft); color: var(--primary);
+        border-color: var(--primary-soft);
+    }
+    .kcard .menu button.danger:hover {
+        background: var(--danger-soft); color: var(--danger);
+        border-color: var(--danger-soft);
+    }
+
+    .kcard.no-events { border-style: dashed; }
+
+    @media (max-width: 920px) {
+        .kanban {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            overflow-x: auto;
+        }
+    }
+    @media (max-width: 600px) {
+        .kanban {
+            grid-template-columns: repeat(5, 220px);
+            overflow-x: auto;
+        }
+    }
+</style>
+
+<div class="page-title">
+    <div>
+        <h1>Pipeline · 投递战况</h1>
+        <p>{{ pipeline.total_active }} 个 active · {{ pipeline.counts.terminal }} 个已结束。每张卡片悬停可见操作按钮 — 一键推进状态，状态自动同步到 application_events。</p>
+    </div>
+    <a href="/quick-eval" class="btn secondary">+ 评估新 JD</a>
+</div>
+
+{# Always render the 5-column kanban. Empty DB → all columns empty,
+   each shows "空" placeholder. We surface a banner explaining what
+   to do when truly empty, but keep the structure visible so users
+   learn the lifecycle. #}
+{% if pipeline.total_active == 0 and pipeline.counts.terminal == 0 %}
+<div class="card" style="background: var(--primary-soft); border-color: var(--primary);">
+    <div style="display: flex; gap: 0.75rem; align-items: center;">
+        <span style="font-size: 1.5rem;">📋</span>
+        <div style="flex: 1;">
+            <div style="font-weight: 600;">Pipeline 还是空的</div>
+            <div class="muted small">
+                先去 <a href="/quick-eval">评估</a> 一份 JD，或用浏览器扩展从 Boss 直接抓 —— 抓进来后这里会自动出现卡片
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<div class="kanban">
+    {% for stage_key, stage_label in pipeline_stages %}
+    <div class="kanban-col" data-stage="{{ stage_key }}" id="col-{{ stage_key }}">
+        <div class="kanban-col-head">
+            <span class="name">{{ stage_label }}</span>
+            <span class="count">{{ pipeline.counts[stage_key] }}</span>
+        </div>
+        <div class="kanban-cards">
+            {% if pipeline.columns[stage_key] %}
+                {% for card in pipeline.columns[stage_key] %}
+                {% with stage_key=stage_key, card=card %}
+                {% include "_kanban_card.html" %}
+                {% endwith %}
+                {% endfor %}
+            {% else %}
+            <div class="kanban-empty">空</div>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% endblock %}

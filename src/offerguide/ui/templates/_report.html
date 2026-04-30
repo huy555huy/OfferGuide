@@ -4,6 +4,74 @@
 </div>
 {% else %}
 
+{# ─── Verdict card (top of report when ≥2 SKILLs ran) ────── #}
+{% if verdict %}
+<div class="card" style="
+    border-left: 4px solid
+    {% if verdict.kind == 'go' %}var(--success)
+    {% elif verdict.kind == 'maybe' %}var(--warning)
+    {% elif verdict.kind == 'hold' %}var(--warning)
+    {% else %}var(--danger){% endif %};
+    background: {% if verdict.kind == 'go' %}var(--success-soft)
+    {% elif verdict.kind == 'maybe' %}var(--bg-elev)
+    {% elif verdict.kind == 'hold' %}var(--warning-soft)
+    {% else %}var(--danger-soft){% endif %};
+    margin-bottom: 1rem;
+">
+    <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 0.625rem;">
+        <span class="pill {% if verdict.kind == 'go' %}low{% elif verdict.kind == 'skip' %}high{% else %}medium{% endif %}"
+              style="font-size: 0.85rem; padding: 0.25rem 0.75rem;">
+            {% if verdict.kind == 'go' %}✓{% elif verdict.kind == 'maybe' %}~{% elif verdict.kind == 'hold' %}⏸{% else %}✗{% endif %}
+            {{ verdict.label }}
+        </span>
+        <h2 style="margin: 0; font-family: var(--font-serif); font-size: 1.05rem; flex: 1;">
+            综合判断
+        </h2>
+        <span class="muted small">
+            优先级 <strong style="color: var(--text); font-family: var(--font-mono);">{{ "%.0f"|format(verdict.overall_score * 100) }}</strong> / 100
+        </span>
+    </div>
+
+    <p style="margin: 0 0 0.75rem; font-size: 0.95rem; color: var(--text);">
+        {{ verdict.summary }}
+    </p>
+
+    {% if verdict.pillars %}
+    <div style="display: flex; gap: 0.375rem; flex-wrap: wrap; margin-bottom: 0.75rem;">
+        {% for k, v in verdict.pillars.items() %}
+        <span class="pill primary" style="font-size: 0.72rem;">{{ k }}: {{ v }}</span>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if verdict.actions %}
+    <div style="border-top: 1px dashed var(--border-soft); padding-top: 0.625rem; margin-top: 0.5rem;">
+        <div class="section-title" style="margin: 0 0 0.5rem;">下一步行动</div>
+        {% for a in verdict.actions %}
+        <div style="
+            display: flex; align-items: flex-start; gap: 0.5rem;
+            padding: 0.4rem 0; border-bottom: 1px solid var(--border-soft);
+        ">
+            <span class="pill {% if a.priority == 'high' %}high{% elif a.priority == 'medium' %}medium{% else %}low{% endif %}"
+                  style="font-size: 0.65rem; min-width: 36px; text-align: center;">
+                {% if a.priority == 'high' %}急{% elif a.priority == 'medium' %}中{% else %}缓{% endif %}
+            </span>
+            <div style="flex: 1;">
+                <div style="font-weight: 500; font-size: 0.875rem;">
+                    {{ a.title }}
+                    {% if a.action_url %}
+                    <a href="{{ a.action_url }}" class="muted small" style="margin-left: 0.375rem;">→</a>
+                    {% endif %}
+                </div>
+                <div class="muted small">{{ a.detail }}</div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
 <div class="card">
     <div class="card-header">
         <h2>分析结果</h2>

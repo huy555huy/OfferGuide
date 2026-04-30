@@ -1,80 +1,311 @@
 {% extends "base.html" %}
-{% block title %}OfferGuide — Chat{% endblock %}
+{% block title %}OfferGuide — 今日{% endblock %}
 {% block content %}
+
+<style>
+    /* Daily standup specific bits — avoids blowing up base.html */
+    .standup-grid {
+        display: grid;
+        grid-template-columns: 2fr 1fr;
+        gap: 1rem;
+        margin-bottom: 1.25rem;
+    }
+    @media (max-width: 920px) {
+        .standup-grid { grid-template-columns: 1fr; }
+    }
+    .action-list { margin: 0; padding: 0; list-style: none; }
+    .action-item {
+        display: flex; align-items: flex-start; gap: 0.625rem;
+        padding: 0.625rem 0.75rem; margin-bottom: 0.5rem;
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--text-muted);
+        border-radius: var(--radius-sm);
+        text-decoration: none; color: var(--text);
+        transition: all 0.12s;
+    }
+    .action-item:hover {
+        background: var(--bg-subtle); text-decoration: none;
+        transform: translateX(2px);
+    }
+    .action-item.high   { border-left-color: var(--danger); }
+    .action-item.medium { border-left-color: var(--warning); }
+    .action-item.low    { border-left-color: var(--success); }
+    .action-item .meta { flex: 1; min-width: 0; }
+    .action-item .title { font-weight: 500; font-size: 0.9rem; }
+    .action-item .detail { color: var(--text-muted); font-size: 0.78rem; margin-top: 0.125rem; }
+    .action-item .arrow { color: var(--text-dim); font-size: 1rem; }
+
+    .pipeline-mini {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 0.375rem;
+        margin: 0.25rem 0 0.5rem;
+    }
+    .pmini-col {
+        background: var(--bg-subtle);
+        padding: 0.625rem 0.5rem;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border-soft);
+        text-align: center;
+    }
+    .pmini-col .label {
+        font-size: 0.68rem; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.04em;
+        font-weight: 500;
+    }
+    .pmini-col .num {
+        font-family: var(--font-serif);
+        font-size: 1.4rem; font-weight: 600;
+        color: var(--text); line-height: 1.1;
+        margin-top: 0.25rem;
+    }
+    .pmini-col.contacted .num { color: var(--warning); }
+    .pmini-col.interview .num { color: var(--primary); }
+    .pmini-col.terminal  .num { color: var(--text-dim); }
+
+    .quick-eval-wrap details {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0;
+        box-shadow: var(--shadow-sm);
+    }
+    .quick-eval-wrap summary {
+        list-style: none;
+        padding: 0.875rem 1.25rem;
+        cursor: pointer;
+        display: flex; align-items: center; gap: 0.5rem;
+        font-family: var(--font-serif);
+        font-size: 1.05rem; font-weight: 600;
+        user-select: none;
+    }
+    .quick-eval-wrap summary::-webkit-details-marker { display: none; }
+    .quick-eval-wrap summary::before {
+        content: "▸"; color: var(--text-muted);
+        transition: transform 0.15s; display: inline-block;
+    }
+    .quick-eval-wrap details[open] summary::before { transform: rotate(90deg); }
+    .quick-eval-wrap .body {
+        padding: 0 1.25rem 1.25rem;
+        border-top: 1px solid var(--border-soft);
+        padding-top: 1rem;
+    }
+    .quick-eval-wrap .body .badge {
+        font-size: 0.72rem; color: var(--text-muted);
+        background: var(--bg-subtle);
+        padding: 0.1rem 0.5rem; border-radius: 999px;
+        margin-left: auto;
+    }
+
+    .pillar h3 {
+        margin: 0 0 0.5rem; font-size: 0.85rem; font-weight: 600;
+        color: var(--text-muted); text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    .pillar .row {
+        display: flex; gap: 0.5rem; align-items: center;
+        padding: 0.45rem 0; font-size: 0.85rem;
+        border-bottom: 1px solid var(--border-soft);
+    }
+    .pillar .row:last-child { border-bottom: none; }
+    .pillar .row .name { flex: 1; font-weight: 500; }
+    .pillar .row .meta { color: var(--text-muted); font-size: 0.78rem; }
+    .pillar .empty {
+        font-size: 0.8rem; color: var(--text-muted);
+        padding: 0.5rem 0; font-style: italic;
+    }
+</style>
 
 <div class="page-title">
     <div>
-        <h1>评估一份 JD</h1>
-        <p>粘贴 JD → 选择动作 → 拿到结构化分析。代理会调用相关 SKILL，结果带概率可视化、AI 风险标注、面试题预测。</p>
+        <h1>今日驾驶舱</h1>
+        <p>{% if brief.action_items %}有 {{ brief.action_items|length }} 件事建议你今天处理。{% else %}今天战况平稳——没有紧急待办。{% endif %}投递战况看 <a href="/pipeline">Pipeline</a>，系统状态看 <a href="/dashboard">系统</a>。</p>
     </div>
 </div>
 
-{% if stats %}
+{# ── 4 stat cards ── #}
 <div class="stats">
     <div class="stat">
-        <div class="label">已入库 JD</div>
-        <div class="value">{{ stats.jobs }}</div>
+        <div class="label">沉默待跟进</div>
+        <div class="value">{{ brief.silent_followups|length }}</div>
+        <div class="delta">
+            {% if brief.silent_followups %}
+                最久 {{ brief.silent_followups[0].silence_days|int }} 天 · {{ brief.silent_followups[0].company }}
+            {% else %}所有投递都在节奏内{% endif %}
+        </div>
     </div>
     <div class="stat">
-        <div class="label">SKILL 调用次数</div>
-        <div class="value">{{ stats.skill_runs }}</div>
+        <div class="label">本周面试</div>
+        <div class="value">{{ brief.upcoming_interviews|length }}</div>
+        <div class="delta">
+            {% if brief.upcoming_interviews %}
+                最近 {{ brief.upcoming_interviews[0].when_human }} · {{ brief.upcoming_interviews[0].company }}
+            {% else %}未来 7 天无面试{% endif %}
+        </div>
+    </div>
+    <div class="stat">
+        <div class="label">未跑评估</div>
+        <div class="value">{{ brief.unscored_jobs|length }}</div>
+        <div class="delta">
+            {% if brief.unscored_jobs %}
+                建议先跑高优先级
+            {% else %}评估全跟上{% endif %}
+        </div>
     </div>
     <div class="stat">
         <div class="label">Inbox 待决策</div>
         <div class="value">{{ stats.inbox_pending }}</div>
-    </div>
-    <div class="stat">
-        <div class="label">SKILL 进化次数</div>
-        <div class="value">{{ stats.evolutions }}</div>
+        <div class="delta">已入库 {{ stats.jobs }} JD · 调用 {{ stats.skill_runs }}</div>
     </div>
 </div>
-{% endif %}
 
+{# ── pipeline mini-kanban (counts only) ── #}
 <div class="card">
-    <form hx-post="/chat" hx-target="#report" hx-swap="innerHTML" hx-indicator="#spinner">
-        <label class="field">
-            <span class="label-text">JD 文本</span>
-            <textarea name="job_text" placeholder="把 JD 全文粘到这里…&#10;支持牛客、Boss、官网公告等任意来源" required></textarea>
-        </label>
+    <div class="card-header">
+        <h2>投递战况</h2>
+        <a href="/pipeline" class="muted small">看板视图 →</a>
+    </div>
+    <div class="pipeline-mini">
+        {% for stage_key, stage_label in pipeline_stages %}
+        <a href="/pipeline#col-{{ stage_key }}" class="pmini-col {{ stage_key }}" style="text-decoration: none;">
+            <div class="label">{{ stage_label }}</div>
+            <div class="num">{{ pipeline.counts[stage_key] }}</div>
+        </a>
+        {% endfor %}
+    </div>
+    <div class="muted small">
+        共 {{ pipeline.total_active }} 个 active · 已结束 {{ pipeline.counts.terminal }}
+    </div>
+</div>
 
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-top: 0.875rem;">
-            <label class="field">
-                <span class="label-text">公司名（面试备战必填）</span>
-                <input type="text" name="company" placeholder="例: 字节跳动 / 阿里巴巴 / 腾讯">
-            </label>
-            <label class="field">
-                <span class="label-text">动作</span>
-                <select name="action">
-                    <option value="score_and_gaps" selected>评分 + 差距分析</option>
-                    <option value="score">仅评分</option>
-                    <option value="gaps">仅差距分析</option>
-                    <option value="prepare_interview">面试备战（公司画像 + 题型预测）</option>
-                    <option value="deep_prep">项目深度备战（按项目深挖 + 答题骨架）</option>
-                    <option value="cover_letter">求职信（带 ATS / AI 风险审计）</option>
-                    <option value="everything">全套（评分 + 差距 + 备战 + 深挖 + 求职信）</option>
-                </select>
-            </label>
+{# ── action items + pillar drilldowns ── #}
+<div class="standup-grid">
+
+    <div class="card">
+        <div class="card-header">
+            <h2>今日行动建议</h2>
+            <span class="meta">按优先级排序</span>
+        </div>
+        {% if brief.action_items %}
+        <ul class="action-list">
+            {% for it in brief.action_items %}
+            <a href="{{ it.action_url }}" class="action-item {{ it.priority }}">
+                <div class="meta">
+                    <div class="title">{{ it.title }}</div>
+                    <div class="detail">{{ it.detail }}</div>
+                </div>
+                <span class="arrow">→</span>
+            </a>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <div class="empty">
+            <div style="font-size: 1.5rem; margin-bottom: 0.25rem;">☕</div>
+            <div>今天没有紧急待办</div>
+            <div class="small muted">趁此机会扩充 Stories 或刷新 brief</div>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <div class="pillar" style="margin-bottom: 1rem;">
+            <h3>沉默待跟进</h3>
+            {% if brief.silent_followups %}
+                {% for s in brief.silent_followups %}
+                <a href="/applications#app-{{ s.application_id }}" style="text-decoration: none; color: inherit;">
+                <div class="row">
+                    <span class="name">{{ s.company }}</span>
+                    <span class="pill {% if s.silence_days >= 14 %}high{% elif s.silence_days >= 10 %}medium{% else %}low{% endif %}">
+                        {{ s.silence_days|int }}d
+                    </span>
+                </div>
+                </a>
+                {% endfor %}
+            {% else %}
+            <div class="empty">所有投递回复及时</div>
+            {% endif %}
         </div>
 
-        <div class="actions" style="margin-top: 1rem;">
-            <button type="submit" {% if not profile_loaded %}disabled title="先设 OFFERGUIDE_RESUME_PDF 加载简历"{% endif %}>
-                运行
-            </button>
-            <span id="spinner" class="muted htmx-indicator">⏳ 调用 LLM 中（10-30 秒）…</span>
+        <div class="pillar" style="margin-bottom: 1rem;">
+            <h3>本周面试</h3>
+            {% if brief.upcoming_interviews %}
+                {% for u in brief.upcoming_interviews %}
+                <a href="/applications#app-{{ u.application_id }}" style="text-decoration: none; color: inherit;">
+                <div class="row">
+                    <span class="name">{{ u.company }}</span>
+                    <span class="meta">{{ u.when_human }}</span>
+                </div>
+                </a>
+                {% endfor %}
+            {% else %}
+            <div class="empty">未来 7 天无面试</div>
+            {% endif %}
         </div>
-    </form>
+
+        <div class="pillar">
+            <h3>未跑评估</h3>
+            {% if brief.unscored_jobs %}
+                {% for j in brief.unscored_jobs %}
+                <div class="row">
+                    <span class="name">{{ j.title|truncate(28) }}</span>
+                    <span class="meta">{{ j.source }} · {{ j.age_days|int }}d</span>
+                </div>
+                {% endfor %}
+                <div style="margin-top: 0.625rem;">
+                    <a href="/quick-eval" class="btn secondary" style="font-size: 0.78rem; padding: 0.3rem 0.625rem;">去评估 →</a>
+                </div>
+            {% else %}
+            <div class="empty">评估都跟上了</div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+{# ── collapsed quick-eval form ── #}
+<div class="quick-eval-wrap" style="margin-bottom: 1rem;">
+    <details {% if not brief.action_items %}open{% endif %}>
+        <summary>
+            快速评估 JD
+            <span class="badge">score / gaps / 全套 / cover letter</span>
+        </summary>
+        <div class="body">
+            <form hx-post="/chat" hx-target="#report" hx-swap="innerHTML" hx-indicator="#spinner">
+                <label class="field">
+                    <span class="label-text">JD 文本</span>
+                    <textarea name="job_text" placeholder="把 JD 全文粘到这里…&#10;支持牛客、Boss、官网公告等任意来源" required></textarea>
+                </label>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-top: 0.875rem;">
+                    <label class="field">
+                        <span class="label-text">公司名（备战 / 三件套必填）</span>
+                        <input type="text" name="company" placeholder="例: 字节跳动 / 阿里巴巴 / 腾讯">
+                    </label>
+                    <label class="field">
+                        <span class="label-text">动作</span>
+                        <select name="action">
+                            <option value="score_and_gaps" selected>评分 + 差距分析</option>
+                            <option value="score">仅评分</option>
+                            <option value="gaps">仅差距分析</option>
+                            <option value="prepare_interview">面试备战</option>
+                            <option value="deep_prep">项目深度备战</option>
+                            <option value="cover_letter">求职信</option>
+                            <option value="everything">全套（含 Verdict）</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div class="actions" style="margin-top: 1rem;">
+                    <button type="submit" {% if not profile_loaded %}disabled title="先设 OFFERGUIDE_RESUME_PDF 加载简历"{% endif %}>
+                        运行
+                    </button>
+                    <span id="spinner" class="muted htmx-indicator">⏳ 调用 LLM 中（10-30 秒）…</span>
+                </div>
+            </form>
+        </div>
+    </details>
 </div>
 
 <div id="report"></div>
-
-<div class="card">
-    <div class="card-header">
-        <h2>Inbox · 最近 10 项</h2>
-        <a href="/inbox" class="muted">查看全部 →</a>
-    </div>
-    <div id="inbox-preview">
-        {% include "_inbox_list.html" %}
-    </div>
-</div>
 
 {% endblock %}

@@ -451,14 +451,16 @@
     <header class="topbar">
         <div class="brand"><span class="dot"></span> OfferGuide</div>
         <nav>
-            <a href="/"             class="{% if active_tab == 'home' %}active{% endif %}">Chat</a>
+            <a href="/"             class="{% if active_tab == 'home' %}active{% endif %}">今日</a>
+            <a href="/pipeline"     class="{% if active_tab == 'pipeline' %}active{% endif %}">Pipeline</a>
+            <a href="/quick-eval"   class="{% if active_tab == 'quick_eval' %}active{% endif %}">评估</a>
             <a href="/compare"      class="{% if active_tab == 'compare' %}active{% endif %}">Compare</a>
             <a href="/applications" class="{% if active_tab == 'applications' %}active{% endif %}">Applications</a>
             <a href="/interviews"   class="{% if active_tab == 'interviews' %}active{% endif %}">面经</a>
             <a href="/stories"      class="{% if active_tab == 'stories' %}active{% endif %}">Stories</a>
             <a href="/reflect"      class="{% if active_tab == 'reflect' %}active{% endif %}">Reflect</a>
             <a href="/inbox"        class="{% if active_tab == 'inbox' %}active{% endif %}">Inbox</a>
-            <a href="/dashboard"    class="{% if active_tab == 'dashboard' %}active{% endif %}">Dashboard</a>
+            <a href="/dashboard"    class="{% if active_tab == 'dashboard' %}active{% endif %}">系统</a>
         </nav>
         <div class="status-strip">
             {% if profile_loaded %}

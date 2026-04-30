@@ -1,0 +1,59 @@
+{# Single kanban card. Used both inline (pipeline.html loop) and as the
+   HTMX swap target after a transition. Expects:
+     card           — KanbanCard object
+     stage_key      — current stage (string)
+     transition_options(stage_key) — list[(kind, label)]
+     render_age(silence_days)      — string formatter
+#}
+{% set is_scanned = stage_key == 'scanned' %}
+{% set is_terminal = stage_key == 'terminal' %}
+{% set urgent = (card.silence_days is not none and card.silence_days >= 14 and not is_terminal) %}
+
+<div class="kcard {% if card.application_id is none %}no-events{% endif %}"
+     id="card-{% if card.application_id %}app-{{ card.application_id }}{% else %}job-{{ card.job_id }}{% endif %}">
+
+    <div class="company">{{ card.company }}</div>
+    <div class="title">{{ card.title }}</div>
+
+    <div class="badges">
+        {% if card.location %}
+        <span class="pill" style="font-size: 0.65rem;">{{ card.location|truncate(8) }}</span>
+        {% endif %}
+        {% if not card.has_score and not is_terminal %}
+        <span class="pill medium" title="未跑过 score_match">未评估</span>
+        {% endif %}
+        {% if card.silence_days is not none %}
+        <span class="age {% if urgent %}urgent{% endif %}" title="自最后真实事件起">
+            {{ render_age(card.silence_days) }}
+        </span>
+        {% endif %}
+    </div>
+
+    {% if not is_terminal %}
+    <div class="menu">
+        {% if is_scanned and card.application_id is none %}
+            {# Scanned-only card: only transition is "标记已投递"
+               which creates the application row + records submitted. #}
+            <form hx-post="/api/pipeline/jobs/{{ card.job_id }}/submit"
+                  hx-target="#card-job-{{ card.job_id }}"
+                  hx-swap="outerHTML">
+                <button type="submit">标记已投递</button>
+            </form>
+            <a href="/quick-eval?job_id={{ card.job_id }}"
+               class="btn ghost" style="font-size: 0.7rem; padding: 0.18rem 0.45rem;">评估</a>
+        {% elif card.application_id is not none %}
+            {% for kind, label in transition_options(stage_key) %}
+            <form hx-post="/api/pipeline/applications/{{ card.application_id }}/event"
+                  hx-target="#card-app-{{ card.application_id }}"
+                  hx-swap="outerHTML">
+                <input type="hidden" name="kind" value="{{ kind }}">
+                <button type="submit"
+                        class="{% if kind == 'rejected' or kind == 'withdrawn' %}danger{% endif %}">
+                    {{ label }}
+                </button>
+            </form>
+            {% endfor %}
+        {% endif %}
+    </div>
+    {% endif %}
+</div>

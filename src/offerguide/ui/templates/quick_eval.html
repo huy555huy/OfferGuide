@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — 评估{% endblock %}
+{% block content %}
+
+<div class="page-title">
+    <div>
+        <h1>评估一份 JD</h1>
+        <p>粘贴 JD → 选动作 → 拿到结构化分析。「全套」会跑完所有 SKILL 并在顶部生成 Verdict + 行动建议。</p>
+    </div>
+</div>
+
+{% if stats %}
+<div class="stats">
+    <div class="stat">
+        <div class="label">已入库 JD</div>
+        <div class="value">{{ stats.jobs }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">SKILL 调用次数</div>
+        <div class="value">{{ stats.skill_runs }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">Inbox 待决策</div>
+        <div class="value">{{ stats.inbox_pending }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">SKILL 进化次数</div>
+        <div class="value">{{ stats.evolutions }}</div>
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <form hx-post="/chat" hx-target="#report" hx-swap="innerHTML" hx-indicator="#spinner">
+        <label class="field">
+            <span class="label-text">JD 文本</span>
+            <textarea name="job_text" placeholder="把 JD 全文粘到这里…&#10;支持牛客、Boss、官网公告等任意来源" required></textarea>
+        </label>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-top: 0.875rem;">
+            <label class="field">
+                <span class="label-text">公司名（备战 / 三件套必填）</span>
+                <input type="text" name="company" placeholder="例: 字节跳动 / 阿里巴巴 / 腾讯">
+            </label>
+            <label class="field">
+                <span class="label-text">动作</span>
+                <select name="action">
+                    <option value="everything" selected>全套（含 Verdict + 行动建议）</option>
+                    <option value="score_and_gaps">评分 + 差距分析</option>
+                    <option value="score">仅评分</option>
+                    <option value="gaps">仅差距分析</option>
+                    <option value="prepare_interview">面试备战</option>
+                    <option value="deep_prep">项目深度备战</option>
+                    <option value="cover_letter">求职信</option>
+                </select>
+            </label>
+        </div>
+
+        <div class="actions" style="margin-top: 1rem;">
+            <button type="submit" {% if not profile_loaded %}disabled title="先设 OFFERGUIDE_RESUME_PDF 加载简历"{% endif %}>
+                运行
+            </button>
+            <span id="spinner" class="muted htmx-indicator">⏳ 调用 LLM 中（10-30 秒）…</span>
+        </div>
+    </form>
+</div>
+
+<div id="report"></div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>Inbox · 最近 10 项</h2>
+        <a href="/inbox" class="muted">查看全部 →</a>
+    </div>
+    <div id="inbox-preview">
+        {% include "_inbox_list.html" %}
+    </div>
+</div>
+
+{% endblock %}

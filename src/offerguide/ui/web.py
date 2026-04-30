@@ -72,6 +72,19 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request) -> Any:
+        """Daily standup home — what should the user do *today*?
+
+        Combines:
+          - 4 stat cards (silent / upcoming / unscored / inbox)
+          - Action-item punch list (sorted by priority)
+          - Pipeline mini-kanban (compact 5-column preview)
+          - Quick-eval form (still embedded for one-tap JD evaluation)
+        """
+        from .. import daily_brief as db_mod
+        from .. import pipeline_view as pv_mod
+
+        brief = db_mod.build(store, max_per_pillar=5)
+        pipeline = pv_mod.build(store)
         items = inbox_mod.list_items(store, status="pending", limit=10)
         return templates.TemplateResponse(
             request,
@@ -80,7 +93,163 @@ def create_app(
                 request,
                 items=items,
                 stats=_quick_stats(store),
+                brief=brief,
+                pipeline=pipeline,
+                pipeline_stages=pv_mod.KANBAN_STAGES,
                 active_tab="home",
+            ),
+        )
+
+    @app.get("/quick-eval", response_class=HTMLResponse)
+    def quick_eval_view(request: Request) -> Any:
+        """Standalone JD-evaluation page — same form home embeds, full
+        screen for users who landed here directly (e.g. from action-item
+        click)."""
+        items = inbox_mod.list_items(store, status="pending", limit=10)
+        return templates.TemplateResponse(
+            request,
+            "quick_eval.html",
+            _ctx(
+                request,
+                items=items,
+                stats=_quick_stats(store),
+                active_tab="quick_eval",
+            ),
+        )
+
+    @app.get("/pipeline", response_class=HTMLResponse)
+    def pipeline_view(request: Request) -> Any:
+        """5-stage kanban view of every JD/application in the system.
+
+        Each card has inline transition buttons that record an event +
+        re-render the card via HTMX. The page is the "投递战况" overview.
+        """
+        from .. import pipeline_view as pv_mod
+
+        view = pv_mod.build(store)
+        return templates.TemplateResponse(
+            request,
+            "pipeline.html",
+            _ctx(
+                request,
+                pipeline=view,
+                pipeline_stages=pv_mod.KANBAN_STAGES,
+                stage_color=pv_mod.stage_color,
+                render_age=pv_mod.render_age,
+                transition_options=pv_mod.transition_options,
+                active_tab="pipeline",
+            ),
+        )
+
+    @app.post(
+        "/api/pipeline/applications/{app_id}/event",
+        response_class=HTMLResponse,
+    )
+    def pipeline_log_event(
+        request: Request,
+        app_id: int,
+        kind: str = Form(...),
+    ) -> Any:
+        """Record an event from the kanban card menu, then re-render
+        just the affected card so HTMX swaps it in place."""
+        from .. import application_events as ae
+        from .. import pipeline_view as pv_mod
+        from ..state_machine import sync_status
+
+        valid_kinds = {
+            "submitted", "viewed", "replied", "assessment",
+            "interview", "rejected", "offer", "withdrawn",
+        }
+        if kind not in valid_kinds:
+            raise HTTPException(400, f"unknown event kind: {kind}")
+        try:
+            ae.record(store, application_id=app_id, kind=kind, source="manual")  # type: ignore[arg-type]
+        except Exception as e:
+            raise HTTPException(400, f"failed to record: {e}") from None
+        sync_status(store, app_id, kind)
+
+        # Rebuild + find the updated card so we can re-render it
+        view = pv_mod.build(store)
+        card = None
+        new_stage = None
+        for stage_key, cards in view.columns.items():
+            for c in cards:
+                if c.application_id == app_id:
+                    card = c
+                    new_stage = stage_key
+                    break
+            if card is not None:
+                break
+        if card is None:
+            # Card moved to terminal & got hidden, or app vanished — return empty
+            return HTMLResponse("")
+        return templates.TemplateResponse(
+            request,
+            "_kanban_card.html",
+            _ctx(
+                request,
+                card=card,
+                stage_key=new_stage,
+                stage_color=pv_mod.stage_color,
+                render_age=pv_mod.render_age,
+                transition_options=pv_mod.transition_options,
+            ),
+        )
+
+    @app.post("/api/pipeline/jobs/{job_id}/submit", response_class=HTMLResponse)
+    def pipeline_submit_job(
+        request: Request,
+        job_id: int,
+    ) -> Any:
+        """Promote a 'scanned' job to 'applied' by creating an
+        application row + recording a submitted event.
+
+        The kanban surfaces this as the only transition available on
+        scanned cards. After this, the row leaves 'scanned' and shows
+        up in 'applied'.
+        """
+        from .. import application_events as ae
+        from .. import pipeline_view as pv_mod
+
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise HTTPException(404, f"job {job_id} not found")
+            existing = conn.execute(
+                "SELECT id FROM applications WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if existing:
+                app_id = int(existing[0])
+            else:
+                cur = conn.execute(
+                    "INSERT INTO applications(job_id, status) "
+                    "VALUES (?, 'applied') RETURNING id",
+                    (job_id,),
+                )
+                app_id = int(cur.fetchone()[0])
+
+        ae.record(store, application_id=app_id, kind="submitted", source="manual")
+
+        view = pv_mod.build(store)
+        # Card is now in 'applied' — find and render it
+        card = next(
+            (c for c in view.columns["applied"] if c.application_id == app_id),
+            None,
+        )
+        if card is None:
+            return HTMLResponse("")
+        return templates.TemplateResponse(
+            request,
+            "_kanban_card.html",
+            _ctx(
+                request,
+                card=card,
+                stage_key="applied",
+                stage_color=pv_mod.stage_color,
+                render_age=pv_mod.render_age,
+                transition_options=pv_mod.transition_options,
             ),
         )
 
@@ -834,6 +1003,41 @@ def create_app(
             )
 
         title_first_line = (job_text.splitlines() or [""])[0][:60]
+
+        # Build Verdict whenever ≥2 SKILLs ran — gives the user a one-line
+        # recommendation + top 4 action items at the top of the report.
+        # Especially important for 'everything' mode, where the report
+        # otherwise scrolls forever.
+        verdict_obj = None
+        skill_outputs = [
+            result.get("score_result"),
+            result.get("gaps_result"),
+            result.get("prep_result"),
+            result.get("deep_prep_result"),
+            result.get("cover_letter_result"),
+        ]
+        if sum(1 for x in skill_outputs if x) >= 2:
+            from .. import briefs as briefs_mod
+            from .. import verdict as verdict_mod
+
+            brief_conf: float | None = None
+            brief_limit: int | None = None
+            if company.strip():
+                row = briefs_mod.get_brief(store, company.strip())
+                if row is not None:
+                    brief_conf = row.brief.confidence
+                    brief_limit = row.brief.current_app_limit
+
+            verdict_obj = verdict_mod.synthesize(
+                score=result.get("score_result"),
+                gaps=result.get("gaps_result"),
+                prep=result.get("prep_result"),
+                deep_prep=result.get("deep_prep_result"),
+                cover_letter=result.get("cover_letter_result"),
+                brief_confidence=brief_conf,
+                brief_app_limit=brief_limit,
+            )
+
         return templates.TemplateResponse(
             request,
             "_report.html",
@@ -841,6 +1045,7 @@ def create_app(
                 request,
                 response=result.get("final_response") or "(空响应)",
                 error=result.get("error"),
+                verdict=verdict_obj,
                 # Structured agent results — templates render visualizations
                 # off these dicts; the markdown ``response`` is the fallback.
                 score=result.get("score_result"),

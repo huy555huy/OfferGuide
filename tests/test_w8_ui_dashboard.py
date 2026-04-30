@@ -283,29 +283,46 @@ class TestStructuredReport:
 
 
 class TestHomeStats:
-    def test_home_shows_zero_stats_when_db_empty(self, app_setup) -> None:
+    def test_home_shows_daily_brief_stats_when_db_empty(self, app_setup) -> None:
+        """The new daily-standup home surfaces 4 lifecycle-driven stats
+        instead of raw DB counts. Empty DB → all four pillars empty +
+        friendly empty-states."""
         app, _, _ = app_setup
         client = TestClient(app)
         resp = client.get("/")
-        # All four stats cards render with 0
-        assert "已入库 JD" in resp.text
-        assert "SKILL 调用次数" in resp.text
-        # Counts as text
-        assert resp.text.count(">0<") >= 3 or "0\n" in resp.text
+        assert resp.status_code == 200
+        # New stat labels (replacing the old "已入库 JD / SKILL 调用次数")
+        assert "沉默待跟进" in resp.text
+        assert "本周面试" in resp.text
+        assert "未跑评估" in resp.text
+        assert "Inbox 待决策" in resp.text
+        # Friendly empty-state copy
+        assert (
+            "今天战况平稳" in resp.text
+            or "没有紧急待办" in resp.text
+        )
 
-    def test_home_stats_reflect_real_data(self, app_setup) -> None:
+    def test_home_surfaces_pipeline_mini_kanban(self, app_setup) -> None:
+        """Home page includes the 5-column pipeline overview."""
+        app, _, _ = app_setup
+        resp = TestClient(app).get("/")
+        for label in ("已扫描", "已投递", "HR 已联系", "面试中", "已结束"):
+            assert label in resp.text
+
+    def test_quick_eval_keeps_legacy_stats(self, app_setup) -> None:
+        """The legacy stat labels migrated to /quick-eval — make sure
+        they still render there for users who came from external links."""
         app, store, _ = app_setup
-        # Add one job + one inbox item
         with store.connect() as conn:
             conn.execute(
                 "INSERT INTO jobs(source, title, raw_text, content_hash) "
                 "VALUES ('manual', 't', 'body', 'h1')"
             )
         inbox_mod.enqueue(store, kind="consider_jd", title="X")
-
-        resp = TestClient(app).get("/")
+        resp = TestClient(app).get("/quick-eval")
+        assert resp.status_code == 200
         assert "已入库 JD" in resp.text
-        # Just verify the page contains numbers — exact match is brittle
+        assert "SKILL 调用次数" in resp.text
 
 
 # ═══════════════════════════════════════════════════════════════════
