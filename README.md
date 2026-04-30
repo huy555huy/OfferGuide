@@ -307,6 +307,12 @@ tests/                    # 329 tests, all green
        `email_classifier` paste-in 邮件分类器（无 IMAP，不碰隐私）；`ics_parser` ICS
        日历上传 → 自动 record interview 事件 + scheduled_at；`/interviews` 面经库 paste
        UI（小红书 / 知乎 / 一亩三分地 / 牛客 discuss 全 source）
+- [x] **W8''''** — Agentic layer 替换关键词匹配：**`agentic/email_classifier_llm.py`**
+       DeepSeek-V4 驱动的邮件分类器，从邮件中提取结构化信息 (interview_time / contact_name
+       / interview_round / assessment_link)，**取代了之前那个垃圾 regex**；
+       **`agentic/corpus_collector.py`** 真 agent — 用 search backend (DuckDuckGo HTML 默认)
+       搜面经 + LLM 评估质量 + 自动 ingest，用户不用再手 paste；`agentic/meta_agent.py`
+       company-sweep orchestrator + `POST /api/agent/sweep` 端点
 - [ ] **dogfood** — 4 周持续投递收集真实 reply rate 数据；跑首次 GEPA 真活；填 `[TBD]` 数字
 
 ### What's still TBD（需 dogfood 数据）
@@ -319,6 +325,28 @@ tests/                    # 329 tests, all green
 - [TBD-5] 单次 GEPA 运行成本（预计 $2-10）
 
 ---
+
+## What's LLM, what's heuristic — honest table
+
+OfferGuide 是个混合系统。哪些组件**真用 LLM**，哪些只是**确定性规则**：
+
+| 组件 | 路径 | 为什么 |
+|---|---|---|
+| 5 个 evolvable SKILL (`score_match` / `analyze_gaps` / `prepare_interview` / `deep_project_prep` / `compare_jobs`) | ✅ DeepSeek-V4 via httpx | 这些任务**需要理解上下文**，规则做不到 |
+| `agentic/email_classifier_llm.py` (W8'''') | ✅ DeepSeek-V4 | 邮件理解需要 context；regex 会把"感谢您面试"在拒信里误判成 interview |
+| `agentic/corpus_collector.py` (W8'''') | ✅ DeepSeek-V4 + WebSearch backend | 每个候选页面用 LLM 评估"是不是真面经 / 哪一年 / 哪个岗位"，是真 agency |
+| `email_classifier.py` (regex) | ⚠️ 25 个 regex pattern | 保留作为 **no-API-key fallback**——`/api/email/classify?mode=auto` 在没设 `DEEPSEEK_API_KEY` 时用它，设了就走 LLM |
+| `tracker.py` (沉默检测 7/14/30d) | ✅ 规则 (合适) | 时间窗口判断不需要 LLM，规则更可控 |
+| `ics_parser.py` (ICS 文件解析) | ✅ 规则 (合适) | 解析 RFC 5545 结构化格式，规则就够 |
+| `state_machine.py` (event → applications.status) | ✅ 规则 (合适) | 离散状态映射，规则更可读 |
+| `scout.py` (牛客 sitemap crawler) | ✅ 规则 (合适) | HTML 解析 + httpx，crawler 本来就是 reactive |
+| Boss 浏览器扩展 JD 提取 | ✅ DOM selector | DOM extraction，规则合适 |
+| `evolution/` GEPA SKILL prompt 进化 | ✅ DSPy GEPA + DeepSeek 反思 LM | meta-evolution layer |
+
+**还没做但应该做**（W9 候选）：
+- Boss 扩展加事件抓取（已查看 / 站内信 → 自动 record events）
+- 自进化的 `company_briefs` 表（agent 观察最近面经/新闻 → 推断公司当前状态，覆盖硬编码 limit 表）
+- 真 meta-agent 决策循环（自己决定何时 sweep 哪家公司、何时去拉新面经）
 
 ## License
 

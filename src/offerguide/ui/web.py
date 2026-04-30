@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from datetime import UTC
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -313,9 +313,15 @@ def create_app(
 
     @app.post("/api/email/classify", response_class=JSONResponse)
     def email_classify_endpoint(payload: EmailClassifyPayload) -> dict:
-        """Classify pasted-in email text(s) → application event kinds."""
-        from .. import email_classifier as ec
+        """Classify pasted-in email text(s) → event kinds.
 
+        Two modes:
+        - ``mode='regex'``: pure-Python regex (free, deterministic, dumb)
+        - ``mode='llm'``: LLM-driven classification (real understanding,
+          extracts structured info like interview_time / contact_name /
+          referenced_role; requires DEEPSEEK_API_KEY)
+        - ``mode='auto'``: llm if configured, else regex fallback (default)
+        """
         # Build the company → app_ids index from real DB state
         with store.connect() as conn:
             rows = conn.execute(
@@ -331,29 +337,116 @@ def create_app(
             if company not in known_companies:
                 known_companies.append(company)
 
+        # Resolve mode
+        chosen_mode = payload.mode
+        if chosen_mode == "auto":
+            chosen_mode = "llm" if settings.deepseek_api_key else "regex"
+
         if payload.batch:
+            from .. import email_classifier as ec
             chunks = ec.split_email_dump(payload.text)
         else:
             chunks = [payload.text] if payload.text.strip() else []
 
-        results = ec.classify_batch(
+        if chosen_mode == "llm":
+            from ..agentic.email_classifier_llm import classify_email_batch_llm
+            from ..llm import LLMClient
+            llm = LLMClient(
+                api_key=settings.deepseek_api_key,
+                base_url=settings.deepseek_base_url,
+                default_model=settings.default_model,
+            )
+            llm_results = classify_email_batch_llm(
+                chunks, llm=llm,
+                known_companies=known_companies,
+                known_apps_by_company=known_apps_by_company,
+            )
+            return {
+                "count": len(llm_results),
+                "mode": "llm",
+                "results": [
+                    {
+                        "kind": r.kind,
+                        "confidence": r.confidence,
+                        "matched_company": r.matched_company,
+                        "matched_application_id": r.matched_application_id,
+                        "extracted": r.extracted,
+                        "evidence": r.evidence,
+                    }
+                    for r in llm_results
+                ],
+            }
+
+        # regex fallback
+        from .. import email_classifier as ec
+        regex_results = ec.classify_batch(
             chunks,
             known_companies=known_companies,
             known_apps_by_company=known_apps_by_company,
         )
-
         return {
-            "count": len(results),
+            "count": len(regex_results),
+            "mode": "regex",
             "results": [
                 {
                     "kind": r.kind,
                     "confidence": r.confidence,
                     "matched_company": r.matched_company,
                     "matched_application_id": r.matched_application_id,
+                    "extracted": {},  # regex has no structured extraction
                     "evidence": r.evidence,
                 }
-                for r in results
+                for r in regex_results
             ],
+        }
+
+    @app.post("/api/agent/sweep", response_class=JSONResponse)
+    def agent_sweep_endpoint(payload: SweepPayload) -> dict:
+        """Run a meta-agent sweep on one company.
+
+        Combines application summary (always) + agentic 面经 collection
+        (when LLM + search are configured). Use this instead of asking
+        the user to manually paste 面经.
+        """
+        from ..agentic import build_default_search, sweep_company
+        from ..llm import LLMClient
+
+        llm: LLMClient | None = None
+        if settings.deepseek_api_key:
+            llm = LLMClient(
+                api_key=settings.deepseek_api_key,
+                base_url=settings.deepseek_base_url,
+                default_model=settings.default_model,
+            )
+
+        search = build_default_search() if payload.do_corpus else None
+
+        result = sweep_company(
+            payload.company,
+            store=store,
+            llm=llm,
+            search=search,
+            do_corpus=payload.do_corpus,
+            role_hint=payload.role_hint or None,
+        )
+
+        return {
+            "company": result.company,
+            "application_summary": result.application_summary,
+            "interview_corpus": (
+                {
+                    "queries_run": result.interview_corpus.queries_run,
+                    "hits_seen": result.interview_corpus.hits_seen,
+                    "hits_evaluated": result.interview_corpus.hits_evaluated,
+                    "inserted": result.interview_corpus.inserted,
+                    "skipped_dup": result.interview_corpus.skipped_dup,
+                    "skipped_low_quality": result.interview_corpus.skipped_low_quality,
+                    "notes": result.interview_corpus.notes,
+                }
+                if result.interview_corpus
+                else None
+            ),
+            "notes": result.notes,
         }
 
     @app.post("/api/applications/{app_id}/events/ics", response_class=JSONResponse)
@@ -611,10 +704,26 @@ class EmailClassifyPayload(BaseModel):
     ``text`` can be a single email or a multi-email dump (with
     'From: ' separators or 2+ blank-line separators) — set
     ``batch=True`` to split before classifying.
+
+    ``mode`` controls regex vs LLM:
+    - ``regex``: deterministic pattern match (no API key needed)
+    - ``llm``: real LLM classification with structured extraction
+    - ``auto``: llm when DEEPSEEK_API_KEY is set, else regex
     """
 
     text: str
     batch: bool = True
+    mode: Literal["regex", "llm", "auto"] = "auto"
+
+
+class SweepPayload(BaseModel):
+    """Request body for /api/agent/sweep — the meta-agent endpoint."""
+
+    company: str
+    role_hint: str | None = None
+    do_corpus: bool = True
+    """When True, the agent searches the web for new 面经 about this
+    company and ingests them. Requires LLM + search backend."""
 
 
 _BOSS_ID_RE = re.compile(r"/job_detail/([^/.]+)")
