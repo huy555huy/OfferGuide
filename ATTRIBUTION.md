@@ -134,3 +134,40 @@ by Chhikara et al.
 We don't import mem0 (single-user case doesn't justify their multi-tenant
 infra), but their architectural shape inspired our
 ``effective_app_limit`` override-when-confident pattern.
+
+## Pytai / GPTInterviewer — post-interview transcript analysis (W8 +3)
+
+**[Pytai](https://github.com/getFrontend/app-ai-interviews)** and
+**[GPTInterviewer](https://github.com/jiatastic/GPTInterviewer)** (MIT) —
+open-source AI mock interview platforms whose **transcript-based feedback
+loop** we adopt for the seventh SKILL ``post_interview_reflection``:
+
+The user submits a free-form transcript of an actual interview + the
+prep run id from before. The SKILL outputs:
+- ``hit_rate`` of agent's predictions vs reality
+- ``surprises`` (questions asked but not predicted, with honest
+  ``why_we_missed`` analysis)
+- ``suggested_stories`` (STAR moments in the transcript worth adding
+  to ``behavioral_stories``)
+- ``brief_delta`` (proposed update to ``company_briefs.interview_style``)
+- ``weak_spots_to_practice``
+
+When the user opts in via UI checkboxes, the suggested stories
+auto-insert into the story bank and the brief delta auto-applies. This
+is the **dogfood feedback loop** that closes the agent's evolution —
+without it, predictions never get audited.
+
+Our addition over Pytai: the ``calibration_score()`` helper computes
+mean abs error between ``predicted_likelihood`` and 1-if-matched-else-0
+across all matched_predictions, surfacing prompt miscalibration as a
+direct GEPA optimization target.
+
+## Career-Ops PDF / Playwright export (W8 +3)
+
+We adopt Career-Ops' "render HTML with print-optimized CSS, let user
+⌘P → Save as PDF" pattern in ``src/offerguide/ui/templates/cover_letter_print.html``
++ ``GET /cover-letter/{run_id}.html`` route. We skip the Playwright
+dependency: a standalone HTML page with ``@page`` rules and a
+``no-print`` audit panel hits the same UX without the 200MB Chromium
+download. Career-Ops' typography choice (Source Serif 4 for headers
++ system sans for body) carried over directly.

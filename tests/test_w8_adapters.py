@@ -40,6 +40,7 @@ class TestRegistry:
             "deep_project_prep",
             "compare_jobs",
             "write_cover_letter",
+            "post_interview_reflection",
         }
 
     def test_get_adapter_returns_module(self) -> None:

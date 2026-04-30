@@ -286,7 +286,7 @@
         <div class="section-title">## 求职信 · write_cover_letter</div>
 
         {# Top meta strip #}
-        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.75rem;">
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.75rem;align-items:center;">
             <span class="pill primary">tone: {{ cover_letter.suggested_tone }}</span>
             <span class="pill">{{ cover_letter.overall_word_count }} words</span>
             <span class="pill {% if cover_letter.personalization_score >= 0.7 %}low{% elif cover_letter.personalization_score >= 0.4 %}medium{% else %}high{% endif %}">
@@ -294,6 +294,12 @@
             </span>
             {% if cover_letter.ai_risk_warnings %}
             <span class="pill high">⚠ AI 风险 × {{ cover_letter.ai_risk_warnings|length }}</span>
+            {% endif %}
+            {% if cover_letter_run_id %}
+            <a href="/cover-letter/{{ cover_letter_run_id }}.html" target="_blank"
+               class="btn ghost" style="margin-left:auto; text-decoration:none;">
+                🖨 打印版 / Save PDF
+            </a>
             {% endif %}
         </div>
 

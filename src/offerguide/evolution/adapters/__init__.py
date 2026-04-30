@@ -18,6 +18,7 @@ from . import (
     analyze_gaps,
     compare_jobs,
     deep_project_prep,
+    post_interview_reflection,
     prepare_interview,
     score_match,
     write_cover_letter,
@@ -31,6 +32,7 @@ REGISTRY: dict[str, ModuleType] = {
     "deep_project_prep": deep_project_prep,
     "compare_jobs": compare_jobs,
     "write_cover_letter": write_cover_letter,
+    "post_interview_reflection": post_interview_reflection,
 }
 
 
@@ -64,6 +66,7 @@ __all__ = [
     "get_adapter",
     "list_evolvable_skills",
     "parse_json_output",
+    "post_interview_reflection",
     "prepare_interview",
     "score_match",
     "write_cover_letter",

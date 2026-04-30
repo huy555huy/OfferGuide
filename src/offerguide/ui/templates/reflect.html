@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Reflect{% endblock %}
+{% block content %}
+
+<div class="page-title">
+    <div>
+        <h1>面试复盘 · 闭合 dogfood 反馈环</h1>
+        <p>面完了？把实际问到的题 + 你的回答记忆粘进来。Agent 算预测命中率、找出
+        surprises、从 transcript 挖 STAR 故事候选、更新公司 brief。
+        借鉴 <a href="https://github.com/getFrontend/app-ai-interviews">Pytai</a> 的 transcript-based feedback
+        模式 (MIT)。</p>
+    </div>
+</div>
+
+<div class="card">
+    <form hx-post="/api/reflect/run" hx-target="#reflect-result" hx-swap="innerHTML"
+          hx-indicator="#reflect-spinner">
+        <div style="display:grid;grid-template-columns:2fr 3fr;gap:0.75rem;margin-bottom:0.625rem;">
+            <label class="field">
+                <span class="label-text">公司</span>
+                <input type="text" name="company" placeholder="例: 字节跳动" required>
+            </label>
+            <label class="field">
+                <span class="label-text">关联的 prep run（选了能算预测命中率）</span>
+                <select name="prep_run_id">
+                    <option value="">— 不关联（只分析 transcript）—</option>
+                    {% for r in prep_runs %}
+                    <option value="{{ r.id }}">#{{ r.id }} · {{ r.skill }} v{{ r.version }} · {{ r.when_ago }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+        </div>
+
+        <label class="field">
+            <span class="label-text">实际面试 transcript（自由格式）</span>
+            <textarea name="actual_transcript" required style="min-height: 14rem;"
+                      placeholder="把实际问到的题写下来——可以是流水帐，可以加你的自评。例：&#10;&#10;字节 Seed 实习一面 30min&#10;1. attention 缩放为啥除 √d — 答了梯度饱和，自信&#10;2. GRPO vs PPO — 答得好&#10;3. system design 100w QPS pipeline — 没准备过，磕磕巴巴&#10;4. 跨团队协作经历 — 用了法至产品分歧的故事，对方点头&#10;..."></textarea>
+        </label>
+
+        <div style="margin-top: 0.75rem; display: flex; gap: 1rem; flex-wrap: wrap;">
+            <label style="display: flex; align-items: center; gap: 0.5rem;">
+                <input type="checkbox" name="auto_apply_stories" value="1" checked>
+                <span class="small">自动入库 SKILL 建议的 STAR 故事到 /stories</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 0.5rem;">
+                <input type="checkbox" name="auto_apply_brief" value="1" checked>
+                <span class="small">自动追加 interview_style 到 company_brief</span>
+            </label>
+        </div>
+
+        <div class="actions" style="margin-top: 0.875rem;">
+            <button type="submit">运行复盘</button>
+            <span id="reflect-spinner" class="muted htmx-indicator">⏳ LLM 分析中…</span>
+        </div>
+    </form>
+</div>
+
+<div id="reflect-result"></div>
+
+{% endblock %}

@@ -18,6 +18,7 @@ runtimes, profiles, and notifiers without touching env vars.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC
 from pathlib import Path
@@ -39,6 +40,10 @@ from ..profile import UserProfile, load_resume_pdf
 from ..skills import SkillRuntime, SkillSpec, discover_skills
 from ..workers import scout
 from .notify import Notifier, make_notifier
+
+# Convenience aliases used in handlers (post here so lint isort is happy).
+json_loads = json.loads
+json_dumps = json.dumps
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -498,6 +503,200 @@ def create_app(
             ),
             "notes": result.notes,
         }
+
+    @app.get("/cover-letter/{run_id}.html", response_class=HTMLResponse)
+    def cover_letter_print(request: Request, run_id: int) -> Any:
+        """Print-ready standalone HTML page for one cover letter run.
+
+        User opens ⌘P / Save as PDF in their browser to get a real document.
+        Borrowed from Career-Ops' Playwright HTML→PDF approach (we skip
+        the Playwright dep and let the browser do the print).
+        """
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT skill_name, output_json FROM skill_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None or row[0] != "write_cover_letter":
+            raise HTTPException(404, f"no write_cover_letter run with id {run_id}")
+        try:
+            cover = json_loads(row[1])
+        except (json.JSONDecodeError, TypeError):
+            raise HTTPException(500, "stored cover letter output is corrupt") from None
+
+        return templates.TemplateResponse(
+            request, "cover_letter_print.html",
+            _ctx(request, cover=cover, run_id=run_id),
+        )
+
+    @app.get("/reflect", response_class=HTMLResponse)
+    def reflect_view(request: Request) -> Any:
+        """Page where the user submits an interview transcript for analysis."""
+        with store.connect() as conn:
+            recent_runs = conn.execute(
+                "SELECT id, skill_name, skill_version, "
+                "(julianday('now') - created_at) * 86400 AS age_seconds "
+                "FROM skill_runs WHERE skill_name IN "
+                "('prepare_interview', 'deep_project_prep') "
+                "ORDER BY created_at DESC LIMIT 20"
+            ).fetchall()
+        prep_runs = [
+            {
+                "id": r[0], "skill": r[1], "version": r[2],
+                "when_ago": _humanize_age(float(r[3] or 0)),
+            }
+            for r in recent_runs
+        ]
+        return templates.TemplateResponse(
+            request, "reflect.html",
+            _ctx(request, prep_runs=prep_runs, active_tab="reflect"),
+        )
+
+    @app.post("/api/reflect/run", response_class=HTMLResponse)
+    def reflect_run(
+        request: Request,
+        company: str = Form(...),
+        prep_run_id: str = Form(""),
+        actual_transcript: str = Form(...),
+        auto_apply_stories: str = Form(""),  # checkbox value
+        auto_apply_brief: str = Form(""),
+    ) -> Any:
+        """Run post_interview_reflection SKILL on the transcript + previous prep.
+
+        When auto_apply_* checkboxes are set, automatically:
+        - Insert suggested_stories into behavioral_stories table
+        - Append brief_delta.interview_style_addition to company_briefs
+        """
+        if profile is None:
+            return templates.TemplateResponse(
+                request, "_reflect_result.html",
+                _ctx(request, error="未加载简历——设 OFFERGUIDE_RESUME_PDF 后重启。"),
+            )
+        if runtime is None:
+            return templates.TemplateResponse(
+                request, "_reflect_result.html",
+                _ctx(request, error="未配置 LLM——设 DEEPSEEK_API_KEY 后重启。"),
+            )
+        if not company.strip() or not actual_transcript.strip():
+            return templates.TemplateResponse(
+                request, "_reflect_result.html",
+                _ctx(request, error="company 和 actual_transcript 都必填。"),
+            )
+
+        # Pull the prep run output to seed prep_questions_json
+        prep_questions: list[dict] = []
+        if prep_run_id.strip():
+            try:
+                rid = int(prep_run_id)
+                with store.connect() as conn:
+                    row = conn.execute(
+                        "SELECT skill_name, output_json FROM skill_runs WHERE id = ?",
+                        (rid,),
+                    ).fetchone()
+                if row:
+                    skill_name, out_json = row
+                    try:
+                        out = json_loads(out_json)
+                    except Exception:
+                        out = {}
+                    if skill_name == "prepare_interview":
+                        prep_questions = out.get("expected_questions", [])
+                    elif skill_name == "deep_project_prep":
+                        # Flatten probing questions across projects + cross + behavioral
+                        prep_questions = []
+                        for proj in (out.get("projects_analyzed") or []):
+                            prep_questions.extend(proj.get("probing_questions", []))
+                        prep_questions.extend(out.get("cross_project_questions", []))
+                        prep_questions.extend(out.get("behavioral_questions_tailored", []))
+            except (ValueError, KeyError):
+                pass
+
+        # Find SKILL spec
+        spec = next((s for s in skills if s.name == "post_interview_reflection"), None)
+        if spec is None:
+            return templates.TemplateResponse(
+                request, "_reflect_result.html",
+                _ctx(request, error="post_interview_reflection SKILL 未加载。"),
+            )
+
+        try:
+            result = runtime.invoke(
+                spec,
+                {
+                    "company": company.strip(),
+                    "prep_questions_json": json_dumps(prep_questions),
+                    "actual_transcript": actual_transcript.strip(),
+                },
+            )
+        except LLMError as e:
+            return templates.TemplateResponse(
+                request, "_reflect_result.html",
+                _ctx(request, error=f"LLM 调用失败: {e}"),
+            )
+
+        parsed = result.parsed or {}
+
+        # Auto-apply: insert suggested stories
+        applied_stories: list[int] = []
+        if auto_apply_stories and parsed.get("suggested_stories"):
+            from .. import story_bank
+            for s in parsed["suggested_stories"]:
+                try:
+                    new_story = story_bank.insert(
+                        store,
+                        title=s.get("title", "(no title)"),
+                        situation=s.get("suggested_situation", ""),
+                        task=s.get("suggested_task", ""),
+                        action=s.get("suggested_action", ""),
+                        result=s.get("suggested_result", ""),
+                        reflection=s.get("suggested_reflection") or None,
+                        tags=s.get("suggested_tags", []),
+                        confidence=0.5,
+                    )
+                    applied_stories.append(new_story.id)
+                except (ValueError, KeyError):
+                    pass
+
+        # Auto-apply: brief delta
+        brief_updated = False
+        if auto_apply_brief and parsed.get("brief_delta"):
+            from .. import briefs as briefs_mod
+            existing = briefs_mod.get_brief(store, company.strip())
+            delta = parsed["brief_delta"]
+            addition = (delta.get("interview_style_addition") or "").strip()
+            new_signals = list(delta.get("new_recent_signals") or [])
+            conf_adj = float(delta.get("confidence_adjustment") or 0.0)
+            if existing:
+                # Merge: append addition + extend signals + adjust confidence
+                merged_style = existing.brief.interview_style
+                if addition and addition not in merged_style:
+                    sep = " · " if merged_style.strip() else ""
+                    merged_style = f"{merged_style.strip()}{sep}{addition}"
+                merged_signals = list(existing.brief.recent_signals) + new_signals
+                merged_signals = list(dict.fromkeys(merged_signals))[:8]
+                from ..briefs import CompanyBrief, _upsert
+                new_brief = CompanyBrief(
+                    summary=existing.brief.summary,
+                    current_app_limit=existing.brief.current_app_limit,
+                    interview_style=merged_style,
+                    recent_signals=merged_signals,
+                    hiring_trend=existing.brief.hiring_trend,
+                    confidence=max(0.0, min(1.0, existing.brief.confidence + conf_adj)),
+                )
+                _upsert(store, company.strip(), new_brief)
+                brief_updated = True
+
+        return templates.TemplateResponse(
+            request, "_reflect_result.html",
+            _ctx(
+                request,
+                reflection=parsed,
+                run_id=result.skill_run_id,
+                company=company.strip(),
+                applied_stories=applied_stories,
+                brief_updated=brief_updated,
+            ),
+        )
 
     @app.post("/api/applications/{app_id}/events/ics", response_class=JSONResponse)
     def applications_log_ics(
