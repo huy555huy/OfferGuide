@@ -68,7 +68,14 @@ def create_app(
     def home(request: Request) -> Any:
         items = inbox_mod.list_items(store, status="pending", limit=10)
         return templates.TemplateResponse(
-            request, "home.html", _ctx(request, items=items)
+            request,
+            "home.html",
+            _ctx(
+                request,
+                items=items,
+                stats=_quick_stats(store),
+                active_tab="home",
+            ),
         )
 
     @app.get("/inbox", response_class=HTMLResponse)
@@ -88,6 +95,22 @@ def create_app(
                 items=pending,
                 decided=decided[:50],
                 include_decided=bool(decided),
+                active_tab="inbox",
+            ),
+        )
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    def dashboard_view(request: Request) -> Any:
+        return templates.TemplateResponse(
+            request,
+            "dashboard.html",
+            _ctx(
+                request,
+                stats=_full_stats(store),
+                funnel=_application_funnel(store),
+                evolutions=_recent_evolutions(store, limit=10),
+                recent_runs=_recent_skill_runs(store, limit=10),
+                active_tab="dashboard",
             ),
         )
 
@@ -158,6 +181,13 @@ def create_app(
                 request,
                 response=result.get("final_response") or "(空响应)",
                 error=result.get("error"),
+                # Structured agent results — templates render visualizations
+                # off these dicts; the markdown ``response`` is the fallback.
+                score=result.get("score_result"),
+                gaps=result.get("gaps_result"),
+                prep=result.get("prep_result"),
+                prep_used_experiences=result.get("prep_used_experiences", 0),
+                company=company.strip() or None,
                 inbox_title=f"考虑投递: {title_first_line}",
                 inbox_body=(result.get("final_response") or "")[:800],
                 job_text=job_text[:2000],
@@ -268,6 +298,146 @@ def _extract_boss_id(url: str | None) -> str | None:
         return None
     m = _BOSS_ID_RE.search(url)
     return m.group(1) if m else None
+
+
+# ─────────────────────── stats / dashboard helpers ──────────────────
+
+
+def _quick_stats(store: Store) -> dict[str, Any]:
+    """Lightweight counts for the home page strip — single SQL trip."""
+    with store.connect() as conn:
+        return {
+            "jobs":          conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0],
+            "skill_runs":    conn.execute("SELECT COUNT(*) FROM skill_runs").fetchone()[0],
+            "inbox_pending": conn.execute(
+                "SELECT COUNT(*) FROM inbox_items WHERE status='pending'"
+            ).fetchone()[0],
+            "evolutions":    conn.execute("SELECT COUNT(*) FROM evolution_log").fetchone()[0],
+        }
+
+
+def _full_stats(store: Store) -> dict[str, Any]:
+    """Richer stats for the dashboard."""
+    with store.connect() as conn:
+        jobs_by_source = dict(
+            conn.execute("SELECT source, COUNT(*) FROM jobs GROUP BY source").fetchall()
+        )
+        runs_by_skill = dict(
+            conn.execute(
+                "SELECT skill_name, COUNT(*) FROM skill_runs GROUP BY skill_name"
+            ).fetchall()
+        )
+        evos_by_skill = dict(
+            conn.execute(
+                "SELECT skill_name, COUNT(*) FROM evolution_log GROUP BY skill_name"
+            ).fetchall()
+        )
+        inbox_decided = conn.execute(
+            "SELECT COUNT(*) FROM inbox_items WHERE status != 'pending'"
+        ).fetchone()[0]
+        inbox_pending = conn.execute(
+            "SELECT COUNT(*) FROM inbox_items WHERE status = 'pending'"
+        ).fetchone()[0]
+
+    def _fmt(d: dict, sep: str = " · ") -> str:
+        if not d:
+            return "—"
+        return sep.join(f"{k}={v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1]))
+
+    return {
+        "jobs": sum(jobs_by_source.values()),
+        "jobs_by_source_str": _fmt(jobs_by_source),
+        "skill_runs": sum(runs_by_skill.values()),
+        "skill_runs_by_skill_str": _fmt(runs_by_skill),
+        "inbox_pending": inbox_pending,
+        "inbox_decided": inbox_decided,
+        "evolutions": sum(evos_by_skill.values()),
+        "evolutions_by_skill_str": _fmt(evos_by_skill),
+    }
+
+
+_FUNNEL_STAGES: list[tuple[str, str]] = [
+    ("submitted",  "投递"),
+    ("viewed",     "HR 已查看"),
+    ("replied",    "HR 已回复"),
+    ("assessment", "笔试 / OA"),
+    ("interview",  "面试"),
+    ("offer",      "Offer"),
+]
+
+
+def _application_funnel(store: Store) -> dict[str, Any]:
+    """Count applications that reached each stage, derived from event log.
+
+    A row counts at a stage if its application_events has *any* event of
+    that kind, regardless of subsequent rejections — this is a "reached"
+    funnel, which is what dashboards usually want.
+    """
+    counts: list[tuple[str, int]] = []
+    with store.connect() as conn:
+        total = conn.execute(
+            "SELECT COUNT(DISTINCT application_id) FROM application_events"
+        ).fetchone()[0]
+        for kind, label in _FUNNEL_STAGES:
+            n = conn.execute(
+                "SELECT COUNT(DISTINCT application_id) FROM application_events "
+                "WHERE kind = ? AND source != 'inferred'",
+                (kind,),
+            ).fetchone()[0]
+            counts.append((label, n))
+    return {"total": total, "stages": counts}
+
+
+def _recent_evolutions(store: Store, *, limit: int = 10) -> list[Any]:
+    """Latest evolution_log rows as EvolutionRecord objects."""
+    from ..evolution.diff import _row_to_record
+
+    with store.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, skill_name, parent_version, new_version, metric_name, "
+            "metric_before, metric_after, notes, created_at "
+            "FROM evolution_log ORDER BY created_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [_row_to_record(r) for r in rows]
+
+
+def _recent_skill_runs(store: Store, *, limit: int = 10) -> list[dict[str, Any]]:
+    """Recent skill_runs with a human-readable 'when_ago' field."""
+    import time as _time
+
+    with store.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, skill_name, skill_version, latency_ms, cost_usd, "
+            "(julianday('now') - created_at) * 86400 AS age_seconds "
+            "FROM skill_runs ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        age = float(r[5] or 0)
+        out.append(
+            {
+                "id": r[0],
+                "skill_name": r[1],
+                "skill_version": r[2],
+                "latency_ms": r[3] or 0,
+                "cost_usd": r[4] or 0.0,
+                "when_ago": _humanize_age(age),
+            }
+        )
+    _ = _time  # silence unused
+    return out
+
+
+def _humanize_age(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s ago"
+    if seconds < 3600:
+        return f"{int(seconds / 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds / 3600)}h ago"
+    return f"{int(seconds / 86400)}d ago"
 
 
 # -------------------- entry point used by `python -m offerguide.ui.web` --------------------

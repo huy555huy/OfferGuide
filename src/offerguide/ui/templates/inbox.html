@@ -1,16 +1,31 @@
 {% extends "base.html" %}
 {% block title %}OfferGuide — Inbox{% endblock %}
 {% block content %}
+
+<div class="page-title">
+    <div>
+        <h1>Inbox</h1>
+        <p>HITL 决策队列。代理对每个会改世界的动作（投递、跟进、提醒）都先入这里等你拍板。</p>
+    </div>
+</div>
+
 <div class="card">
-    <h2>Inbox — 待决策</h2>
+    <div class="card-header">
+        <h2>待决策 · pending</h2>
+        <span class="meta">{{ items|length }} 项</span>
+    </div>
     {% include "_inbox_list.html" %}
 </div>
+
 {% if include_decided %}
 <div class="card">
-    <h2>已决策 (最近 50)</h2>
+    <div class="card-header">
+        <h2>已决策 · 最近 50</h2>
+    </div>
     {% with items = decided %}
         {% include "_inbox_list.html" %}
     {% endwith %}
 </div>
 {% endif %}
+
 {% endblock %}

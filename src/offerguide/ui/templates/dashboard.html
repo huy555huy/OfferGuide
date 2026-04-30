@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Dashboard{% endblock %}
+{% block content %}
+
+<div class="page-title">
+    <div>
+        <h1>Dashboard</h1>
+        <p>系统状态 + GEPA 进化历史 + 应用漏斗。来自 SQLite 真实数据，没有刷的。</p>
+    </div>
+</div>
+
+{# ─── stats strip ─── #}
+<div class="stats">
+    <div class="stat">
+        <div class="label">总 JD 数</div>
+        <div class="value">{{ stats.jobs }}</div>
+        <div class="delta">来源: {{ stats.jobs_by_source_str }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">SKILL 调用</div>
+        <div class="value">{{ stats.skill_runs }}</div>
+        <div class="delta">{{ stats.skill_runs_by_skill_str }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">Inbox 待决策</div>
+        <div class="value">{{ stats.inbox_pending }}</div>
+        <div class="delta">已决策 {{ stats.inbox_decided }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">SKILL 进化</div>
+        <div class="value">{{ stats.evolutions }}</div>
+        <div class="delta">{{ stats.evolutions_by_skill_str }}</div>
+    </div>
+</div>
+
+{# ─── application funnel ─── #}
+<div class="card">
+    <div class="card-header">
+        <h2>应用漏斗</h2>
+        <span class="meta">基于 application_events 派生</span>
+    </div>
+    {% if funnel.total > 0 %}
+    {% for stage, count in funnel.stages %}
+    <div class="metric-row">
+        <span class="name">{{ stage }}</span>
+        <div class="bar">
+            <div style="width: {{ (count / funnel.total * 100) if funnel.total else 0 }}%"></div>
+        </div>
+        <span class="val">{{ count }} ({{ "%.0f"|format(100 * count / funnel.total if funnel.total else 0) }}%)</span>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="empty">
+        <div style="font-size: 1.5rem; margin-bottom: 0.25rem;">📊</div>
+        <div>还没有应用事件</div>
+        <div class="small muted">投递后用 application_events.record() 标记，漏斗会跑起来</div>
+    </div>
+    {% endif %}
+</div>
+
+{# ─── evolutions ─── #}
+<div class="card">
+    <div class="card-header">
+        <h2>SKILL 进化历史</h2>
+        <span class="meta">最近 10 次</span>
+    </div>
+    {% if evolutions %}
+    <table style="width: 100%; border-collapse: collapse;">
+        <thead style="text-align: left; font-size: 0.78rem; color: var(--text-muted); border-bottom: 1px solid var(--border-soft);">
+            <tr>
+                <th style="padding: 0.4rem 0;">SKILL</th>
+                <th>parent → new</th>
+                <th>metric</th>
+                <th>before</th>
+                <th>after</th>
+                <th>Δ</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for e in evolutions %}
+        <tr style="border-bottom: 1px solid var(--border-soft); font-size: 0.85rem;">
+            <td style="padding: 0.5rem 0;"><strong>{{ e.skill_name }}</strong></td>
+            <td><code>{{ e.parent_version or '?' }} → {{ e.new_version }}</code></td>
+            <td class="muted small">{{ e.metric_name }}</td>
+            <td>{{ "%.3f"|format(e.metric_before_total) }}</td>
+            <td>{{ "%.3f"|format(e.metric_after_total) }}</td>
+            <td>
+                {% set delta = e.delta_total %}
+                {% if delta >= 0 %}
+                    <span style="color: var(--success); font-weight: 600;">↑ +{{ "%.3f"|format(delta) }}</span>
+                {% else %}
+                    <span style="color: var(--danger); font-weight: 600;">↓ {{ "%.3f"|format(delta) }}</span>
+                {% endif %}
+            </td>
+            <td><a href="#" class="muted small" title="evolution_log #{{ e.id }}">#{{ e.id }}</a></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">
+        <div style="font-size: 1.5rem; margin-bottom: 0.25rem;">🧬</div>
+        <div>还没有 SKILL 进化记录</div>
+        <div class="small muted">设 <code>DEEPSEEK_API_KEY</code>，然后跑 <code>python -m offerguide.evolution evolve score_match</code></div>
+    </div>
+    {% endif %}
+</div>
+
+{# ─── recent skill_runs ─── #}
+<div class="card">
+    <div class="card-header">
+        <h2>最近 SKILL 调用</h2>
+        <span class="meta">最近 10 次</span>
+    </div>
+    {% if recent_runs %}
+    <table style="width: 100%; border-collapse: collapse;">
+        <thead style="text-align: left; font-size: 0.78rem; color: var(--text-muted); border-bottom: 1px solid var(--border-soft);">
+            <tr>
+                <th style="padding: 0.4rem 0;">#id</th>
+                <th>SKILL</th>
+                <th>v</th>
+                <th>latency</th>
+                <th>cost</th>
+                <th>when</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for r in recent_runs %}
+        <tr style="border-bottom: 1px solid var(--border-soft); font-size: 0.85rem;">
+            <td style="padding: 0.4rem 0;" class="muted small">{{ r.id }}</td>
+            <td><span class="pill primary">{{ r.skill_name }}</span></td>
+            <td class="muted small">{{ r.skill_version }}</td>
+            <td class="small">{{ r.latency_ms }} ms</td>
+            <td class="small">${{ "%.4f"|format(r.cost_usd or 0) }}</td>
+            <td class="muted small">{{ r.when_ago }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">
+        <div style="font-size: 1.5rem; margin-bottom: 0.25rem;">⚡</div>
+        <div>还没有 SKILL 调用</div>
+        <div class="small muted">回 <a href="/">Chat</a> 跑一份 JD</div>
+    </div>
+    {% endif %}
+</div>
+
+{% endblock %}

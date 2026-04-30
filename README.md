@@ -4,6 +4,12 @@
 
 > 不点投递按钮——做精投决策、投后跟踪、面试备战；用户 dogfood 数据驱动 SKILL 自动进化。
 
+![dashboard](docs/screenshots/dashboard.png)
+
+| Chat (评分 + 差距 + 备战) | Dashboard (进化历史 / 漏斗) |
+|---|---|
+| ![chat](docs/screenshots/chat_report.png) | ![home](docs/screenshots/home.png) |
+
 ---
 
 ## Why this, and not another auto-applier

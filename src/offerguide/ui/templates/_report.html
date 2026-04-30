@@ -1,20 +1,192 @@
 {% if error %}
-<div class="error">{{ error }}</div>
+<div class="card">
+    <div class="error">⚠ {{ error }}</div>
+</div>
 {% else %}
-<div class="report">
-<pre>{{ response }}</pre>
+
+<div class="card">
+    <div class="card-header">
+        <h2>分析结果</h2>
+        <span class="meta">
+            {% if score_run_id %}score#{{ score_run_id }}{% endif %}
+            {% if gaps_run_id %} · gaps#{{ gaps_run_id }}{% endif %}
+            {% if prep_run_id %} · prep#{{ prep_run_id }}{% endif %}
+        </span>
+    </div>
+
+    {# ─── score_match ─── #}
+    {% if score %}
+    <section>
+        <div class="section-title">## 匹配评分 · score_match</div>
+        {% set prob = score.probability if score.probability is not none else 0.0 %}
+        <div class="prob-card">
+            <div class="prob-num">{{ "%.0f"|format(prob * 100) }}<span style="font-size:1rem;color:var(--text-muted)">%</span></div>
+            <div style="flex:1">
+                <div class="prob-bar">
+                    <div class="prob-fill" style="width: {{ (prob * 100)|round(0) }}%"></div>
+                    {# calibration markers at 30% and 70% #}
+                    <div class="prob-marker" style="left: 30%; opacity: 0.2"></div>
+                    <div class="prob-marker" style="left: 70%; opacity: 0.2"></div>
+                </div>
+                {% if score.dimensions %}
+                <div class="dim-list">
+                    {% for k, v in score.dimensions.items() %}
+                    <div class="dim">
+                        <span class="name">{{ k }}</span>
+                        <span class="val">{{ "%.2f"|format(v|float) }}</span>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if score.deal_breakers %}
+        <div style="margin: 0.5rem 0 0.75rem;">
+            <strong style="color: var(--danger); font-size: 0.85rem;">⚠ Deal-breakers</strong>
+            <ul style="margin: 0.25rem 0 0; padding-left: 1.25rem; font-size: 0.875rem;">
+                {% for d in score.deal_breakers %}<li>{{ d }}</li>{% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        {% if score.reasoning %}
+        <div class="muted" style="font-size: 0.875rem; line-height: 1.6;">{{ score.reasoning }}</div>
+        {% endif %}
+    </section>
+    {% endif %}
+
+    {# ─── analyze_gaps ─── #}
+    {% if gaps %}
+    <section>
+        <div class="section-title">## 差距与建议 · analyze_gaps</div>
+        {% if gaps.summary %}
+        <p style="margin: 0 0 0.625rem; font-size: 0.9rem;">{{ gaps.summary }}</p>
+        {% endif %}
+
+        {% set high_count = (gaps.suggestions or []) | selectattr('ai_risk', 'equalto', 'high') | list | length %}
+        {% if high_count > 0 %}
+        <div class="muted" style="margin-bottom: 0.5rem;">
+            <span class="pill high">⚠ AI 检测高风险 × {{ high_count }}</span>
+            建议先处理这些再投——49% 公司会自动 dismiss 看起来 AI 写的简历。
+        </div>
+        {% endif %}
+
+        {% for s in (gaps.suggestions or [])[:6] %}
+        <div class="suggestion {{ s.ai_risk or 'low' }}">
+            <div class="head">
+                <span class="section">{{ s.section }}</span>
+                <span class="pill primary">{{ s.action }}</span>
+                <span class="pill {{ s.ai_risk or 'low' }}">ai_risk={{ s.ai_risk or '?' }}</span>
+                {% if s.confidence is defined %}
+                <span class="muted small" style="margin-left:auto">conf={{ "%.2f"|format(s.confidence|float) }}</span>
+                {% endif %}
+            </div>
+            <div class="body">
+                {% if s.current_text %}
+                <div class="muted small">现有: <code>{{ s.current_text }}</code></div>
+                {% endif %}
+                <div class="quote">{{ s.proposed_addition }}</div>
+                <div class="reason">{{ s.reason }}</div>
+            </div>
+        </div>
+        {% endfor %}
+
+        {% if gaps.do_not_add %}
+        <div style="margin-top: 0.625rem; padding: 0.625rem 0.875rem; background: var(--danger-soft); border-radius: var(--radius-sm); border-left: 3px solid var(--danger);">
+            <div class="small" style="font-weight:600; color: var(--danger); margin-bottom: 0.25rem;">禁止添加（避免编造）</div>
+            <ul style="margin: 0; padding-left: 1.125rem; font-size: 0.85rem;">
+                {% for d in gaps.do_not_add %}<li>{{ d }}</li>{% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        {% if gaps.ai_detection_warnings %}
+        <div style="margin-top: 0.5rem;" class="muted small">
+            <strong>AI 检测整体提示:</strong>
+            <ul style="margin: 0.125rem 0; padding-left: 1.125rem;">
+                {% for w in gaps.ai_detection_warnings %}<li>{{ w }}</li>{% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+    </section>
+    {% endif %}
+
+    {# ─── prepare_interview ─── #}
+    {% if prep %}
+    <section>
+        <div class="section-title">
+            ## 面试备战 · prepare_interview
+            {% if prep_used_experiences and prep_used_experiences > 0 %}
+            <span class="pill primary" style="margin-left: 0.5rem; text-transform: none; letter-spacing: 0;">
+                基于 {{ prep_used_experiences }} 篇面经
+            </span>
+            {% endif %}
+        </div>
+
+        {% if prep.company_snapshot %}
+        <div style="margin-bottom: 0.75rem; padding: 0.625rem 0.875rem; background: var(--bg-subtle); border-radius: var(--radius-sm); font-size: 0.875rem; line-height: 1.55;">
+            <strong>{{ company or '公司' }}画像 · </strong>{{ prep.company_snapshot }}
+        </div>
+        {% endif %}
+
+        {% if prep.expected_questions %}
+        <div class="muted small" style="margin-bottom: 0.375rem;">
+            预测题目 · 按 likelihood 降序，最多 8 道
+        </div>
+        {% set sorted_q = prep.expected_questions | sort(attribute='likelihood', reverse=true) %}
+        {% for q in sorted_q[:8] %}
+        <div class="question">
+            <div class="top">
+                <span class="pill cat-{{ q.category }}">{{ q.category }}</span>
+                <span class="lik">{{ "%.0f"|format(q.likelihood|float * 100) }}%</span>
+            </div>
+            <div class="q">{{ q.question }}</div>
+            {% if q.rationale %}
+            <div class="why">📍 {{ q.rationale }}</div>
+            {% endif %}
+        </div>
+        {% endfor %}
+        {% endif %}
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-top: 0.75rem;">
+            {% if prep.prep_focus_areas %}
+            <div>
+                <div class="section-title" style="margin-top: 0;">备战重点</div>
+                <ul style="margin: 0; padding-left: 1.125rem; font-size: 0.85rem;">
+                    {% for f in prep.prep_focus_areas %}<li>{{ f }}</li>{% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+            {% if prep.weak_spots %}
+            <div>
+                <div class="section-title" style="margin-top: 0;">用户弱点</div>
+                <ul style="margin: 0; padding-left: 1.125rem; font-size: 0.85rem;">
+                    {% for w in prep.weak_spots %}<li>{{ w }}</li>{% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+        </div>
+    </section>
+    {% endif %}
+
+    {# ─── nothing rendered? fall back to raw text ─── #}
+    {% if not score and not gaps and not prep %}
+    <p class="muted">没有结构化结果——以下是 agent 的原始响应:</p>
+    <pre style="background: var(--bg-subtle); padding: 0.75rem; border-radius: var(--radius-sm); white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.825rem;">{{ response }}</pre>
+    {% endif %}
+
+    <div class="actions" style="margin-top: 1rem; padding-top: 0.875rem; border-top: 1px solid var(--border-soft);">
+        <form hx-post="/inbox/from-report" hx-target="#inbox-preview" hx-swap="innerHTML"
+              style="display:inline">
+            <input type="hidden" name="title" value="{{ inbox_title }}">
+            <input type="hidden" name="body" value="{{ inbox_body }}">
+            <input type="hidden" name="job_text" value="{{ job_text }}">
+            <input type="hidden" name="score_run_id" value="{{ score_run_id or '' }}">
+            <input type="hidden" name="gaps_run_id" value="{{ gaps_run_id or '' }}">
+            <button type="submit">📋 考虑投递 → 加 inbox</button>
+        </form>
+    </div>
 </div>
-<div class="actions" style="margin-top:1rem">
-    <form hx-post="/inbox/from-report" hx-target="#inbox-preview" hx-swap="innerHTML"
-          style="display:inline">
-        <input type="hidden" name="title" value="{{ inbox_title }}">
-        <input type="hidden" name="body" value="{{ inbox_body }}">
-        <input type="hidden" name="job_text" value="{{ job_text }}">
-        <input type="hidden" name="score_run_id" value="{{ score_run_id or '' }}">
-        <input type="hidden" name="gaps_run_id" value="{{ gaps_run_id or '' }}">
-        <button type="submit">考虑投递 → 加 inbox</button>
-    </form>
-    {% if score_run_id %}<span class="muted">score_run_id={{ score_run_id }}</span>{% endif %}
-    {% if gaps_run_id %}<span class="muted">· gaps_run_id={{ gaps_run_id }}</span>{% endif %}
-</div>
+
 {% endif %}

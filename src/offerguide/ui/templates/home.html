@@ -1,52 +1,78 @@
 {% extends "base.html" %}
 {% block title %}OfferGuide — Chat{% endblock %}
 {% block content %}
-<div class="card">
-    <h2>评估一个 JD</h2>
-    <p class="muted">
-        粘贴 JD 文本（来自牛客/Boss/官网），选要做什么。代理会调用
-        <code>score_match</code> / <code>analyze_gaps</code> /
-        <code>prepare_interview</code>，把结果直接渲染下来。
-    </p>
-    <form hx-post="/chat" hx-target="#report" hx-swap="innerHTML" hx-indicator="#spinner">
-        <textarea name="job_text" placeholder="把 JD 全文粘到这里…" required></textarea>
 
-        <div style="margin-top: 0.6rem;">
-            <label class="muted" style="font-size: 0.85em;">
-                公司名（面试备战用，从 JD 里复制即可）：
-            </label><br>
-            <input type="text" name="company" placeholder="例: 字节跳动 / 阿里巴巴"
-                   style="width: 60%; padding: 4px 8px; margin-top: 4px;">
+<div class="page-title">
+    <div>
+        <h1>评估一份 JD</h1>
+        <p>粘贴 JD → 选择动作 → 拿到结构化分析。代理会调用相关 SKILL，结果带概率可视化、AI 风险标注、面试题预测。</p>
+    </div>
+</div>
+
+{% if stats %}
+<div class="stats">
+    <div class="stat">
+        <div class="label">已入库 JD</div>
+        <div class="value">{{ stats.jobs }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">SKILL 调用次数</div>
+        <div class="value">{{ stats.skill_runs }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">Inbox 待决策</div>
+        <div class="value">{{ stats.inbox_pending }}</div>
+    </div>
+    <div class="stat">
+        <div class="label">SKILL 进化次数</div>
+        <div class="value">{{ stats.evolutions }}</div>
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <form hx-post="/chat" hx-target="#report" hx-swap="innerHTML" hx-indicator="#spinner">
+        <label class="field">
+            <span class="label-text">JD 文本</span>
+            <textarea name="job_text" placeholder="把 JD 全文粘到这里…&#10;支持牛客、Boss、官网公告等任意来源" required></textarea>
+        </label>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-top: 0.875rem;">
+            <label class="field">
+                <span class="label-text">公司名（面试备战必填）</span>
+                <input type="text" name="company" placeholder="例: 字节跳动 / 阿里巴巴 / 腾讯">
+            </label>
+            <label class="field">
+                <span class="label-text">动作</span>
+                <select name="action">
+                    <option value="score_and_gaps" selected>评分 + 差距分析</option>
+                    <option value="score">仅评分</option>
+                    <option value="gaps">仅差距分析</option>
+                    <option value="prepare_interview">仅面试备战</option>
+                    <option value="everything">三件套（score + gaps + prep）</option>
+                </select>
+            </label>
         </div>
 
         <div class="actions" style="margin-top: 1rem;">
-            <label>
-                <input type="radio" name="action" value="score_and_gaps" checked>
-                评分 + 差距分析（推荐）
-            </label>
-            <label>
-                <input type="radio" name="action" value="score">仅评分</label>
-            <label>
-                <input type="radio" name="action" value="gaps">仅差距分析</label>
-            <label>
-                <input type="radio" name="action" value="prepare_interview">仅面试备战</label>
-            <label>
-                <input type="radio" name="action" value="everything">三件套</label>
-            <button type="submit" {% if not profile_loaded %}disabled title="先设 OFFERGUIDE_RESUME_PDF 加载简历"{% endif %}>跑一下</button>
-            <span id="spinner" class="muted htmx-indicator">… 调用 LLM 中（10-30 秒）</span>
+            <button type="submit" {% if not profile_loaded %}disabled title="先设 OFFERGUIDE_RESUME_PDF 加载简历"{% endif %}>
+                运行
+            </button>
+            <span id="spinner" class="muted htmx-indicator">⏳ 调用 LLM 中（10-30 秒）…</span>
         </div>
     </form>
 </div>
 
-<div id="report" class="card">
-    <p class="muted">结果将出现在这里。</p>
-</div>
+<div id="report"></div>
 
 <div class="card">
-    <h2>最近 Inbox</h2>
+    <div class="card-header">
+        <h2>Inbox · 最近 10 项</h2>
+        <a href="/inbox" class="muted">查看全部 →</a>
+    </div>
     <div id="inbox-preview">
         {% include "_inbox_list.html" %}
     </div>
-    <p class="muted" style="margin-top:1rem"><a href="/inbox">查看全部 →</a></p>
 </div>
+
 {% endblock %}
