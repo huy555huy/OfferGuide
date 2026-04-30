@@ -99,6 +99,7 @@ def test_store_init_schema_is_idempotent(tmp_path: Path) -> None:
         "evolution_log": 0,
         "inbox_items": 0,
         "interview_experiences": 0,
+        "company_briefs": 0,
     }
 
 

@@ -506,6 +506,7 @@ def create_app(
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard_view(request: Request) -> Any:
+        from .. import briefs as briefs_mod
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -515,6 +516,7 @@ def create_app(
                 funnel=_application_funnel(store),
                 evolutions=_recent_evolutions(store, limit=10),
                 recent_runs=_recent_skill_runs(store, limit=10),
+                briefs=briefs_mod.list_briefs(store, limit=10),
                 active_tab="dashboard",
             ),
         )

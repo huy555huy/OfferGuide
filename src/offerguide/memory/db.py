@@ -156,6 +156,18 @@ CREATE TABLE IF NOT EXISTS interview_experiences (
     UNIQUE(source, content_hash)
 );
 
+-- Per-company brief maintained by the autonomous agent.
+-- The agent reads recent interview_experiences + application_events
+-- + skill_runs and produces a compact JSON brief that overrides
+-- hardcoded heuristics (COMPANY_APPLICATION_LIMITS) when newer signal
+-- says the policy changed.
+CREATE TABLE IF NOT EXISTS company_briefs (
+    company           TEXT PRIMARY KEY,
+    brief_json        TEXT NOT NULL,    -- {summary, current_app_limit, interview_style, recent_signals[], hiring_trend, confidence}
+    last_updated_at   REAL DEFAULT (julianday('now')),
+    update_count      INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_source         ON jobs(source);
 CREATE INDEX IF NOT EXISTS idx_apps_job            ON applications(job_id);
 CREATE INDEX IF NOT EXISTS idx_apps_status         ON applications(status);
@@ -231,5 +243,6 @@ class Store:
                 "evolution_log",
                 "inbox_items",
                 "interview_experiences",
+                "company_briefs",
             ]
             return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}

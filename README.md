@@ -313,6 +313,14 @@ tests/                    # 329 tests, all green
        **`agentic/corpus_collector.py`** 真 agent — 用 search backend (DuckDuckGo HTML 默认)
        搜面经 + LLM 评估质量 + 自动 ingest，用户不用再手 paste；`agentic/meta_agent.py`
        company-sweep orchestrator + `POST /api/agent/sweep` 端点
+- [x] **W8'''''** — **真自治 (autonomous daemon)**：**`autonomous/`** 用 APScheduler 跑 cron-style
+       触发：`silence_check` (daily 09:00) / `corpus_refresh` (weekly Mon 08:00) /
+       `brief_update` (daily 23:00)。**`company_briefs` 表 + `briefs.refresh_brief()`**
+       — agent 读最近面经/事件/JD → DeepSeek 合成 brief → 覆盖硬编码 `COMPANY_APPLICATION_LIMITS`
+       (high-confidence 时)。**`effective_app_limit()`** 是 brief vs hardcoded 的统一入口。
+       Run as daemon: `python -m offerguide.autonomous run`，或 cron 友好的
+       `run-once <job>`。设计 borrowed from APScheduler / OpenHands / LangChain — 见
+       [ATTRIBUTION.md](ATTRIBUTION.md)
 - [ ] **dogfood** — 4 周持续投递收集真实 reply rate 数据；跑首次 GEPA 真活；填 `[TBD]` 数字
 
 ### What's still TBD（需 dogfood 数据）

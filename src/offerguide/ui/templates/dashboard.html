@@ -107,6 +107,55 @@
     {% endif %}
 </div>
 
+{# ─── company briefs (autonomous agent output) ─── #}
+<div class="card">
+    <div class="card-header">
+        <h2>Agent 公司 brief</h2>
+        <span class="meta">由 brief_update daily job 维护</span>
+    </div>
+    {% if briefs %}
+    {% for b in briefs %}
+    <div style="padding: 0.75rem 0.875rem; margin-bottom: 0.5rem;
+                background: var(--bg-elev); border: 1px solid var(--border);
+                border-radius: var(--radius-sm); border-left: 3px solid var(--primary);">
+        <div style="display:flex;gap:0.5rem;align-items:baseline;margin-bottom:0.375rem;">
+            <strong style="font-family: var(--font-serif);">{{ b.company }}</strong>
+            <span class="muted small">已更新 {{ b.update_count }} 次</span>
+            <span class="muted small" style="margin-left:auto;">
+                conf={{ "%.2f"|format(b.brief.confidence) }}
+                {% if b.brief.current_app_limit is not none %}
+                · limit={{ b.brief.current_app_limit }}
+                {% endif %}
+                · 趋势 {{ b.brief.hiring_trend }}
+            </span>
+        </div>
+        <div class="muted small" style="margin-bottom: 0.375rem;">
+            {{ b.brief.summary }}
+        </div>
+        <div class="muted small" style="font-style: italic;">
+            考察风格：{{ b.brief.interview_style }}
+        </div>
+        {% if b.brief.recent_signals %}
+        <div style="margin-top: 0.375rem;">
+            {% for s in b.brief.recent_signals %}
+            <span class="pill primary" style="margin-right:0.25rem;">📍 {{ s }}</span>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="empty">
+        <div style="font-size: 1.5rem; margin-bottom: 0.25rem;">🧠</div>
+        <div>还没有 agent 生成的 brief</div>
+        <div class="small muted">
+            跑 <code>python -m offerguide.autonomous run-once brief_update</code>
+            或启动 daemon (<code>python -m offerguide.autonomous run</code>)
+        </div>
+    </div>
+    {% endif %}
+</div>
+
 {# ─── recent skill_runs ─── #}
 <div class="card">
     <div class="card-header">
