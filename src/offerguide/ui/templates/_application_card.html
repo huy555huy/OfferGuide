@@ -1,0 +1,57 @@
+<div class="application-card" id="app-row-{{ app.id }}">
+    <div class="application-header">
+        <div>
+            <div style="display:flex;gap:0.5rem;align-items:center;">
+                <span class="pill {{ app.status_class }}">{{ app.status }}</span>
+                {% if app.silence_days %}
+                {% if app.silence_days >= 14 %}
+                <span class="pill medium">😴 沉默 {{ app.silence_days|int }}d</span>
+                {% elif app.silence_days >= 7 %}
+                <span class="pill" style="background: var(--warning-soft); color: var(--warning);">沉默 {{ app.silence_days|int }}d</span>
+                {% endif %}
+                {% endif %}
+            </div>
+            <div style="font-family: var(--font-serif); font-size: 1.05rem; font-weight: 600; margin-top: 0.375rem;">
+                {{ app.title or '(无标题)' }}
+            </div>
+            <div class="muted small">
+                {{ app.company or '?' }}
+                {% if app.location %} · {{ app.location }}{% endif %}
+                {% if app.source %} · {{ app.source }}{% endif %}
+            </div>
+        </div>
+        <div class="event-history">
+            {% for ev in app.events[-6:] %}
+            <span class="event-dot event-{{ ev.kind }}" title="{{ ev.kind }} ({{ ev.source }})">●</span>
+            {% endfor %}
+            <span class="muted small" style="margin-left: 0.5rem;">{{ app.events|length }} 事件</span>
+        </div>
+    </div>
+
+    {% if app.events %}
+    <details style="margin: 0.625rem 0;" open>
+        <summary class="muted small" style="cursor: pointer;">▾ 事件时间线（{{ app.events|length }}）</summary>
+        <div style="margin-top: 0.5rem; padding-left: 0.75rem; border-left: 2px solid var(--border-soft);">
+            {% for ev in app.events %}
+            <div class="event-line">
+                <span class="pill event-{{ ev.kind }}-pill">{{ ev.kind }}</span>
+                <span class="muted small">{{ ev.source }}</span>
+                <span class="muted small">{{ ev.when_str }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </details>
+    {% endif %}
+
+    <form hx-post="/api/applications/{{ app.id }}/event"
+          hx-target="#app-row-{{ app.id }}" hx-swap="outerHTML"
+          class="event-buttons">
+        <span class="muted small">日志事件:</span>
+        <button name="kind" value="viewed"     class="ghost" title="HR 看了">👀 已查看</button>
+        <button name="kind" value="replied"    class="ghost" title="HR 回复">💬 已回复</button>
+        <button name="kind" value="assessment" class="ghost" title="笔试 / OA">🧪 笔试</button>
+        <button name="kind" value="interview"  class="ghost" title="面试">🎤 面试</button>
+        <button name="kind" value="rejected"   class="ghost" title="拒信">🚫 拒了</button>
+        <button name="kind" value="offer"      class="ghost" title="Offer">🎉 Offer</button>
+    </form>
+</div>

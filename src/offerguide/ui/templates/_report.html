@@ -170,8 +170,118 @@
     </section>
     {% endif %}
 
+    {# ─── deep_project_prep ─── #}
+    {% if deep_prep %}
+    <section>
+        <div class="section-title">## 项目深度备战 · deep_project_prep</div>
+
+        {% if deep_prep.company_style_summary %}
+        <div style="margin-bottom: 0.875rem; padding: 0.75rem 1rem; background: var(--primary-soft); border-radius: var(--radius-sm); font-size: 0.875rem; line-height: 1.6; border-left: 3px solid var(--primary);">
+            <strong>{{ company or '公司' }} 风格画像 · </strong>{{ deep_prep.company_style_summary }}
+        </div>
+        {% endif %}
+
+        {% for proj in (deep_prep.projects_analyzed or [])[:4] %}
+        <div style="margin: 1rem 0; padding: 0.875rem 1rem; background: var(--bg-warm); border-radius: var(--radius); border: 1px solid var(--border);">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:0.5rem;">
+                <strong style="font-family: var(--font-serif); font-size: 1rem;">📌 {{ proj.project_name }}</strong>
+                <span class="muted small">{{ proj.probing_questions|length }} 道题 · {{ proj.weak_points|length }} 弱点</span>
+            </div>
+            {% if proj.project_summary %}
+            <div class="muted small" style="margin-bottom: 0.625rem;">{{ proj.project_summary }}</div>
+            {% endif %}
+
+            {% if proj.technical_claims %}
+            <div style="margin: 0.5rem 0 0.625rem;">
+                <span class="muted small" style="margin-right:0.375rem;">技术声明:</span>
+                {% for tc in proj.technical_claims %}
+                <span class="pill" style="margin-right:0.25rem;">{{ tc }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% set sorted_q = proj.probing_questions | sort(attribute='likelihood', reverse=true) %}
+            {% for q in sorted_q[:6] %}
+            <div class="question" style="margin-bottom: 0.5rem;">
+                <div class="top">
+                    <span class="pill primary">{{ q.type }}</span>
+                    <span class="lik">{{ "%.0f"|format(q.likelihood|float * 100) }}%</span>
+                </div>
+                <div class="q">{{ q.question }}</div>
+                {% if q.rationale %}
+                <div class="why">📍 {{ q.rationale }}</div>
+                {% endif %}
+                {% if q.answer_outline %}
+                <div style="margin-top: 0.375rem; padding: 0.5rem 0.625rem; background: var(--bg-elev); border-radius: var(--radius-sm); border: 1px solid var(--border-soft);">
+                    <div class="small" style="font-weight: 600; margin-bottom: 0.25rem; color: var(--text-muted);">📝 答题骨架</div>
+                    <ul style="margin: 0; padding-left: 1.125rem; font-size: 0.82rem; line-height: 1.55;">
+                        {% for a in q.answer_outline %}<li>{{ a }}</li>{% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
+                {% if q.followups %}
+                <div class="muted small" style="margin-top: 0.375rem;">
+                    🔁 跟进追问: {% for f in q.followups %}<span class="pill" style="margin-right:0.25rem">{{ f }}</span>{% endfor %}
+                </div>
+                {% endif %}
+            </div>
+            {% endfor %}
+
+            {% if proj.weak_points %}
+            <div style="margin-top: 0.625rem; padding: 0.5rem 0.75rem; background: var(--danger-soft); border-radius: var(--radius-sm); border-left: 3px solid var(--danger);">
+                <div class="small" style="font-weight: 600; color: var(--danger); margin-bottom: 0.375rem;">⚠ 弱点 + 应对</div>
+                {% for w in proj.weak_points[:3] %}
+                <div style="margin-bottom: 0.5rem;">
+                    <div class="small"><strong>弱点：</strong>{{ w.weakness }}</div>
+                    <div class="small"><strong>应对：</strong>{{ w.mitigation }}</div>
+                    <div class="muted small">面试官可能会问: <em>{{ w.likely_question }}</em></div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+
+        {% if deep_prep.cross_project_questions %}
+        <div style="margin-top: 0.875rem;">
+            <div class="section-title" style="margin-top: 0;">跨项目问题</div>
+            {% for q in deep_prep.cross_project_questions[:4] %}
+            <div class="question">
+                <div class="top">
+                    <span class="pill primary">{{ q.type }}</span>
+                    <span class="lik">{{ "%.0f"|format(q.likelihood|float * 100) }}%</span>
+                </div>
+                <div class="q">{{ q.question }}</div>
+                {% if q.rationale %}<div class="why">📍 {{ q.rationale }}</div>{% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if deep_prep.behavioral_questions_tailored %}
+        <div style="margin-top: 0.875rem;">
+            <div class="section-title" style="margin-top: 0;">行为题（结合用户经历，不是通用 STAR）</div>
+            {% for q in deep_prep.behavioral_questions_tailored[:4] %}
+            <div class="question">
+                <div class="top">
+                    <span class="pill cat-behavioral">behavioral</span>
+                    <span class="lik">{{ "%.0f"|format(q.likelihood|float * 100) }}%</span>
+                </div>
+                <div class="q">{{ q.question }}</div>
+                {% if q.answer_outline %}
+                <div style="margin-top: 0.375rem;" class="muted small">
+                    {% for a in q.answer_outline[:3] %}· {{ a }} {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </section>
+    {% endif %}
+
     {# ─── nothing rendered? fall back to raw text ─── #}
-    {% if not score and not gaps and not prep %}
+    {% if not score and not gaps and not prep and not deep_prep %}
     <p class="muted">没有结构化结果——以下是 agent 的原始响应:</p>
     <pre style="background: var(--bg-subtle); padding: 0.75rem; border-radius: var(--radius-sm); white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.825rem;">{{ response }}</pre>
     {% endif %}

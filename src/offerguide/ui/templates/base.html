@@ -4,38 +4,44 @@
     <meta charset="utf-8">
     <title>{% block title %}OfferGuide{% endblock %}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <style>
-        /* ─────── design tokens ─────── */
+        /* ─────── design tokens (Claude-inspired warm palette) ─────── */
         :root {
-            --bg:           #fafafa;
+            --bg:           #faf8f5;   /* warm cream off-white */
             --bg-elev:      #ffffff;
-            --bg-subtle:    #f4f4f5;
-            --border:       #e4e4e7;
-            --border-soft:  #f1f1f2;
-            --text:         #18181b;
-            --text-muted:   #71717a;
-            --text-dim:     #a1a1aa;
+            --bg-subtle:    #f3efe5;   /* slightly warmer cream */
+            --bg-warm:      #ede8dc;   /* warm accent surface */
+            --border:       #e8e1d2;
+            --border-soft:  #efeae0;
+            --text:         #2c2925;   /* warm dark, not pure black */
+            --text-muted:   #79716a;
+            --text-dim:     #a39e95;
 
-            --primary:      #4f46e5;
-            --primary-soft: #eef2ff;
-            --primary-hover:#4338ca;
+            --primary:      #cc785c;   /* terracotta */
+            --primary-soft: #fbf0e8;
+            --primary-hover:#b85f44;
 
-            --success:      #16a34a;
-            --success-soft: #f0fdf4;
-            --warning:      #d97706;
-            --warning-soft: #fffbeb;
-            --danger:       #dc2626;
-            --danger-soft:  #fef2f2;
+            --success:      #6b8e6b;   /* sage */
+            --success-soft: #e8efe6;
+            --warning:      #c89456;   /* amber-warm */
+            --warning-soft: #f6ecd8;
+            --danger:       #b84a44;   /* warm rose */
+            --danger-soft:  #f4e2df;
 
             --radius:       8px;
             --radius-sm:    6px;
-            --radius-lg:    12px;
-            --shadow-sm:    0 1px 2px rgba(0,0,0,0.04);
-            --shadow-md:    0 4px 12px rgba(0,0,0,0.06);
+            --radius-lg:    14px;
+            --shadow-sm:    0 1px 2px rgba(44, 41, 37, 0.04);
+            --shadow-md:    0 4px 14px rgba(44, 41, 37, 0.06);
+            --shadow-lg:    0 12px 28px rgba(44, 41, 37, 0.08);
 
             --font-sans:    -apple-system, BlinkMacSystemFont, "Inter",
                             "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+            --font-serif:   "Source Serif 4", "Tiempos Headline", "Georgia", serif;
             --font-mono:    "SF Mono", "JetBrains Mono", "Menlo", monospace;
         }
 
@@ -66,9 +72,10 @@
             position: sticky; top: 0; z-index: 50;
         }
         .topbar .brand {
-            font-weight: 700;
-            font-size: 1rem;
-            letter-spacing: -0.01em;
+            font-family: var(--font-serif);
+            font-weight: 600;
+            font-size: 1.15rem;
+            letter-spacing: -0.015em;
             margin-right: 2rem;
             display: flex; align-items: center; gap: 0.5rem;
         }
@@ -90,7 +97,11 @@
             transition: all 0.12s;
         }
         .topbar nav a:hover { background: var(--bg-subtle); color: var(--text); }
-        .topbar nav a.active { background: var(--primary-soft); color: var(--primary); }
+        .topbar nav a.active {
+            background: var(--primary-soft);
+            color: var(--primary-hover);
+            font-weight: 600;
+        }
 
         .status-strip {
             margin-left: auto;
@@ -115,10 +126,18 @@
             margin: 0 0 1.25rem;
         }
         .page-title h1 {
-            margin: 0; font-size: 1.5rem; font-weight: 700;
-            letter-spacing: -0.015em;
+            margin: 0;
+            font-family: var(--font-serif);
+            font-size: 1.85rem; font-weight: 600;
+            letter-spacing: -0.025em;
+            color: var(--text);
         }
-        .page-title p { margin: 0.25rem 0 0; color: var(--text-muted); }
+        .page-title p {
+            margin: 0.375rem 0 0;
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            max-width: 700px;
+        }
 
         /* ─────── cards ─────── */
         .card {
@@ -134,8 +153,10 @@
             margin: -0.25rem 0 1rem;
         }
         .card-header h2 {
-            margin: 0; font-size: 1rem; font-weight: 600;
-            letter-spacing: -0.01em;
+            margin: 0;
+            font-family: var(--font-serif);
+            font-size: 1.1rem; font-weight: 600;
+            letter-spacing: -0.015em;
         }
         .card-header .meta { color: var(--text-muted); font-size: 0.8rem; }
 
@@ -152,9 +173,16 @@
             border-radius: var(--radius);
             padding: 0.875rem 1rem;
         }
-        .stat .label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
-        .stat .value { font-size: 1.5rem; font-weight: 700; margin-top: 0.25rem; letter-spacing: -0.02em; }
-        .stat .delta { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.125rem; }
+        .stat .label { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500; }
+        .stat .value {
+            font-family: var(--font-serif);
+            font-size: 1.85rem; font-weight: 600;
+            margin-top: 0.375rem;
+            letter-spacing: -0.025em;
+            color: var(--text);
+            line-height: 1;
+        }
+        .stat .delta { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.375rem; }
 
         /* ─────── forms ─────── */
         textarea, input[type="text"], select {
@@ -266,7 +294,12 @@
             padding: 1rem; background: var(--bg-subtle);
             border-radius: var(--radius); margin-bottom: 1rem;
         }
-        .prob-num { font-size: 2.4rem; font-weight: 700; letter-spacing: -0.03em; line-height: 1; }
+        .prob-num {
+            font-family: var(--font-serif);
+            font-size: 2.85rem; font-weight: 600;
+            letter-spacing: -0.04em; line-height: 1;
+            color: var(--primary);
+        }
         .prob-bar {
             flex: 1; height: 8px; background: var(--border-soft);
             border-radius: 999px; position: relative; overflow: hidden;
@@ -418,9 +451,10 @@
     <header class="topbar">
         <div class="brand"><span class="dot"></span> OfferGuide</div>
         <nav>
-            <a href="/"          class="{% if active_tab == 'home' %}active{% endif %}">Chat</a>
-            <a href="/inbox"     class="{% if active_tab == 'inbox' %}active{% endif %}">Inbox</a>
-            <a href="/dashboard" class="{% if active_tab == 'dashboard' %}active{% endif %}">Dashboard</a>
+            <a href="/"             class="{% if active_tab == 'home' %}active{% endif %}">Chat</a>
+            <a href="/applications" class="{% if active_tab == 'applications' %}active{% endif %}">Applications</a>
+            <a href="/inbox"        class="{% if active_tab == 'inbox' %}active{% endif %}">Inbox</a>
+            <a href="/dashboard"    class="{% if active_tab == 'dashboard' %}active{% endif %}">Dashboard</a>
         </nav>
         <div class="status-strip">
             {% if profile_loaded %}

@@ -17,9 +17,10 @@ RequestedAction = Literal[
     "gaps",
     "score_and_gaps",
     "prepare_interview",
+    "deep_prep",
     "everything",
 ]
-"""Action selector. ``everything`` runs all 3 SKILLs sequentially."""
+"""Action selector. ``everything`` runs all 4 SKILLs sequentially."""
 
 
 class AgentState(TypedDict, total=False):
@@ -62,6 +63,9 @@ class AgentState(TypedDict, total=False):
     prep_run_id: int | None
     prep_used_experiences: int | None
     """Count of 面经 snippets the prep node used (for transparency in UI)."""
+
+    deep_prep_result: dict[str, Any] | None
+    deep_prep_run_id: int | None
 
     # ---- terminal ------------------------------------------------------
     final_response: str | None

@@ -32,11 +32,12 @@ from offerguide.evolution.adapters._base import MetricBreakdown, aggregate
 
 
 class TestRegistry:
-    def test_all_three_skills_registered(self) -> None:
+    def test_all_skills_registered(self) -> None:
         assert set(list_evolvable_skills()) == {
             "score_match",
             "analyze_gaps",
             "prepare_interview",
+            "deep_project_prep",
         }
 
     def test_get_adapter_returns_module(self) -> None:

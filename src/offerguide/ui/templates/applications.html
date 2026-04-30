@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Applications{% endblock %}
+{% block content %}
+
+<div class="page-title">
+    <div>
+        <h1>应用追踪</h1>
+        <p>所有投递（牛客 / Boss / 官网 / 内推）+ 事件时间线 + 1-click 状态日志。
+        不靠平台的也能手动录入——HR 看了 / 回复了 / 笔试 / 面试 / 拒了 / Offer。</p>
+    </div>
+</div>
+
+{% if not applications %}
+<div class="card">
+    <div class="empty">
+        <div style="font-size: 1.75rem; margin-bottom: 0.5rem;">📭</div>
+        <div>还没有投递记录</div>
+        <div class="small muted" style="margin-top: 0.5rem;">
+            从 Chat 页提交 JD → 在分析报告下方点「考虑投递 → 加 inbox」<br>
+            或在 inbox 里点「批准」就会创建一条 application。
+        </div>
+    </div>
+</div>
+{% else %}
+
+<div class="card">
+    <div class="card-header">
+        <h2>{{ applications|length }} 个应用</h2>
+        <span class="meta">活跃 {{ active_count }} · 终态 {{ terminal_count }}</span>
+    </div>
+
+    {% for app in applications %}
+    <div class="application-card" id="app-row-{{ app.id }}">
+        <div class="application-header">
+            <div>
+                <div style="display:flex;gap:0.5rem;align-items:center;">
+                    <span class="pill {{ app.status_class }}">{{ app.status }}</span>
+                    {% if app.silence_days %}
+                    {% if app.silence_days >= 14 %}
+                    <span class="pill medium">😴 沉默 {{ app.silence_days|int }}d</span>
+                    {% elif app.silence_days >= 7 %}
+                    <span class="pill" style="background: var(--warning-soft); color: var(--warning);">沉默 {{ app.silence_days|int }}d</span>
+                    {% endif %}
+                    {% endif %}
+                </div>
+                <div style="font-family: var(--font-serif); font-size: 1.05rem; font-weight: 600; margin-top: 0.375rem;">
+                    {{ app.title or '(无标题)' }}
+                </div>
+                <div class="muted small">
+                    {{ app.company or '?' }}
+                    {% if app.location %} · {{ app.location }}{% endif %}
+                    {% if app.source %} · {{ app.source }}{% endif %}
+                </div>
+            </div>
+            <div class="event-history">
+                {% for ev in app.events[-6:] %}
+                <span class="event-dot event-{{ ev.kind }}" title="{{ ev.kind }} ({{ ev.source }})">●</span>
+                {% endfor %}
+                <span class="muted small" style="margin-left: 0.5rem;">{{ app.events|length }} 事件</span>
+            </div>
+        </div>
+
+        {% if app.events %}
+        <details style="margin: 0.625rem 0;">
+            <summary class="muted small" style="cursor: pointer;">▸ 事件时间线（{{ app.events|length }}）</summary>
+            <div style="margin-top: 0.5rem; padding-left: 0.75rem; border-left: 2px solid var(--border-soft);">
+                {% for ev in app.events %}
+                <div class="event-line">
+                    <span class="pill event-{{ ev.kind }}-pill">{{ ev.kind }}</span>
+                    <span class="muted small">{{ ev.source }}</span>
+                    <span class="muted small">{{ ev.when_str }}</span>
+                </div>
+                {% endfor %}
+            </div>
+        </details>
+        {% endif %}
+
+        <form hx-post="/api/applications/{{ app.id }}/event"
+              hx-target="#app-row-{{ app.id }}" hx-swap="outerHTML"
+              class="event-buttons">
+            <span class="muted small">日志事件:</span>
+            <button name="kind" value="viewed"     class="ghost" title="HR 看了">👀 已查看</button>
+            <button name="kind" value="replied"    class="ghost" title="HR 回复">💬 已回复</button>
+            <button name="kind" value="assessment" class="ghost" title="笔试 / OA">🧪 笔试</button>
+            <button name="kind" value="interview"  class="ghost" title="面试">🎤 面试</button>
+            <button name="kind" value="rejected"   class="ghost" title="拒信">🚫 拒了</button>
+            <button name="kind" value="offer"      class="ghost" title="Offer">🎉 Offer</button>
+        </form>
+    </div>
+    {% endfor %}
+</div>
+
+{% endif %}
+
+<style>
+    .application-card {
+        padding: 1rem 1.125rem;
+        margin-bottom: 0.75rem;
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        transition: border-color 0.12s;
+    }
+    .application-card:hover { border-color: var(--primary); }
+    .application-header {
+        display: flex; justify-content: space-between; align-items: flex-start;
+        gap: 1rem;
+    }
+    .event-history { display: flex; align-items: center; flex-wrap: wrap; }
+    .event-dot {
+        font-size: 0.6rem; line-height: 1; margin: 0 0.0625rem;
+        color: var(--text-dim);
+    }
+    .event-submitted    { color: var(--primary); }
+    .event-viewed       { color: var(--text); }
+    .event-replied      { color: var(--success); }
+    .event-assessment   { color: var(--warning); }
+    .event-interview    { color: var(--warning); font-weight: 700; }
+    .event-rejected     { color: var(--danger); }
+    .event-offer        { color: var(--success); font-weight: 700; }
+    .event-silent_check { color: var(--text-dim); }
+
+    .event-submitted-pill    { background: var(--primary-soft); color: var(--primary); }
+    .event-viewed-pill       { background: var(--bg-subtle); color: var(--text); }
+    .event-replied-pill      { background: var(--success-soft); color: var(--success); }
+    .event-assessment-pill   { background: var(--warning-soft); color: var(--warning); }
+    .event-interview-pill    { background: var(--warning-soft); color: var(--warning); }
+    .event-rejected-pill     { background: var(--danger-soft); color: var(--danger); }
+    .event-offer-pill        { background: var(--success-soft); color: var(--success); }
+    .event-withdrawn-pill    { background: var(--bg-subtle); color: var(--text-muted); }
+    .event-silent_check-pill { background: var(--bg-subtle); color: var(--text-dim); }
+
+    .event-line {
+        display: flex; align-items: center; gap: 0.5rem;
+        padding: 0.25rem 0; font-size: 0.8rem;
+    }
+    .event-buttons {
+        margin-top: 0.625rem;
+        padding-top: 0.625rem;
+        border-top: 1px solid var(--border-soft);
+        display: flex; flex-wrap: wrap; gap: 0.375rem;
+        align-items: center;
+    }
+</style>
+
+{% endblock %}

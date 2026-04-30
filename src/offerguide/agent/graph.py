@@ -107,6 +107,36 @@ def build_graph(
             "gaps_run_id": result.skill_run_id,
         }
 
+    def deep_prep_node(state: AgentState) -> AgentState:
+        if runtime is None:
+            return {"error": "no SkillRuntime configured"}
+        try:
+            spec = _need("deep_project_prep")
+        except _MissingSkillError as e:
+            return {"error": str(e)}
+
+        company = (state.get("company") or "").strip()
+        if not company:
+            return {
+                "error": (
+                    "深度项目备战需要 `company` 字段（从 web UI 表单或调用方传入），"
+                    " 但当前 state 里为空。"
+                )
+            }
+
+        result = runtime.invoke(
+            spec,
+            {
+                "company": company,
+                "job_text": state.get("job_text") or "",
+                "user_profile": state.get("user_profile_text") or "",
+            },
+        )
+        return {
+            "deep_prep_result": result.parsed,
+            "deep_prep_run_id": result.skill_run_id,
+        }
+
     def prep_node(state: AgentState) -> AgentState:
         if runtime is None:
             return {"error": "no SkillRuntime configured"}
@@ -172,6 +202,8 @@ def build_graph(
             return "gaps_node"
         if action == "prepare_interview":
             return "prep_node"
+        if action == "deep_prep":
+            return "deep_prep_node"
         return "summarize"
 
     def after_score_router(state: AgentState) -> str:
@@ -188,10 +220,17 @@ def build_graph(
         action = state.get("requested_action") or DEFAULT_ACTION
         return "prep_node" if action == "everything" else "summarize"
 
+    def after_prep_router(state: AgentState) -> str:
+        if state.get("error"):
+            return "summarize"
+        action = state.get("requested_action") or DEFAULT_ACTION
+        return "deep_prep_node" if action == "everything" else "summarize"
+
     g: StateGraph = StateGraph(AgentState)
     g.add_node("score_node", score_node)
     g.add_node("gaps_node", gaps_node)
     g.add_node("prep_node", prep_node)
+    g.add_node("deep_prep_node", deep_prep_node)
     g.add_node("summarize", summarize)
     g.add_conditional_edges(
         START,
@@ -200,6 +239,7 @@ def build_graph(
             "score_node": "score_node",
             "gaps_node": "gaps_node",
             "prep_node": "prep_node",
+            "deep_prep_node": "deep_prep_node",
             "summarize": "summarize",
         },
     )
@@ -213,7 +253,12 @@ def build_graph(
         after_gaps_router,
         {"prep_node": "prep_node", "summarize": "summarize"},
     )
-    g.add_edge("prep_node", "summarize")
+    g.add_conditional_edges(
+        "prep_node",
+        after_prep_router,
+        {"deep_prep_node": "deep_prep_node", "summarize": "summarize"},
+    )
+    g.add_edge("deep_prep_node", "summarize")
     g.add_edge("summarize", END)
     return g.compile()
 
@@ -316,6 +361,35 @@ def _format_summary(state: AgentState) -> str:
             parts.append("\n**用户弱点**:")
             for w in weak:
                 parts.append(f"  - {w}")
+
+    deep = state.get("deep_prep_result")
+    if deep:
+        parts.append("\n## 项目深度备战 · deep_project_prep")
+        if deep.get("company_style_summary"):
+            parts.append(f"\n**公司风格**: {deep['company_style_summary']}")
+        for proj in (deep.get("projects_analyzed") or [])[:3]:
+            parts.append(f"\n### 项目 · {proj.get('project_name', '?')}")
+            if proj.get("project_summary"):
+                parts.append(proj["project_summary"])
+            for q in (proj.get("probing_questions") or [])[:5]:
+                lik = _safe_float(q.get("likelihood"))
+                lik_s = f"{lik:.2f}" if lik is not None else "?"
+                parts.append(
+                    f"\n[{q.get('type', '?')}] **{q.get('question', '?')}**"
+                    f" — likelihood={lik_s}"
+                )
+                if q.get("answer_outline"):
+                    for a in q["answer_outline"][:4]:
+                        parts.append(f"  · {a}")
+            for w in (proj.get("weak_points") or [])[:2]:
+                parts.append(
+                    f"\n  ⚠ 弱点: {w.get('weakness', '?')}"
+                    f" → {w.get('mitigation', '?')}"
+                )
+        if deep.get("behavioral_questions_tailored"):
+            parts.append("\n### 行为题（结合用户经历）")
+            for q in deep["behavioral_questions_tailored"][:3]:
+                parts.append(f"  - {q.get('question', '?')}")
 
     if not parts:
         return "(没有可显示的结果——请检查 `requested_action` 与输入。)"

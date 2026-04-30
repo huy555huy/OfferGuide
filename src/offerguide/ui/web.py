@@ -19,6 +19,7 @@ runtimes, profiles, and notifiers without touching env vars.
 from __future__ import annotations
 
 import re
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,53 @@ def create_app(
             ),
         )
 
+    @app.get("/applications", response_class=HTMLResponse)
+    def applications_view(request: Request) -> Any:
+        rows = _list_applications_with_events(store)
+        active = sum(1 for r in rows if r["status"] not in ("rejected", "offer", "withdrawn"))
+        return templates.TemplateResponse(
+            request,
+            "applications.html",
+            _ctx(
+                request,
+                applications=rows,
+                active_count=active,
+                terminal_count=len(rows) - active,
+                active_tab="applications",
+            ),
+        )
+
+    @app.post("/api/applications/{app_id}/event", response_class=HTMLResponse)
+    def applications_log_event(
+        request: Request,
+        app_id: int,
+        kind: str = Form(...),
+    ) -> Any:
+        from .. import application_events as ae
+        from ..state_machine import sync_status
+
+        valid_kinds = {
+            "submitted", "viewed", "replied", "assessment",
+            "interview", "rejected", "offer", "withdrawn",
+        }
+        if kind not in valid_kinds:
+            raise HTTPException(400, f"unknown event kind: {kind}")
+        try:
+            ae.record(store, application_id=app_id, kind=kind, source="manual")  # type: ignore[arg-type]
+        except Exception as e:
+            raise HTTPException(400, f"failed to record: {e}") from None
+        sync_status(store, app_id, kind)
+
+        # Re-render only this row so HTMX can swap it in place
+        rows = _list_applications_with_events(store, where_id=app_id)
+        if not rows:
+            raise HTTPException(404, f"application {app_id} not found after event")
+        return templates.TemplateResponse(
+            request,
+            "_application_card.html",
+            _ctx(request, app=rows[0]),
+        )
+
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard_view(request: Request) -> Any:
         return templates.TemplateResponse(
@@ -135,7 +183,8 @@ def create_app(
             )
 
         valid_actions = (
-            "score", "gaps", "score_and_gaps", "prepare_interview", "everything"
+            "score", "gaps", "score_and_gaps", "prepare_interview", "deep_prep",
+            "everything",
         )
         action_norm: RequestedAction = (
             action if action in valid_actions else "score_and_gaps"
@@ -143,7 +192,8 @@ def create_app(
 
         # If user picked an action that needs `company` and didn't provide one,
         # surface the requirement clearly rather than silently falling back.
-        if action_norm in ("prepare_interview", "everything") and not company.strip():
+        company_required = ("prepare_interview", "deep_prep", "everything")
+        if action_norm in company_required and not company.strip():
             return templates.TemplateResponse(
                 request,
                 "_report.html",
@@ -187,6 +237,7 @@ def create_app(
                 gaps=result.get("gaps_result"),
                 prep=result.get("prep_result"),
                 prep_used_experiences=result.get("prep_used_experiences", 0),
+                deep_prep=result.get("deep_prep_result"),
                 company=company.strip() or None,
                 inbox_title=f"考虑投递: {title_first_line}",
                 inbox_body=(result.get("final_response") or "")[:800],
@@ -194,6 +245,7 @@ def create_app(
                 score_run_id=result.get("score_run_id"),
                 gaps_run_id=result.get("gaps_run_id"),
                 prep_run_id=result.get("prep_run_id"),
+                deep_prep_run_id=result.get("deep_prep_run_id"),
             ),
         )
 
@@ -438,6 +490,114 @@ def _humanize_age(seconds: float) -> str:
     if seconds < 86400:
         return f"{int(seconds / 3600)}h ago"
     return f"{int(seconds / 86400)}d ago"
+
+
+# ─────────────── applications timeline helpers ──────────────────────
+
+
+_STATUS_CLASS = {
+    "applied":         "primary",
+    "considered":      "",
+    "viewed":          "",
+    "hr_replied":      "low",
+    "screening":       "primary",
+    "written_test":    "medium",
+    "1st_interview":   "medium",
+    "2nd_interview":   "medium",
+    "final_interview": "medium",
+    "offer":           "low",
+    "rejected":        "high",
+    "withdrawn":       "dismissed",
+}
+
+
+def _list_applications_with_events(
+    store: Store, *, where_id: int | None = None
+) -> list[dict[str, Any]]:
+    """Return all applications + their event timelines, newest first.
+
+    When ``where_id`` is set, returns only that application (used by the
+    HTMX swap-in-place after logging an event).
+    """
+    where_clause = "WHERE a.id = ?" if where_id is not None else ""
+    params: tuple = (where_id,) if where_id is not None else ()
+
+    with store.connect() as conn:
+        app_rows = conn.execute(
+            f"SELECT a.id, a.job_id, a.status, a.applied_at, "
+            f"j.title, j.company, j.location, j.source "
+            f"FROM applications a JOIN jobs j ON j.id = a.job_id "
+            f"{where_clause} "
+            f"ORDER BY a.last_status_change DESC, a.id DESC",
+            params,
+        ).fetchall()
+        if not app_rows:
+            return []
+        ids = tuple(r[0] for r in app_rows)
+        placeholders = ",".join("?" * len(ids))
+        ev_rows = conn.execute(
+            f"SELECT application_id, kind, source, occurred_at "
+            f"FROM application_events "
+            f"WHERE application_id IN ({placeholders}) "
+            f"ORDER BY occurred_at ASC, id ASC",
+            ids,
+        ).fetchall()
+
+    events_by_app: dict[int, list[dict]] = {i: [] for i in ids}
+    for app_id, kind, source, occurred_at in ev_rows:
+        events_by_app[app_id].append(
+            {
+                "kind": kind, "source": source,
+                "occurred_at": occurred_at,
+                "when_str": _julian_to_human(occurred_at),
+            }
+        )
+
+    out: list[dict[str, Any]] = []
+    for r in app_rows:
+        app_id, job_id, status, applied_at, title, company, location, source = r
+        events = events_by_app.get(app_id, [])
+        # Silence age (days since latest non-inferred event)
+        real = [e for e in events if e["source"] != "inferred"]
+        if real:
+            from datetime import datetime
+            now_jd = _to_julian(datetime.now(tz=UTC))
+            silence_days = max(0.0, now_jd - real[-1]["occurred_at"])
+        else:
+            silence_days = None
+        out.append(
+            {
+                "id": app_id,
+                "job_id": job_id,
+                "status": status,
+                "status_class": _STATUS_CLASS.get(status, ""),
+                "title": title, "company": company,
+                "location": location, "source": source,
+                "applied_at": applied_at,
+                "events": events,
+                "silence_days": silence_days,
+            }
+        )
+    return out
+
+
+def _julian_to_human(jd: float) -> str:
+    """Render a julianday timestamp as a human-readable 'Nm ago' string."""
+    from datetime import datetime
+    now_jd = _to_julian(datetime.now(tz=UTC))
+    age_days = max(0.0, now_jd - jd)
+    seconds = age_days * 86400
+    return _humanize_age(seconds)
+
+
+def _to_julian(dt) -> float:
+    """Calendar UTC datetime → SQLite julianday float."""
+    a = (14 - dt.month) // 12
+    y = dt.year + 4800 - a
+    m = dt.month + 12 * a - 3
+    jdn = dt.day + (153 * m + 2) // 5 + 365 * y + y // 4 - y // 100 + y // 400 - 32045
+    frac = (dt.hour - 12) / 24 + dt.minute / 1440 + dt.second / 86400
+    return jdn + frac
 
 
 # -------------------- entry point used by `python -m offerguide.ui.web` --------------------

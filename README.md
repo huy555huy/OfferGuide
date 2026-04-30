@@ -6,9 +6,11 @@
 
 ![dashboard](docs/screenshots/dashboard.png)
 
-| Chat (评分 + 差距 + 备战) | Dashboard (进化历史 / 漏斗) |
+> Claude-inspired warm cream + terracotta visual system. 来自跑活的服务器抓的真实截图，不是 mock。
+
+| Applications (1-click 事件追踪) | Chat report (深度项目备战 + 评分 + 差距) |
 |---|---|
-| ![chat](docs/screenshots/chat_report.png) | ![home](docs/screenshots/home.png) |
+| ![applications](docs/screenshots/applications.png) | ![chat](docs/screenshots/chat_report.png) |
 
 ---
 
@@ -37,9 +39,11 @@ agent 的 SKILL prompt。
 │                      Conversational Agent (LangGraph)               │
 │                                                                     │
 │   evolvable SKILLs (Hermes-style SKILL.md):                         │
-│     ★ score_match       — 校准过的匹配概率 + 多维 reasoning          │
-│     ★ analyze_gaps      — 关键词差距 + 微调建议（带 AI 检测风险）      │
-│     ★ prepare_interview — 公司画像 + 题目预测 + 备战重点               │
+│     ★ score_match        — 校准过的匹配概率 + 多维 reasoning         │
+│     ★ analyze_gaps       — 关键词差距 + 微调建议（带 AI 检测风险）     │
+│     ★ prepare_interview  — 公司画像 + 题目预测 + 备战重点              │
+│     ★ deep_project_prep  — 项目级深挖：每个项目 5+ 题 + 答题骨架       │
+│                            + 弱点应对 + behavioral STAR (W8'')        │
 │                                                                     │
 │   utility SKILLs:                                                   │
 │       update_status     — 应用状态机                                 │
@@ -113,9 +117,9 @@ agent 的 SKILL prompt。
 
 ## Self-evolution loop (the resume pitch in one paragraph)
 
-`score_match / analyze_gaps / prepare_interview` **三个** SKILL 都接入了 GEPA 进化基础设施，
-通过 `evolution/adapters/` 的 adapter 模式插入；想加第四个 SKILL，只需新建一个 `adapters/<skill>.py`
-+ 注册到 REGISTRY。
+`score_match / analyze_gaps / prepare_interview / deep_project_prep` **四个** SKILL 都接入了
+GEPA 进化基础设施，通过 `evolution/adapters/` 的 adapter 模式插入；加第五个 SKILL 只需
+新建 `adapters/<skill>.py` + 注册 REGISTRY。
 
 进化器是 [DSPy GEPA](https://dspy.ai/api/optimizers/GEPA/overview/) (Genetic-Pareto Prompt
 Evolution, ICLR 2026 Oral)——no gradient, no fine-tuning, 比 GRPO 强 6-20%, rollout 减少 35x。
@@ -126,19 +130,22 @@ Evolution, ICLR 2026 Oral)——no gradient, no fine-tuning, 比 GRPO 强 6-20%,
    - `score_match`: 10 例，覆盖 fit/misfit/middle 三档（probability_range + must_mention + must_not_mention）
    - `analyze_gaps`: 7 例，real + edge_case 两档（expected_keywords + ai_risk_floor + count range）
    - `prepare_interview`: 6 例，with_面经/no_面经/edge_case 三档（profile_keywords + jd_keywords）
+   - `deep_project_prep`: 5 例，real + edge_case（profile_keywords + jd_keywords + expected_min_projects）
 2. **多轴 metric**，axes 因 SKILL 而异：
    - `score_match`: 0.5 × prob_in_band + 0.3 × recall + 0.2 × anti_FP
    - `analyze_gaps`: 0.40 × keyword_recall + 0.30 × schema_validity + 0.15 × ai_risk_floor + 0.15 × count_range
    - `prepare_interview`: 0.30 × grounded + 0.25 × category_coverage + 0.20 × schema + 0.15 × calibration_spread + 0.10 × count
+   - `deep_project_prep`: 0.20 × schema + 0.20 × type_coverage + 0.20 × rationale_grounded + 0.15 × outline_concreteness + 0.15 × behavioral_specificity + 0.10 × project_count
    每个轴都返回 human-readable feedback 给 GEPA 的 reflection LM
 3. **进化产物**——一行 CLI 跑出新版 prompt，写回 `SKILL.md`，旧版自动 `.bak` 备份，
    所有指标 delta 入 `evolution_log` 表
 
 ```bash
-# 进化任意一个 SKILL
+# 进化任意一个 SKILL（4 个都支持）
 $ DEEPSEEK_API_KEY=sk-... python -m offerguide.evolution evolve score_match
 $ DEEPSEEK_API_KEY=sk-... python -m offerguide.evolution evolve analyze_gaps
 $ DEEPSEEK_API_KEY=sk-... python -m offerguide.evolution evolve prepare_interview --auto medium
+$ DEEPSEEK_API_KEY=sk-... python -m offerguide.evolution evolve deep_project_prep --auto medium
 
 # 看进化前后 prompt diff + 指标对比（适合贴博客 / README）
 $ python -m offerguide.evolution diff score_match --markdown > evolution.md
@@ -235,9 +242,10 @@ src/offerguide/
 │   ├── runner.py         # SKILL-agnostic GEPA 编排 (W8' refactor)
 │   ├── adapters/         # one module per evolvable SKILL:
 │   │   ├── _base.py      #   - generic MetricBreakdown, aggregate
-│   │   ├── score_match.py     # 10 examples + 3-axis metric
-│   │   ├── analyze_gaps.py    # 7 examples + 4-axis metric
-│   │   └── prepare_interview.py # 6 examples + 5-axis metric
+│   │   ├── score_match.py        # 10 examples + 3-axis metric
+│   │   ├── analyze_gaps.py       # 7 examples + 4-axis metric
+│   │   ├── prepare_interview.py  # 6 examples + 5-axis metric
+│   │   └── deep_project_prep.py  # 5 examples + 6-axis metric
 │   ├── golden_trainset.py # back-compat shim → adapters/score_match
 │   ├── metrics.py        # back-compat shim → adapters/_base + score_match
 │   ├── dspy_module.py    # SkillSpec → dspy.Signature
@@ -249,9 +257,10 @@ src/offerguide/
 ├── platforms/            # nowcoder / manual / boss_extension
 ├── profile/              # PDF 简历解析
 ├── skills/
-│   ├── score_match/      ★ evolvable
-│   ├── analyze_gaps/     ★ evolvable
-│   └── prepare_interview/ ★ evolvable
+│   ├── score_match/        ★ evolvable
+│   ├── analyze_gaps/       ★ evolvable
+│   ├── prepare_interview/  ★ evolvable
+│   └── deep_project_prep/  ★ evolvable (项目级深度备战)
 ├── ui/
 │   ├── web.py            # FastAPI + HTMX
 │   └── notify/           # 飞书 / Telegram / console
@@ -261,8 +270,11 @@ src/offerguide/
     └── tracker.py        # 沉默检测 + 状态机 + 提醒
 
 browser_extension/        # Manifest V3 Chrome 扩展（Boss 页面提取）
-docs/                     # strategy + architecture
-tests/                    # 290+ tests, all green
+docs/
+├── strategy_and_feasibility.md
+├── tracking_strategy.md  # 5 个事件信号源 + 当前实现状态（诚实记录）
+└── screenshots/
+tests/                    # 329 tests, all green
 ```
 
 ---
@@ -279,6 +291,11 @@ tests/                    # 290+ tests, all green
 - [x] **W8** — `prepare_interview` SKILL + `evolution diff` CLI + README 重写
 - [x] **W8'** — Generalize GEPA to all 3 SKILLs (adapter pattern); wire `prepare_interview`
        into the agent (`graph.py` prep_node + `interview_corpus` retrieval); workers CLI
+- [x] **W8''** — UI 大改 (Claude-inspired warm cream + Source Serif 4 headings),
+       new `/applications` page with 1-click event logging, **新 SKILL `deep_project_prep`**
+       (4th evolvable SKILL): per-project deep-dive prep with answer outlines + weak-point
+       mitigation + tailored behavioral questions; `docs/tracking_strategy.md` 诚实记录
+       5 个信号源的实现状态
 - [ ] **dogfood** — 4 周持续投递收集真实 reply rate 数据；跑首次 GEPA 真活；填 `[TBD]` 数字
 
 ### What's still TBD（需 dogfood 数据）

@@ -80,6 +80,25 @@ class _FakeRuntime:
                 "prep_focus_areas": ["Transformer", "STAR"],
                 "weak_spots": ["Megatron"],
             }
+        elif spec.name == "deep_project_prep":
+            parsed = {
+                "company_style_summary": f"{inputs.get('company')} 风格画像",
+                "projects_analyzed": [
+                    {
+                        "project_name": "Deep Research Agent",
+                        "project_summary": "agent runtime",
+                        "technical_claims": ["双层架构", "evidence-centric"],
+                        "probing_questions": [
+                            {"question": "讲讲 evidence-centric", "type": "foundational",
+                             "likelihood": 0.8, "rationale": "JD",
+                             "answer_outline": ["a", "b"], "followups": []},
+                        ],
+                        "weak_points": [],
+                    },
+                ],
+                "cross_project_questions": [],
+                "behavioral_questions_tailored": [],
+            }
         else:
             parsed = {}
         return SkillResult(
@@ -142,7 +161,7 @@ class TestPrepRouting:
         assert result.get("score_result") is None
         assert result.get("gaps_result") is None
 
-    def test_everything_action_runs_all_three(self, tmp_path: Path) -> None:
+    def test_everything_action_runs_all_four(self, tmp_path: Path) -> None:
         store = _make_store(tmp_path)
         skills = discover_skills(SKILLS_ROOT)
         runtime = _FakeRuntime()
@@ -159,10 +178,16 @@ class TestPrepRouting:
         )
 
         called = [name for name, _ in runtime.calls]
-        assert called == ["score_match", "analyze_gaps", "prepare_interview"]
+        assert called == [
+            "score_match",
+            "analyze_gaps",
+            "prepare_interview",
+            "deep_project_prep",
+        ]
         assert result.get("score_result") is not None
         assert result.get("gaps_result") is not None
         assert result.get("prep_result") is not None
+        assert result.get("deep_prep_result") is not None
 
     def test_score_and_gaps_does_not_run_prep(self, tmp_path: Path) -> None:
         store = _make_store(tmp_path)

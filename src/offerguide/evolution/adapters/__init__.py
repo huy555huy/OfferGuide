@@ -14,13 +14,14 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from . import analyze_gaps, prepare_interview, score_match
+from . import analyze_gaps, deep_project_prep, prepare_interview, score_match
 from ._base import MetricBreakdown, SkillAdapter, aggregate, parse_json_output
 
 REGISTRY: dict[str, ModuleType] = {
     "score_match": score_match,
     "analyze_gaps": analyze_gaps,
     "prepare_interview": prepare_interview,
+    "deep_project_prep": deep_project_prep,
 }
 
 
@@ -49,6 +50,7 @@ __all__ = [
     "SkillAdapter",
     "aggregate",
     "analyze_gaps",
+    "deep_project_prep",
     "get_adapter",
     "list_evolvable_skills",
     "parse_json_output",
