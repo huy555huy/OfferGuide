@@ -41,6 +41,10 @@
             </form>
             <a href="/quick-eval?job_id={{ card.job_id }}"
                class="btn ghost" style="font-size: 0.7rem; padding: 0.18rem 0.45rem;">评估</a>
+            {% if card.company %}
+            <a href="/profile/{{ card.company }}"
+               class="btn ghost" style="font-size: 0.7rem; padding: 0.18rem 0.45rem;">画像</a>
+            {% endif %}
         {% elif card.application_id is not none %}
             {% for kind, label in transition_options(stage_key) %}
             <form hx-post="/api/pipeline/applications/{{ card.application_id }}/event"

@@ -144,15 +144,28 @@ CREATE TABLE IF NOT EXISTS inbox_items (
     decision_note  TEXT
 );
 
+-- ``interview_experiences`` is the umbrella corpus table for ANY high-signal
+-- evidence about a company: 面经, offer 复盘, 项目分享, 一面挂经验, etc.
+-- The name is historical (W4 only stored 面经); ``content_kind`` distinguishes
+-- the modern entries while old rows default to 'interview'.
+--
+-- Quality columns (W11+) carry the classifier verdict so successful-profile
+-- synthesis can filter out 卖课 / 引流 / fake content. quality_score is
+-- 0..1; >= 0.6 = trustworthy, < 0.4 = drop. quality_signals_json captures the
+-- evidence (e.g. {has_specific_timeline: true, has_marketer_signals: false}).
 CREATE TABLE IF NOT EXISTS interview_experiences (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    company        TEXT NOT NULL,
-    role_hint      TEXT,             -- 岗位线索（"AI 算法"/"前端"/...）— 可空
-    raw_text       TEXT NOT NULL,    -- 面经原文（去除水印 / 段落归一化后）
-    source         TEXT NOT NULL,    -- 'nowcoder_discuss'|'manual_paste'|'1point3acres'|...
-    source_url     TEXT,
-    content_hash   TEXT NOT NULL,
-    created_at     REAL DEFAULT (julianday('now')),
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    company                TEXT NOT NULL,
+    role_hint              TEXT,             -- 岗位线索（"AI 算法"/"前端"/...）— 可空
+    raw_text               TEXT NOT NULL,
+    source                 TEXT NOT NULL,    -- 'nowcoder_discuss'|'manual_paste'|'1point3acres'|...
+    source_url             TEXT,
+    content_hash           TEXT NOT NULL,
+    content_kind           TEXT NOT NULL DEFAULT 'interview',  -- 'interview'|'offer_post'|'reflection'|'project_share'|'other'
+    quality_score          REAL NOT NULL DEFAULT 0.5,           -- 0..1, agent-classified trustworthiness
+    quality_signals_json   TEXT NOT NULL DEFAULT '{}',          -- structured evidence
+    quality_classified_at  REAL,                                -- NULL = not yet classified
+    created_at             REAL DEFAULT (julianday('now')),
     UNIQUE(source, content_hash)
 );
 
@@ -214,6 +227,34 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE jobs ADD COLUMN extras_json TEXT NOT NULL DEFAULT '{}'"
         )
+
+    # interview_experiences quality + content_kind columns (W11)
+    ie_cols = {
+        row[1] for row in conn.execute(
+            "PRAGMA table_info(interview_experiences)"
+        ).fetchall()
+    }
+    if ie_cols:  # only if the table exists
+        if "content_kind" not in ie_cols:
+            conn.execute(
+                "ALTER TABLE interview_experiences "
+                "ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'interview'"
+            )
+        if "quality_score" not in ie_cols:
+            conn.execute(
+                "ALTER TABLE interview_experiences "
+                "ADD COLUMN quality_score REAL NOT NULL DEFAULT 0.5"
+            )
+        if "quality_signals_json" not in ie_cols:
+            conn.execute(
+                "ALTER TABLE interview_experiences "
+                "ADD COLUMN quality_signals_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "quality_classified_at" not in ie_cols:
+            conn.execute(
+                "ALTER TABLE interview_experiences "
+                "ADD COLUMN quality_classified_at REAL"
+            )
 
 
 class Store:

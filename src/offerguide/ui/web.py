@@ -698,6 +698,151 @@ def create_app(
             _ctx(request, cover=cover, run_id=run_id),
         )
 
+    @app.get("/profile/{company}", response_class=HTMLResponse)
+    def profile_view(request: Request, company: str, role: str = "") -> Any:
+        """成功者画像 + 简历 gap 投递前 briefing 页面。
+
+        渲染流程：
+        1. ``corpus_quality.fetch_high_quality`` 拉公司 + 角色匹配的高质量样本
+        2. 调用 ``successful_profile`` SKILL 合成画像
+        3. 调用 ``profile_resume_gap`` SKILL 对比简历，输出 4 桶 gap
+
+        如果样本数 < 1，提示用户去 sweep 或先粘几条面经；
+        如果 LLM/profile 未配置，给降级提示但仍展示样本数据。
+        """
+        from .. import corpus_quality
+
+        samples = corpus_quality.fetch_high_quality(
+            store, company=company, role_hint=role or None, limit=8,
+        )
+
+        # 数据不足，直接渲染空状态
+        if not samples:
+            return templates.TemplateResponse(
+                request, "profile_briefing.html",
+                _ctx(
+                    request,
+                    company=company,
+                    role=role,
+                    samples=[],
+                    profile_result=None,
+                    gap_result=None,
+                    error="样本不足——还没有该公司的高质量面经/offer 帖。"
+                          "去 /interviews 粘几条，或运行 corpus_refresh 任务。",
+                    active_tab="profile",
+                ),
+            )
+
+        if profile is None or runtime is None:
+            return templates.TemplateResponse(
+                request, "profile_briefing.html",
+                _ctx(
+                    request,
+                    company=company,
+                    role=role,
+                    samples=samples,
+                    profile_result=None,
+                    gap_result=None,
+                    error="未配置简历或 LLM——只能展示样本，无法合成画像。",
+                    active_tab="profile",
+                ),
+            )
+
+        # Find SKILLs
+        profile_spec = next(
+            (s for s in skills if s.name == "successful_profile"), None,
+        )
+        gap_spec = next(
+            (s for s in skills if s.name == "profile_resume_gap"), None,
+        )
+        if profile_spec is None or gap_spec is None:
+            return templates.TemplateResponse(
+                request, "profile_briefing.html",
+                _ctx(
+                    request, company=company, role=role, samples=samples,
+                    profile_result=None, gap_result=None,
+                    error="successful_profile / profile_resume_gap SKILL 未加载",
+                    active_tab="profile",
+                ),
+            )
+
+        # Run successful_profile
+        samples_for_skill = [
+            {
+                "id": s["id"],
+                "content_kind": s["content_kind"],
+                "raw_text": (s["raw_text"] or "")[:3000],  # cap to keep prompt small
+                "source": s["source"],
+                "source_url": s["source_url"] or "",
+                "quality_score": s["quality_score"],
+            }
+            for s in samples
+        ]
+        profile_result = None
+        profile_run_id = None
+        try:
+            sp = runtime.invoke(
+                profile_spec,
+                {
+                    "company": company,
+                    "role_hint": role or "",
+                    "high_quality_samples_json": json_dumps(samples_for_skill),
+                },
+            )
+            profile_result = sp.parsed or {}
+            profile_run_id = sp.skill_run_id
+        except LLMError as e:
+            return templates.TemplateResponse(
+                request, "profile_briefing.html",
+                _ctx(
+                    request, company=company, role=role, samples=samples,
+                    profile_result=None, gap_result=None,
+                    error=f"successful_profile 调用失败: {e}",
+                    active_tab="profile",
+                ),
+            )
+
+        # Run profile_resume_gap
+        gap_result = None
+        gap_run_id = None
+        try:
+            gr = runtime.invoke(
+                gap_spec,
+                {
+                    "successful_profile_json": json_dumps(profile_result),
+                    "user_resume": profile.raw_resume_text,
+                },
+            )
+            gap_result = gr.parsed or {}
+            gap_run_id = gr.skill_run_id
+        except LLMError as e:
+            # Profile rendered, gap missing — degrade gracefully
+            return templates.TemplateResponse(
+                request, "profile_briefing.html",
+                _ctx(
+                    request, company=company, role=role, samples=samples,
+                    profile_result=profile_result, profile_run_id=profile_run_id,
+                    gap_result=None,
+                    error=f"profile_resume_gap 调用失败: {e}",
+                    active_tab="profile",
+                ),
+            )
+
+        return templates.TemplateResponse(
+            request, "profile_briefing.html",
+            _ctx(
+                request,
+                company=company,
+                role=role,
+                samples=samples,
+                profile_result=profile_result,
+                profile_run_id=profile_run_id,
+                gap_result=gap_result,
+                gap_run_id=gap_run_id,
+                active_tab="profile",
+            ),
+        )
+
     @app.get("/reflect", response_class=HTMLResponse)
     def reflect_view(request: Request) -> Any:
         """Page where the user submits an interview transcript for analysis."""

@@ -41,6 +41,8 @@ class TestRegistry:
             "compare_jobs",
             "write_cover_letter",
             "post_interview_reflection",
+            "successful_profile",
+            "profile_resume_gap",
         }
 
     def test_get_adapter_returns_module(self) -> None:

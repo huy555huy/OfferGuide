@@ -1,0 +1,403 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — {{ company }} 投递前画像{% endblock %}
+{% block content %}
+
+<style>
+    .briefing-grid {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr;
+        gap: 1.25rem;
+        align-items: start;
+    }
+    @media (max-width: 920px) { .briefing-grid { grid-template-columns: 1fr; } }
+
+    .pat-section { margin-bottom: 1rem; }
+    .pat-section h4 {
+        margin: 0 0 0.375rem;
+        font-size: 0.85rem; font-weight: 600;
+        text-transform: uppercase; letter-spacing: 0.05em;
+        color: var(--text-muted);
+    }
+    .pat-section ul { margin: 0; padding-left: 1.25rem; font-size: 0.875rem; line-height: 1.5; }
+    .pat-section .tags { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+    .pat-section .tag {
+        background: var(--bg-subtle); color: var(--text);
+        padding: 0.125rem 0.5rem; border-radius: 999px;
+        font-size: 0.75rem;
+    }
+
+    .bucket {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 1rem;
+        margin-bottom: 0.875rem;
+    }
+    .bucket.have       { border-left: 4px solid var(--success); }
+    .bucket.short-fix  { border-left: 4px solid var(--primary); }
+    .bucket.cant-short { border-left: 4px solid var(--warning); }
+    .bucket.cant-fake  { border-left: 4px solid var(--danger); }
+    .bucket-head {
+        display: flex; align-items: baseline; gap: 0.5rem;
+        margin-bottom: 0.625rem;
+    }
+    .bucket-head h3 {
+        margin: 0; font-family: var(--font-serif);
+        font-size: 1.05rem; font-weight: 600;
+    }
+    .bucket-head .count {
+        font-family: var(--font-mono); font-size: 0.75rem;
+        color: var(--text-muted);
+    }
+    .bucket-item {
+        padding: 0.625rem 0.75rem; margin-bottom: 0.5rem;
+        background: var(--bg-subtle);
+        border-radius: var(--radius-sm);
+        font-size: 0.875rem;
+    }
+    .bucket-item:last-child { margin-bottom: 0; }
+    .bucket-item .topic { font-weight: 600; margin-bottom: 0.25rem; }
+    .bucket-item .meta {
+        font-size: 0.78rem; color: var(--text-muted);
+        line-height: 1.5;
+    }
+    .bucket-item .meta strong { color: var(--text); font-weight: 500; }
+    .bucket-item .strength {
+        font-family: var(--font-mono); font-size: 0.7rem;
+        padding: 0.05rem 0.4rem; border-radius: 999px;
+        margin-left: 0.375rem;
+    }
+    .bucket-item .strength.strong   { background: var(--success-soft); color: var(--success); }
+    .bucket-item .strength.moderate { background: var(--warning-soft); color: var(--warning); }
+    .bucket-item .strength.weak     { background: var(--danger-soft); color: var(--danger); }
+
+    .verdict-card {
+        background: linear-gradient(135deg, var(--bg-elev), var(--bg-subtle));
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 1.25rem;
+    }
+    .verdict-card .label {
+        font-size: 0.78rem; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.05em;
+        margin-bottom: 0.375rem;
+    }
+    .verdict-card .verdict {
+        display: inline-flex; align-items: center; gap: 0.5rem;
+        font-family: var(--font-serif);
+        font-size: 1.4rem; font-weight: 600;
+        margin-bottom: 0.5rem;
+    }
+    .verdict-card .verdict.go    { color: var(--success); }
+    .verdict-card .verdict.maybe { color: var(--text); }
+    .verdict-card .verdict.hold  { color: var(--warning); }
+    .verdict-card .verdict.skip  { color: var(--danger); }
+    .verdict-card .rationale {
+        font-size: 0.95rem; line-height: 1.55;
+        margin: 0.375rem 0 0.875rem;
+    }
+    .verdict-card ol {
+        margin: 0; padding-left: 1.25rem;
+        font-size: 0.875rem; line-height: 1.6;
+    }
+    .verdict-card ol li { margin-bottom: 0.25rem; }
+
+    .source-list {
+        display: flex; flex-direction: column; gap: 0.375rem;
+    }
+    .source-item {
+        font-size: 0.78rem; color: var(--text-muted);
+        padding: 0.375rem 0.625rem;
+        background: var(--bg-subtle); border-radius: var(--radius-sm);
+        display: flex; gap: 0.5rem; align-items: center;
+    }
+    .source-item .kind-pill {
+        font-size: 0.65rem; padding: 0.05rem 0.4rem;
+        border-radius: 999px; font-family: var(--font-mono);
+    }
+    .source-item .kind-pill.interview     { background: var(--primary-soft); color: var(--primary); }
+    .source-item .kind-pill.offer_post    { background: var(--success-soft); color: var(--success); }
+    .source-item .kind-pill.project_share { background: var(--warning-soft); color: var(--warning); }
+    .source-item .kind-pill.reflection    { background: #f3e8ff; color: #7e22ce; }
+    .source-item .kind-pill.other         { background: var(--bg-warm); color: var(--text-muted); }
+    .source-item .score {
+        font-family: var(--font-mono);
+        margin-left: auto; color: var(--text-dim);
+    }
+
+    .uncertainty {
+        background: var(--warning-soft);
+        border-left: 3px solid var(--warning);
+        padding: 0.625rem 0.875rem;
+        font-size: 0.85rem;
+        border-radius: var(--radius-sm);
+        margin-bottom: 0.875rem;
+    }
+    .uncertainty ul { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+</style>
+
+<div class="page-title">
+    <div>
+        <h1>{{ company }} · 投递前画像</h1>
+        <p>
+            {% if role %}聚焦角色：<strong>{{ role }}</strong>。{% endif %}
+            基于 {{ samples|length }} 条高质量样本（已过质量分类器）合成「成功者画像」+ 与你的简历对比。
+            <a href="/quick-eval">先评估 JD →</a> · <a href="/interviews?company={{ company }}">看原始样本 →</a>
+        </p>
+    </div>
+</div>
+
+{% if error %}
+<div class="card">
+    <div class="error">⚠ {{ error }}</div>
+</div>
+{% endif %}
+
+{# ── 投递建议（最重要，置顶） ── #}
+{% if gap_result and gap_result.投递建议 %}
+{% set adv = gap_result.投递建议 %}
+<div class="verdict-card">
+    <div class="label">投递建议</div>
+    <div class="verdict {{ adv.verdict }}">
+        {% if adv.verdict == 'go' %}✓ 建议投
+        {% elif adv.verdict == 'maybe' %}~ 可以一试
+        {% elif adv.verdict == 'hold' %}⏸ 暂缓 / 先补再投
+        {% else %}✗ 不建议投{% endif %}
+    </div>
+    <div class="rationale">{{ adv.rationale_chinese }}</div>
+    {% if adv.top_3_pre_apply_actions %}
+    <div class="label">投之前最该做的 3 件事</div>
+    <ol>
+        {% for a in adv.top_3_pre_apply_actions %}<li>{{ a }}</li>{% endfor %}
+    </ol>
+    {% endif %}
+</div>
+{% endif %}
+
+<div class="briefing-grid">
+
+    {# ── 左栏：成功者画像 ── #}
+    <div>
+        <div class="card">
+            <div class="card-header">
+                <h2>成功者画像</h2>
+                {% if profile_run_id %}<span class="meta">SKILL run #{{ profile_run_id }}</span>{% endif %}
+            </div>
+
+            {% if profile_result %}
+
+                {% if profile_result.uncertainty_notes %}
+                <div class="uncertainty">
+                    <strong>⚠ 数据不足提示：</strong>
+                    <ul>{% for u in profile_result.uncertainty_notes %}<li>{{ u }}</li>{% endfor %}</ul>
+                </div>
+                {% endif %}
+
+                <div class="pat-section">
+                    <h4>角色聚焦</h4>
+                    <p style="margin: 0; font-size: 0.95rem;">{{ profile_result.role_focus }}</p>
+                </div>
+
+                {% if profile_result.background_pattern %}
+                {% set bg = profile_result.background_pattern %}
+                <div class="pat-section">
+                    <h4>背景模式</h4>
+                    <ul>
+                        {% if bg.education_level %}<li>学历：{{ bg.education_level }}</li>{% endif %}
+                        {% if bg.school_tier %}<li>学校：{{ bg.school_tier }}</li>{% endif %}
+                        {% if bg.majors %}<li>专业：{{ bg.majors|join('、') }}</li>{% endif %}
+                        {% if bg.internships %}<li>实习：{{ bg.internships|join('；') }}</li>{% endif %}
+                        {% if bg.competitions %}<li>竞赛：{{ bg.competitions|join('、') }}</li>{% endif %}
+                        {% if bg.publications %}<li>论文/开源：{{ bg.publications|join('、') }}</li>{% endif %}
+                    </ul>
+                </div>
+                {% endif %}
+
+                {% if profile_result.skill_pattern %}
+                {% set sk = profile_result.skill_pattern %}
+                <div class="pat-section">
+                    <h4>技能模式</h4>
+                    {% if sk.must_have %}
+                    <p style="margin: 0 0 0.25rem; font-size: 0.85rem;"><strong>必备</strong>（≥70% 都有）：</p>
+                    <div class="tags">{% for s in sk.must_have %}<span class="tag">{{ s }}</span>{% endfor %}</div>
+                    {% endif %}
+                    {% if sk.highly_valued %}
+                    <p style="margin: 0.5rem 0 0.25rem; font-size: 0.85rem;"><strong>加分</strong>：</p>
+                    <div class="tags">{% for s in sk.highly_valued %}<span class="tag">{{ s }}</span>{% endfor %}</div>
+                    {% endif %}
+                    {% if sk.differentiators %}
+                    <p style="margin: 0.5rem 0 0.25rem; font-size: 0.85rem;"><strong>差异化</strong>：</p>
+                    <div class="tags">{% for s in sk.differentiators %}<span class="tag" style="background:var(--primary-soft);color:var(--primary);">{{ s }}</span>{% endfor %}</div>
+                    {% endif %}
+                </div>
+                {% endif %}
+
+                {% if profile_result.project_pattern %}
+                {% set pp = profile_result.project_pattern %}
+                <div class="pat-section">
+                    <h4>项目模式</h4>
+                    <ul>
+                        {% if pp.typical_project_themes %}<li>主题：{{ pp.typical_project_themes|join('、') }}</li>{% endif %}
+                        {% if pp.common_tech_stacks %}<li>技术栈：{{ pp.common_tech_stacks|join('、') }}</li>{% endif %}
+                        {% if pp.scale_signals %}<li>规模信号：{{ pp.scale_signals|join('；') }}</li>{% endif %}
+                        {% if pp.outcome_signals %}<li>结果指标：{{ pp.outcome_signals|join('；') }}</li>{% endif %}
+                    </ul>
+                </div>
+                {% endif %}
+
+                {% if profile_result.interview_pattern %}
+                {% set ip = profile_result.interview_pattern %}
+                <div class="pat-section">
+                    <h4>面试模式</h4>
+                    {% if ip.common_questions %}
+                    <p style="margin: 0 0 0.25rem; font-size: 0.85rem;"><strong>高频题</strong>：</p>
+                    <ul>
+                        {% for q in ip.common_questions %}
+                        <li>{{ q.question }} <span class="muted small">[{{ q.category }} · {{ q.evidence_count }} 条样本]</span></li>
+                        {% endfor %}
+                    </ul>
+                    {% endif %}
+                    {% if ip.decision_factors %}
+                    <p style="margin: 0.5rem 0 0.25rem; font-size: 0.85rem;"><strong>决定因素</strong>：</p>
+                    <ul>{% for f in ip.decision_factors %}<li>{{ f }}</li>{% endfor %}</ul>
+                    {% endif %}
+                </div>
+                {% endif %}
+
+                {% if profile_result.why_they_passed %}
+                <div class="pat-section">
+                    <h4>为什么他们能过</h4>
+                    <ul>
+                        {% for r in profile_result.why_they_passed %}<li>{{ r }}</li>{% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
+
+            {% else %}
+            <div class="empty">
+                <div style="font-size: 1.5rem;">🪶</div>
+                <div>画像未生成</div>
+                <div class="small muted">检查上方错误提示</div>
+            </div>
+            {% endif %}
+        </div>
+
+        {# 样本来源 #}
+        <div class="card">
+            <div class="card-header">
+                <h2>引用的样本（{{ samples|length }} 条）</h2>
+                <span class="meta">按质量分降序</span>
+            </div>
+            <div class="source-list">
+                {% for s in samples %}
+                <div class="source-item">
+                    <span class="kind-pill {{ s.content_kind }}">{{ s.content_kind }}</span>
+                    <span style="flex: 1;">
+                        {{ s.source }}{% if s.role_hint %} · {{ s.role_hint }}{% endif %}
+                        {% if s.source_url %}<a href="{{ s.source_url }}" target="_blank" style="font-size: 0.7rem;">[原文 ↗]</a>{% endif %}
+                    </span>
+                    <span class="score">q={{ "%.2f"|format(s.quality_score) }}</span>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    {# ── 右栏：4 桶 Gap ── #}
+    <div>
+        {% if gap_result %}
+
+            {% if gap_result.已具备 %}
+            <div class="bucket have">
+                <div class="bucket-head">
+                    <h3>✓ 已具备</h3>
+                    <span class="count">{{ gap_result.已具备|length }} 项</span>
+                </div>
+                {% for it in gap_result.已具备 %}
+                <div class="bucket-item">
+                    <div class="topic">{{ it.topic }}<span class="strength {{ it.strength }}">{{ it.strength }}</span></div>
+                    <div class="meta">
+                        <strong>简历证据：</strong>{{ it.evidence_in_resume }}<br>
+                        <strong>对应画像项：</strong>{{ it.evidence_in_profile }}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% if gap_result['短期能补 (≤2周)'] %}
+            <div class="bucket short-fix">
+                <div class="bucket-head">
+                    <h3>⏱ 短期能补 (≤2 周)</h3>
+                    <span class="count">{{ gap_result['短期能补 (≤2周)']|length }} 项</span>
+                </div>
+                {% for it in gap_result['短期能补 (≤2周)'] %}
+                <div class="bucket-item">
+                    <div class="topic">{{ it.topic }} <span class="muted small">· 预算 {{ it.estimated_hours }} 小时</span></div>
+                    <div class="meta">
+                        <strong>缺什么：</strong>{{ it.why_missing }}<br>
+                        <strong>动作：</strong>{{ it.concrete_action }}<br>
+                        <strong>补完后简历可加一行：</strong>{{ it.skill_signal_after }}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% if gap_result.短期补不了 %}
+            <div class="bucket cant-short">
+                <div class="bucket-head">
+                    <h3>⚠ 短期补不了</h3>
+                    <span class="count">{{ gap_result.短期补不了|length }} 项</span>
+                </div>
+                {% for it in gap_result.短期补不了 %}
+                <div class="bucket-item">
+                    <div class="topic">{{ it.topic }} <span class="muted small">· 至少 {{ it.min_time_to_acquire }}</span></div>
+                    <div class="meta">
+                        <strong>缺什么：</strong>{{ it.why_missing }}<br>
+                        <strong>替代演示：</strong>{{ it.alternative_demonstration }}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% if gap_result.不能编 %}
+            <div class="bucket cant-fake">
+                <div class="bucket-head">
+                    <h3>✗ 不能编</h3>
+                    <span class="count">{{ gap_result.不能编|length }} 项 · 别尝试</span>
+                </div>
+                {% for it in gap_result.不能编 %}
+                <div class="bucket-item">
+                    <div class="topic">{{ it.topic }}</div>
+                    <div class="meta">
+                        <strong>验证渠道：</strong>{{ it.why_unfakeable }}<br>
+                        <strong>诚实表达：</strong>{{ it.reframe_strategy }}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% if gap_result.calibration %}
+            <div class="muted small" style="text-align: right; margin-top: 0.625rem;">
+                覆盖画像 {{ gap_result.calibration.covered_profile_fields }} 个领域
+                {% if gap_result.calibration.skipped_due_to_low_evidence %}
+                · 因证据不足跳过：{{ gap_result.calibration.skipped_due_to_low_evidence|join('、') }}
+                {% endif %}
+            </div>
+            {% endif %}
+
+        {% else %}
+        <div class="empty">
+            <div style="font-size: 1.5rem;">📋</div>
+            <div>简历对比未生成</div>
+            <div class="small muted">需要 LLM + 简历加载</div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+{% endblock %}
