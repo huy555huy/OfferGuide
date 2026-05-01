@@ -33,6 +33,32 @@ DEFAULT_MODEL = "deepseek-v4-flash"
 Role = Literal["system", "user", "assistant"]
 
 
+def _strip_md_codefence(s: str) -> str:
+    """Strip ```...``` and ```json...``` fences from an LLM response.
+
+    Used when json_mode=True to handle Claude-family models that wrap
+    JSON in markdown. Returns ``s`` unchanged if no fences detected.
+
+    Handles three common shapes:
+        ```json\\n{...}\\n```
+        ```\\n{...}\\n```
+        leading/trailing whitespace + optional fences
+    """
+    text = s.strip()
+    if not text.startswith("```"):
+        return text
+    # Strip the opening fence (```json\n or ```\n)
+    nl_idx = text.find("\n")
+    if nl_idx == -1:
+        return text
+    text = text[nl_idx + 1 :]
+    # Strip the closing fence — find the last ``` and cut there
+    close_idx = text.rfind("```")
+    if close_idx != -1:
+        text = text[:close_idx]
+    return text.strip()
+
+
 def _normalize_base_url(raw: str) -> str:
     """Make a user-supplied base URL POST-able as ``{base}/chat/completions``.
 
@@ -85,7 +111,7 @@ class LLMClient:
         api_key: str | None = None,
         base_url: str | None = None,
         default_model: str | None = None,
-        timeout_s: float = 60.0,
+        timeout_s: float = 180.0,
     ) -> None:
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         raw_base = (
@@ -151,6 +177,14 @@ class LLMClient:
             content = choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError(f"LLM response missing choices[0].message.content: {payload}") from e
+
+        # Strip ``` ``` markdown fences from JSON-mode responses. Anthropic Claude
+        # (whether direct or via OpenAI-compat proxies like ccvibe) wraps structured
+        # outputs in ```json ... ``` even when response_format=json_object is sent —
+        # OpenAI-spec only the latter, but Claude inherits the markdown habit. Centralize
+        # the stripping here so every json_mode call site gets a clean parse downstream.
+        if json_mode and content:
+            content = _strip_md_codefence(content)
 
         usage = payload.get("usage", {})
         return LLMResponse(

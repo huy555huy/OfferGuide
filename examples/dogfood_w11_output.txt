@@ -1,0 +1,119 @@
+[ENV] base_url = https://ccvibe.cc
+[ENV] api_key = sk-90592d6...
+[ENV] model = claude-sonnet-4-6
+[DB] /var/folders/h0/9md_j8tx6vzdr04g4x5_d05w0000gn/T/tmp2fn9oshs.db
+
+========== STEP 2: 种 5 个样本 ==========
+  ✓ id=1 expected=marketer       source=weibo_promo_001 (262 字)
+  ✓ id=2 expected=offer_post     source=nowcoder_offer_002 (1060 字)
+  ✓ id=3 expected=interview      source=nowcoder_intervew_003 (576 字)
+  ✓ id=4 expected=project_share  source=github_repo_004 (1056 字)
+  ✓ id=5 expected=other          source=manual_paste_005 (166 字)
+
+========== STEP 3: corpus_quality.classify_pending (real LLM) ==========
+running...
+counters: {'processed': 5, 'marketer': 1, 'high_quality': 3, 'low_quality': 0}
+
+  per-row verdicts:
+  ✓ id=1 expected=marketer       got=marketer       score=0.00
+      rationale: 纯卖课/引流文案，无真实面试内容
+  ✓ id=2 expected=offer_post     got=offer_post     score=1.00
+      rationale: 真实校招复盘：具体时间线、三轮面试细节、项目数据（GAIA benchmark成绩、hit@5 0.78）、技术深度讨论、诚实说不懂的部分、明确offer结果。
+  ✓ id=3 expected=interview      got=interview      score=1.00
+      rationale: 真实一面挂经，具体日期/时长/题目/卡点/复盘，无引流迹象，高可信度。
+  ✓ id=4 expected=project_share  got=project_share  score=1.00
+      rationale: 开源项目分享，含具体技术栈、数据表格、性能对比、代码结构。提及拿到offer后整理，有真实数据支撑和工程细节（如prompt example数量的trade-off）。
+  ✓ id=5 expected=other          got=other          score=0.50
+      rationale: 求职信息咨询贴，提问招聘时间和流程，无个人经历分享、无引流、无营销特征。
+
+========== STEP 4: fetch_high_quality 拉合成原料 ==========
+  high-quality samples: 3
+    · id= 4 kind=project_share  score=1.00 src=github_repo_004
+    · id= 2 kind=offer_post     score=1.00 src=nowcoder_offer_002
+    · id= 3 kind=interview      score=1.00 src=nowcoder_intervew_003
+
+========== STEP 5: successful_profile SKILL (real LLM) ==========
+  invoking with 3 samples...
+
+  ✓ profile generated (run #1)
+    company: 字节跳动
+    role_focus: Seed AI Agent 后端实习 - LLM Agent 系统开发与评测
+    evidence_count: 3
+    evidence_kinds: ['offer_post', 'interview', 'project_share']
+
+    must_have: ['LangGraph state machine设计与实现（2/3样本提及）', 'LLM Agent多模式实现（ReAct/CoT/Tool-call，2/3样本提及）', 'Pydantic v2 schema设计（2/3样本提及）', '手撕算法能力（leetcode hot100级别，3/3样本均涉及算法题）']
+    highly_valued: ['DSPy prompt编译与评估（2/3样本）', 'RAG系统搭建（BGE-large + reranker，2/3样本）', 'benchmark评测经验（GAIA/SWE-bench，2/3样本）', '系统设计能力（高QPS inference pipeline，2/3样本）', 'Transformer底层原理（attention机制、自动求导，2/3样本）']
+    differentiators: ['200+测试用例参数化评测框架（1条project_share，但被offer复盘中面试官高度认可）', 'speculative decoding + KV cache reuse优化经验（1条offer复盘，系统设计环节加分项）', 'GRPO vs PPO原理对比（1条offer复盘，理论深度体现）']
+
+    interview common_questions:
+      · [手撕算法                ] ev=1 - 反转链表（leetcode 206）- iterative + recursive两种实现
+      · [手撕算法                ] ev=1 - 第k大元素（leetcode 215）- quick select或heap实现
+      · [深度学习理论              ] ev=1 - Transformer attention缩放因子√d的推导与高维优化
+      · [强化学习理论              ] ev=1 - GRPO和PPO区别，为什么不直接用PPO
+      · [系统设计                ] ev=1 - 设计支持1000 QPS的agent inference pipeline
+      · [系统优化                ] ev=1 - RAG怎么debug retrieval miss
+      · [项目深挖                ] ev=1 - LangGraph state machine设计细节，100个agent并发跑过吗
+      · [深度学习框架              ] ev=1 - PyTorch自动求导原理，计算图构建
+
+    why_they_passed:
+      · 项目深度超出预期 - 二面面试官评价'这个评测平台听起来比我们内部用的还系统'（来自1条offer_post）
+      · 系统设计给出工程化具体方案 - 不仅说概念，提出batch + speculative decoding + KV cache reuse并给出latency target数字（来自1条offer_post）
+      · 技术深度与广度平衡 - 既有200+用例的评测框架实现，又能回答GRPO vs PPO理论差异（来自1条offer_post）
+      · 诚实的知识边界表达 - 不懂的直接说'不太了解但可以这么推断'，反而获得信任（来自1条offer_post）
+      · 项目可复现性强 - GitHub开源项目有完整代码结构、benchmark数据、技术栈说明，可验证性高（来自1条project_share）
+
+    uncertainty_notes:
+      ⚠ 样本量极小（仅3条），其中只有1条offer复盘，背景模式（学校层次、学历、实习经历）置信度低
+      ⚠ 面试题库覆盖不足 - 所有common_questions的evidence_count均为1，无法确认题目复现率
+      ⚠ 面试官风格差异显著 - 1条interview样本体感是'偏八股+算法'，而offer复盘是'项目深挖+系统设计'，说明不同面试官侧重点可能完全不同
+      ⚠ 时间跨度窄（2026/03-04），无法判断跨季度题型变化
+      ⚠ 缺少失败样本对照 - 仅1条挂掉的interview，无法充分提取'为什么挂'的模式来反向验证'为什么过'
+
+========== STEP 6: profile_resume_gap SKILL (real LLM) ==========
+  invoking with profile + 合成简历...
+  ✓ gap analysis generated (run #2)
+
+  ✓ 已具备: 6 项
+    · LangGraph state machine 设计与实现
+        简历: 法至科技实习用 LangGraph 搭建多 agent 评测系统 + Deep Research Agent 开源项目用 LangGraph
+    · DSPy prompt 编译与评估
+        简历: 法至科技实习用 DSPy + Deep Research Agent 项目用 DSPy
+    · RAG 系统搭建与优化
+        简历: 法至科技实习做 RAG retrieval miss 改进，query rewriting 把 hit@5 从 0.61 提到 0.74，有具体数字
+
+  ⏱ 短期能补 (≤2 周): 5 项
+    · Pydantic v2 schema 设计
+        动作: 3 天：给 Deep Research Agent 项目加 Pydantic v2 strict mode 的 input/output schema（Agent state、Tool args、Response model），写到 REA
+    · 手撕算法能力（leetcode hot100 级别）
+        动作: 10 天：刷 leetcode hot100 的链表、二叉树、动态规划、双指针 4 个专题（~40 题），重点练反转链表、第 k 大元素、LRU cache 这 3 道画像高频题
+    · Transformer 底层原理（attention 机制、自动求导）
+        动作: 5 天：读 Attention is All You Need 论文 + 手写 multi-head attention 前向后向推导（包括 √d 缩放因子推导）+ 写一篇技术 blog 发到知乎/CSDN
+
+  ⚠ 短期补不了: 4 项
+    · 大厂 ML 平台实习经历（如美团 ML 平台 3 个月）
+        最少周期: ≥3 个月实习
+    · 200+ 测试用例参数化评测框架
+        最少周期: ≥1 个月项目迭代
+    · GRPO vs PPO 原理对比（强化学习理论深度）
+        最少周期: ≥2 个月系统学习 + 项目实践
+
+  ✗ 不能编: 4 项
+    · 上海财经大学应用统计硕士（非 985 顶尖 CS）
+        验证: HR 必查学信网，学校 / 专业 / 学位无法伪造
+    · 法至科技实习（非大厂）
+        验证: 背调会联系实习 leader，公司名无法伪造
+    · 2027 届毕业（硕士在读）
+        验证: 学信网 + 毕业证书，时间线无法伪造
+
+  ════ 投递建议 ════
+  verdict: maybe
+  rationale: 已具备 60% must_have（LangGraph/DSPy/RAG/Agent 多模式）+ 有实习和开源项目背书，但缺算法刷题证据、Transformer 理论深度、大厂实习背景，需要 2 周突击补短板后再投
+  top 3 actions:
+    1. 10 天刷 leetcode hot100 重点 40 题（反转链表、第 k 大元素必练），简历技能栏补'leetcode 100+'——这是 must_have 且面试必考
+    2. 5 天写 Transformer attention 数学推导 + 技术 blog（知乎/CSDN），简历补这条——面试高频问且能体现理论深度
+    3. 3 天给 Deep Research Agent 加 Pydantic v2 strict schema + pytest-bdd 测试，push 到 GitHub——补齐 must_have 的 Pydantic 证据 + 提升项目完整度
+
+========== TOTAL TOKEN USAGE ==========
+  · successful_profile             latency=32022 ms  cost=$0.0000
+  · profile_resume_gap             latency=56313 ms  cost=$0.0000
+  TOTAL latency=88335 ms  cost=$0.0000
