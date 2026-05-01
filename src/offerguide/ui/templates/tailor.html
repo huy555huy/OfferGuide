@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — 简历微调{% endblock %}
+{% block content %}
+
+<style>
+    .tailor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    @media (max-width: 920px) { .tailor-grid { grid-template-columns: 1fr; } }
+    .job-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+    .job-row { padding: 0.625rem 0.875rem; border-bottom: 1px solid var(--border-soft); cursor: pointer; }
+    .job-row:hover { background: var(--bg-subtle); }
+    .job-row.selected { background: var(--primary-soft); border-left: 3px solid var(--primary); }
+    .job-row .top { display: flex; gap: 0.5rem; align-items: baseline; }
+    .job-row .company { font-weight: 600; }
+    .job-row .meta { color: var(--text-muted); font-size: 0.78rem; margin-left: auto; }
+    .resume-preview {
+        font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.6;
+        background: var(--bg-subtle); padding: 0.875rem; border-radius: var(--radius-sm);
+        white-space: pre-wrap; max-height: 320px; overflow-y: auto;
+        border: 1px solid var(--border-soft);
+    }
+</style>
+
+<div class="page-title">
+    <div>
+        <h1>简历微调</h1>
+        <p>选一个 JD → agent 输出针对性简历 + change_log 全程可审计。<strong style="color:var(--danger);">不会编</strong>没发生的经历——只重排、改措辞、加 ATS 关键词。</p>
+    </div>
+</div>
+
+<div class="tailor-grid">
+    <div class="card">
+        <div class="card-header">
+            <h2>选 JD</h2>
+            <span class="meta">{{ jobs|length }} 个候选</span>
+        </div>
+        {% if jobs %}
+        <form id="tailor-form" hx-post="/api/tailor/run" hx-target="#result" hx-swap="innerHTML" hx-indicator="#spinner">
+            <div class="job-list" id="job-list">
+                {% for j in jobs %}
+                <label class="job-row {% if selected_job_id == j.id|string %}selected{% endif %}">
+                    <input type="radio" name="job_id" value="{{ j.id }}" style="display:none;"
+                           {% if selected_job_id == j.id|string %}checked{% endif %}
+                           onchange="document.querySelectorAll('.job-row').forEach(r=>r.classList.remove('selected'));this.parentElement.classList.add('selected')">
+                    <div class="top">
+                        <span class="company">{{ j.company }}</span>
+                        <span>{{ j.title|truncate(40) }}</span>
+                        <span class="meta">{{ j.location }} · {{ j.source }} · {{ j.raw_text_len }} 字</span>
+                    </div>
+                </label>
+                {% endfor %}
+            </div>
+            <div class="actions" style="margin-top: 0.75rem;">
+                <button type="submit" {% if not profile_loaded %}disabled{% endif %}>跑 tailor_resume</button>
+                <span id="spinner" class="muted htmx-indicator">⏳ Claude Sonnet 30-90 秒…</span>
+            </div>
+        </form>
+        {% else %}
+        <div class="empty">
+            <div style="font-size: 1.5rem;">📋</div>
+            <div>没有可微调的 JD（>= 200 字 raw_text）</div>
+            <div class="small muted">先去 <a href="/quick-eval">评估</a> 粘贴一个，或等 spider 抓到</div>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h2>Master 简历（不可改）</h2>
+            <span class="meta">{{ master_resume|length }} 字</span>
+        </div>
+        {% if master_resume %}
+        <div class="resume-preview">{{ master_resume }}</div>
+        {% else %}
+        <div class="empty">未加载简历——设 <code>OFFERGUIDE_RESUME_PDF</code></div>
+        {% endif %}
+    </div>
+</div>
+
+<div id="result" style="margin-top: 1rem;"></div>
+
+{% endblock %}

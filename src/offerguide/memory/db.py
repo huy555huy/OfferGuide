@@ -202,6 +202,28 @@ CREATE TABLE IF NOT EXISTS behavioral_stories (
     created_at        REAL DEFAULT (julianday('now'))
 );
 
+-- ``user_facts`` is the long-term memory layer (W12, mem0 v3-style).
+-- Single-pass ADD-only: new facts append, never UPDATE/DELETE — accumulation
+-- of evidence beats clobber-update for downstream retrieval recall.
+-- Each row links back to the SKILL run that produced it via ``source_run_id``,
+-- so a stale fact can always be traced back to "which SKILL output, when".
+CREATE TABLE IF NOT EXISTS user_facts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact_text       TEXT NOT NULL,                    -- 一句话事实, e.g. "用户 RemeDi 项目 AUC 0.83"
+    kind            TEXT NOT NULL,                    -- profile|preference|experience|feedback|project|company_signal
+    source_skill    TEXT,                             -- which SKILL extracted it
+    source_run_id   INTEGER,                          -- skill_runs.id (FK soft-link)
+    confidence      REAL NOT NULL DEFAULT 0.5,        -- 0..1
+    entities_json   TEXT NOT NULL DEFAULT '[]',       -- list[str] — companies / projects / skills
+    used_count      INTEGER NOT NULL DEFAULT 0,       -- bumped each retrieve call
+    created_at      REAL DEFAULT (julianday('now')),
+    last_used_at    REAL,
+    UNIQUE(fact_text)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_facts_kind  ON user_facts(kind);
+CREATE INDEX IF NOT EXISTS idx_user_facts_used  ON user_facts(used_count, last_used_at);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_source         ON jobs(source);
 CREATE INDEX IF NOT EXISTS idx_apps_job            ON applications(job_id);
 CREATE INDEX IF NOT EXISTS idx_apps_status         ON applications(status);

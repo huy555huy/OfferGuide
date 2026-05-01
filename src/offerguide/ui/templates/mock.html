@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — 模拟面试{% endblock %}
+{% block content %}
+
+<style>
+    .mock-card {
+        background: var(--bg-elev); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 1.25rem; margin-bottom: 1rem;
+    }
+    .start-form { display: grid; grid-template-columns: 1fr 1fr auto; gap: 0.75rem; align-items: end; }
+    @media (max-width: 720px) { .start-form { grid-template-columns: 1fr; } }
+</style>
+
+<div class="page-title">
+    <div>
+        <h1>模拟面试</h1>
+        <p>Agent 当面试官 — turn-based 一轮一题 + 即时评分 + 模型骨架答案 + 下题自适应难度。
+        最多 8 轮 → 自动 transcript feed 给 <a href="/reflect">面试复盘</a> 闭环。
+        <strong style="color:var(--primary);">借鉴 Liftoff (1.5k ⭐)，中文校招特化、文字优先、turn-based。</strong></p>
+    </div>
+</div>
+
+<div class="mock-card">
+    <form hx-post="/api/mock/turn" hx-target="#mock-result" hx-swap="innerHTML" hx-indicator="#mock-spinner">
+        <div class="start-form">
+            <label class="field">
+                <span class="label-text">公司</span>
+                <input type="text" name="company" placeholder="字节跳动 / 阿里巴巴 / 腾讯" required>
+            </label>
+            <label class="field">
+                <span class="label-text">角色聚焦</span>
+                <input type="text" name="role_focus" placeholder="AI Agent 后端实习">
+            </label>
+            <button type="submit" {% if not profile_loaded %}disabled{% endif %}>开始第 1 题</button>
+        </div>
+        <input type="hidden" name="turn_history_json" value="[]">
+        <input type="hidden" name="last_user_answer" value="">
+        <div class="actions" style="margin-top: 0.625rem;">
+            <span id="mock-spinner" class="muted htmx-indicator">⏳ agent 思考中（10-30 秒）…</span>
+        </div>
+    </form>
+</div>
+
+<div id="mock-result"></div>
+
+{% endblock %}

@@ -18,11 +18,13 @@ from . import (
     analyze_gaps,
     compare_jobs,
     deep_project_prep,
+    mock_interview,
     post_interview_reflection,
     prepare_interview,
     profile_resume_gap,
     score_match,
     successful_profile,
+    tailor_resume,
     write_cover_letter,
 )
 from ._base import MetricBreakdown, SkillAdapter, aggregate, parse_json_output
@@ -37,6 +39,8 @@ REGISTRY: dict[str, ModuleType] = {
     "post_interview_reflection": post_interview_reflection,
     "successful_profile": successful_profile,
     "profile_resume_gap": profile_resume_gap,
+    "tailor_resume": tailor_resume,
+    "mock_interview": mock_interview,
 }
 
 
@@ -69,11 +73,13 @@ __all__ = [
     "deep_project_prep",
     "get_adapter",
     "list_evolvable_skills",
+    "mock_interview",
     "parse_json_output",
     "post_interview_reflection",
     "prepare_interview",
     "profile_resume_gap",
     "score_match",
     "successful_profile",
+    "tailor_resume",
     "write_cover_letter",
 ]

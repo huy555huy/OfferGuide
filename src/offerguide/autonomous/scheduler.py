@@ -200,6 +200,7 @@ def build_default_scheduler(
     from .jobs.corpus_classify import CORPUS_CLASSIFY_JOB
     from .jobs.corpus_refresh import CORPUS_REFRESH_JOB
     from .jobs.discover_jobs import DISCOVER_JOBS_JOB
+    from .jobs.extract_facts import EXTRACT_FACTS_JOB
     from .jobs.silence_check import SILENCE_CHECK_JOB
 
     settings = settings or Settings.from_env()
@@ -253,6 +254,7 @@ def build_default_scheduler(
     )
 
     sched = AutonomousScheduler(ctx)
+    sched.add(EXTRACT_FACTS_JOB)
     sched.add(DISCOVER_JOBS_JOB)
     sched.add(CORPUS_CLASSIFY_JOB)
     sched.add(SILENCE_CHECK_JOB)

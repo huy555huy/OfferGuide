@@ -1,0 +1,148 @@
+{% if error %}
+<div class="card"><div class="error">⚠ {{ error }}</div></div>
+{% elif tailored %}
+
+<style>
+    .tailored-grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: 1rem; }
+    @media (max-width: 920px) { .tailored-grid { grid-template-columns: 1fr; } }
+    .tailored-md {
+        font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.65;
+        background: white; padding: 1.25rem; border-radius: var(--radius);
+        border: 1px solid var(--border); white-space: pre-wrap; max-height: 600px; overflow-y: auto;
+    }
+    .change-row {
+        padding: 0.5rem 0.75rem; margin-bottom: 0.375rem;
+        background: var(--bg-elev); border: 1px solid var(--border-soft);
+        border-left: 3px solid var(--text-muted);
+        border-radius: var(--radius-sm); font-size: 0.85rem;
+    }
+    .change-row.reword { border-left-color: var(--primary); }
+    .change-row.reorder { border-left-color: var(--warning); }
+    .change-row.emphasize { border-left-color: var(--success); }
+    .change-row.drop { border-left-color: var(--text-muted); }
+    .change-row.ats_keyword_add { border-left-color: #7e22ce; }
+    .change-row .head { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.25rem; }
+    .change-row .kind {
+        padding: 0.05rem 0.4rem; border-radius: 999px; font-size: 0.65rem;
+        font-family: var(--font-mono); background: var(--bg-subtle);
+    }
+    .change-row .section { font-weight: 600; font-size: 0.78rem; }
+    .change-row .diff {
+        display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.25rem;
+        font-size: 0.78rem;
+    }
+    .change-row .before { color: var(--danger); text-decoration: line-through; opacity: 0.85; }
+    .change-row .after { color: var(--success); }
+    .change-row .rationale { margin-top: 0.25rem; color: var(--text-muted); font-size: 0.75rem; }
+    .lift-card {
+        padding: 0.875rem 1rem; background: var(--success-soft); border-radius: var(--radius);
+        margin-bottom: 0.75rem;
+    }
+    .lift-card .num {
+        font-family: var(--font-serif); font-size: 1.6rem; font-weight: 600;
+        color: var(--success);
+    }
+    .lift-card.neg { background: var(--danger-soft); }
+    .lift-card.neg .num { color: var(--danger); }
+    .warning-box {
+        background: var(--warning-soft); padding: 0.75rem 1rem; border-left: 3px solid var(--warning);
+        border-radius: var(--radius-sm); margin-bottom: 0.75rem; font-size: 0.85rem;
+    }
+    .keyword-pills { display: flex; gap: 0.25rem; flex-wrap: wrap; margin-top: 0.375rem; }
+    .keyword-pills .pill { font-size: 0.7rem; }
+</style>
+
+{# Verdict 卡 #}
+{% set lift = tailored.fit_estimate.after - tailored.fit_estimate.before if tailored.fit_estimate else 0 %}
+<div class="card">
+    <div class="card-header">
+        <h2>{{ job_company }} · {{ job_title|truncate(40) }} 微调结果</h2>
+        <span class="meta">SKILL run #{{ run_id }} · 文件名建议 <code>{{ tailored.suggested_filename }}</code></span>
+    </div>
+    <div class="lift-card {% if lift < 0 %}neg{% endif %}">
+        命中率预估：<span class="num">{{ "%.0f"|format(tailored.fit_estimate.before * 100) }}% → {{ "%.0f"|format(tailored.fit_estimate.after * 100) }}%</span>
+        <span style="color: {% if lift >= 0 %}var(--success){% else %}var(--danger){% endif %}; font-weight: 600;">
+            {% if lift >= 0 %}+{% endif %}{{ "%.0f"|format(lift * 100) }}%
+        </span>
+        <div class="muted small" style="margin-top: 0.375rem;">{{ tailored.fit_estimate.rationale }}</div>
+    </div>
+
+    {% if tailored.cannot_fake_warnings %}
+    <div class="warning-box">
+        <strong>🛡 自审拒绝（{{ tailored.cannot_fake_warnings|length }} 条）：</strong>
+        <ul style="margin: 0.25rem 0 0; padding-left: 1.25rem;">
+            {% for w in tailored.cannot_fake_warnings %}<li>{{ w }}</li>{% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+</div>
+
+<div class="tailored-grid">
+
+    {# 左栏：tailored markdown #}
+    <div class="card">
+        <div class="card-header">
+            <h2>Tailored Markdown</h2>
+            <button type="button" class="btn ghost"
+                    onclick="navigator.clipboard.writeText(document.getElementById('tailored-md').textContent);this.textContent='已复制'">
+                📋 复制
+            </button>
+        </div>
+        <div class="tailored-md" id="tailored-md">{{ tailored.tailored_markdown }}</div>
+    </div>
+
+    {# 右栏：change_log + ATS keywords #}
+    <div>
+        <div class="card">
+            <div class="card-header">
+                <h2>Change Log</h2>
+                <span class="meta">{{ tailored.change_log|length }} 处改动</span>
+            </div>
+            {% if tailored.change_log %}
+                {% for c in tailored.change_log %}
+                <div class="change-row {{ c.kind }}">
+                    <div class="head">
+                        <span class="kind">{{ c.kind }}</span>
+                        <span class="section">{{ c.section }}</span>
+                    </div>
+                    <div class="diff">
+                        <div class="before">{{ c.before|truncate(120) }}</div>
+                        <div class="after">{{ c.after|truncate(120) }}</div>
+                    </div>
+                    <div class="rationale">↳ {{ c.rationale }}</div>
+                </div>
+                {% endfor %}
+            {% else %}
+            <div class="empty">无改动（master 已经很匹配了）</div>
+            {% endif %}
+        </div>
+
+        {% if tailored.ats_keywords_used or tailored.ats_keywords_missing %}
+        <div class="card">
+            <div class="card-header">
+                <h2>ATS 关键词</h2>
+            </div>
+            {% if tailored.ats_keywords_used %}
+            <div style="margin-bottom: 0.625rem;">
+                <strong style="color: var(--success); font-size: 0.85rem;">✓ 已植入（{{ tailored.ats_keywords_used|length }}）：</strong>
+                <div class="keyword-pills">
+                    {% for k in tailored.ats_keywords_used %}<span class="pill fit">{{ k }}</span>{% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            {% if tailored.ats_keywords_missing %}
+            <div>
+                <strong style="color: var(--danger); font-size: 0.85rem;">✗ 缺口（{{ tailored.ats_keywords_missing|length }}）：</strong>
+                <div class="keyword-pills">
+                    {% for k in tailored.ats_keywords_missing %}<span class="pill misfit">{{ k }}</span>{% endfor %}
+                </div>
+                <div class="muted small" style="margin-top: 0.375rem;">
+                    这些是 JD 强调但 master 简历无对应能力的——agent 拒绝硬塞，建议你补完再投
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}

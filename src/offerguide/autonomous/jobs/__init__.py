@@ -2,6 +2,7 @@
 
 Each module exports a JobSpec instance the scheduler can register:
 
+- ``extract_facts.EXTRACT_FACTS_JOB``       daily 02:00 — mine user_facts from skill_runs
 - ``discover_jobs.DISCOVER_JOBS_JOB``       daily 06:30 — spider sweep + auto-eval
 - ``corpus_classify.CORPUS_CLASSIFY_JOB``   daily 07:00 — classify pending 面经
 - ``silence_check.SILENCE_CHECK_JOB``       daily 09:00 — tracker sweep
@@ -17,6 +18,7 @@ from . import (
     corpus_classify,
     corpus_refresh,
     discover_jobs,
+    extract_facts,
     silence_check,
 )
 
@@ -25,5 +27,6 @@ __all__ = [
     "corpus_classify",
     "corpus_refresh",
     "discover_jobs",
+    "extract_facts",
     "silence_check",
 ]

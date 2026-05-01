@@ -698,6 +698,254 @@ def create_app(
             _ctx(request, cover=cover, run_id=run_id),
         )
 
+    @app.get("/tailor", response_class=HTMLResponse)
+    def tailor_view(request: Request, job_id: str = "") -> Any:
+        """简历微调入口页 — 选 JD + 显示 master resume + 一键 tailor。"""
+        from .. import briefs as briefs_mod  # noqa: F401 (potential import cycle guard)
+
+        # List recent jobs that have raw_text >= 200 chars (real JD body, not just metadata)
+        with store.connect() as conn:
+            jobs_rows = conn.execute(
+                "SELECT id, title, company, location, source, length(raw_text) AS L "
+                "FROM jobs WHERE length(raw_text) >= 200 "
+                "ORDER BY fetched_at DESC LIMIT 30"
+            ).fetchall()
+        jobs = [
+            {"id": r[0], "title": r[1] or "(无标题)", "company": r[2] or "?",
+             "location": r[3] or "", "source": r[4], "raw_text_len": r[5]}
+            for r in jobs_rows
+        ]
+        master_resume_text = profile.raw_resume_text if profile else ""
+        return templates.TemplateResponse(
+            request, "tailor.html",
+            _ctx(
+                request,
+                jobs=jobs,
+                selected_job_id=job_id,
+                master_resume=master_resume_text,
+                active_tab="tailor",
+            ),
+        )
+
+    @app.post("/api/tailor/run", response_class=HTMLResponse)
+    def tailor_run(
+        request: Request,
+        job_id: str = Form(...),
+    ) -> Any:
+        """Invoke tailor_resume SKILL on selected job + master resume + (optional) profile."""
+        if profile is None:
+            return templates.TemplateResponse(
+                request, "_tailor_result.html",
+                _ctx(request, error="未加载简历——设 OFFERGUIDE_RESUME_PDF 后重启。"),
+            )
+        if runtime is None:
+            return templates.TemplateResponse(
+                request, "_tailor_result.html",
+                _ctx(request, error="未配置 LLM——设 BASE_URL/TOKEN 后重启。"),
+            )
+        try:
+            jid = int(job_id)
+        except ValueError:
+            return templates.TemplateResponse(
+                request, "_tailor_result.html",
+                _ctx(request, error="job_id 必须是整数"),
+            )
+
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT title, company, raw_text FROM jobs WHERE id = ?", (jid,)
+            ).fetchone()
+        if row is None:
+            return templates.TemplateResponse(
+                request, "_tailor_result.html",
+                _ctx(request, error=f"找不到 job #{jid}"),
+            )
+        title, company, job_text = row
+        company = (company or "").strip() or "(未知公司)"
+
+        # Optional successful_profile lookup — best-effort
+        from .. import corpus_quality
+        successful_profile_json = "{}"
+        if company:
+            samples = corpus_quality.fetch_high_quality(
+                store, company=company, limit=5,
+            )
+            if samples:
+                # Try to find an existing successful_profile run we can reuse
+                with store.connect() as conn:
+                    sp_row = conn.execute(
+                        "SELECT output_json FROM skill_runs "
+                        "WHERE skill_name = 'successful_profile' "
+                        "  AND input_json LIKE ? "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (f'%"{company}"%',),
+                    ).fetchone()
+                if sp_row:
+                    successful_profile_json = sp_row[0]
+
+        spec = next((s for s in skills if s.name == "tailor_resume"), None)
+        if spec is None:
+            return templates.TemplateResponse(
+                request, "_tailor_result.html",
+                _ctx(request, error="tailor_resume SKILL 未加载"),
+            )
+
+        try:
+            result = runtime.invoke(
+                spec,
+                {
+                    "master_resume": profile.raw_resume_text,
+                    "job_text": job_text,
+                    "company": company,
+                    "successful_profile_json": successful_profile_json,
+                },
+            )
+        except LLMError as e:
+            return templates.TemplateResponse(
+                request, "_tailor_result.html",
+                _ctx(request, error=f"tailor_resume LLM 失败: {e}"),
+            )
+
+        return templates.TemplateResponse(
+            request, "_tailor_result.html",
+            _ctx(
+                request,
+                tailored=result.parsed or {},
+                run_id=result.skill_run_id,
+                job_title=title, job_company=company,
+            ),
+        )
+
+    @app.get("/mock", response_class=HTMLResponse)
+    def mock_view(request: Request) -> Any:
+        """Mock interview 入口 — 选公司 + role + 启动 turn-based 会话。
+
+        会话状态保存在 URL query / form 里 (无 session 中间件), turn_history
+        作为 hidden input 在每次 POST 来回传递。简单可靠。
+        """
+        return templates.TemplateResponse(
+            request, "mock.html",
+            _ctx(request, active_tab="mock"),
+        )
+
+    @app.post("/api/mock/turn", response_class=HTMLResponse)
+    def mock_turn(
+        request: Request,
+        company: str = Form(...),
+        role_focus: str = Form(""),
+        turn_history_json: str = Form("[]"),
+        last_user_answer: str = Form(""),
+    ) -> Any:
+        """Run one mock_interview turn. Returns the next-question + eval card."""
+        if profile is None:
+            return templates.TemplateResponse(
+                request, "_mock_turn.html",
+                _ctx(request, error="未加载简历——先设 OFFERGUIDE_RESUME_PDF"),
+            )
+        if runtime is None:
+            return templates.TemplateResponse(
+                request, "_mock_turn.html",
+                _ctx(request, error="未配置 LLM——先设 BASE_URL/TOKEN"),
+            )
+        if not company.strip():
+            return templates.TemplateResponse(
+                request, "_mock_turn.html",
+                _ctx(request, error="company 必填"),
+            )
+
+        # Pull latest prepare_interview run for this company (优先用预测题)
+        prep_questions_json = "[]"
+        with store.connect() as conn:
+            prep_row = conn.execute(
+                "SELECT output_json FROM skill_runs "
+                "WHERE skill_name = 'prepare_interview' "
+                "  AND input_json LIKE ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (f'%"{company.strip()}"%',),
+            ).fetchone()
+        if prep_row:
+            try:
+                pj = json_loads(prep_row[0])
+                prep_questions_json = json_dumps(pj.get("expected_questions", []))
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+
+        spec = next((s for s in skills if s.name == "mock_interview"), None)
+        if spec is None:
+            return templates.TemplateResponse(
+                request, "_mock_turn.html",
+                _ctx(request, error="mock_interview SKILL 未加载"),
+            )
+
+        try:
+            result = runtime.invoke(
+                spec,
+                {
+                    "company": company.strip(),
+                    "role_focus": role_focus.strip(),
+                    "user_resume": profile.raw_resume_text,
+                    "prep_questions_json": prep_questions_json,
+                    "turn_history_json": turn_history_json,
+                    "last_user_answer": last_user_answer,
+                },
+            )
+        except LLMError as e:
+            return templates.TemplateResponse(
+                request, "_mock_turn.html",
+                _ctx(request, error=f"mock_interview LLM 失败: {e}"),
+            )
+
+        parsed = result.parsed or {}
+
+        # Append to turn_history if there was a previous question to evaluate
+        new_history: list[dict] = []
+        try:
+            new_history = json_loads(turn_history_json)
+        except (json.JSONDecodeError, TypeError):
+            new_history = []
+        if last_user_answer.strip() and parsed.get("evaluation_of_last_answer"):
+            new_history.append({
+                "question": parsed["evaluation_of_last_answer"]["question"],
+                "user_answer": last_user_answer.strip(),
+                "evaluation": parsed["evaluation_of_last_answer"],
+            })
+
+        # When complete, auto-feed transcript to post_interview_reflection
+        reflection_run_id = None
+        if parsed.get("session_status") == "complete" and new_history:
+            transcript = _mock_history_to_transcript(
+                new_history, company.strip(),
+            )
+            refl_spec = next(
+                (s for s in skills if s.name == "post_interview_reflection"), None,
+            )
+            if refl_spec is not None:
+                try:
+                    refl = runtime.invoke(
+                        refl_spec,
+                        {
+                            "company": company.strip(),
+                            "prep_questions_json": prep_questions_json,
+                            "actual_transcript": transcript,
+                        },
+                    )
+                    reflection_run_id = refl.skill_run_id
+                except LLMError:
+                    pass  # non-fatal
+
+        return templates.TemplateResponse(
+            request, "_mock_turn.html",
+            _ctx(
+                request,
+                turn=parsed,
+                run_id=result.skill_run_id,
+                company=company.strip(),
+                role_focus=role_focus.strip(),
+                turn_history_json=json_dumps(new_history, ensure_ascii=False),
+                reflection_run_id=reflection_run_id,
+            ),
+        )
+
     @app.get("/profile/{company}", response_class=HTMLResponse)
     def profile_view(request: Request, company: str, role: str = "") -> Any:
         """成功者画像 + 简历 gap 投递前 briefing 页面。
@@ -1668,6 +1916,22 @@ def _list_jobs_by_ids(store: Store, ids: list[int]) -> list[dict[str, Any]]:
         for r in rows
     }
     return [by_id[i] for i in ids if i in by_id]
+
+
+def _mock_history_to_transcript(history: list[dict], company: str) -> str:
+    """Render mock interview turns as a transcript that
+    post_interview_reflection's expects."""
+    lines = [f"{company} mock interview transcript ({len(history)} 轮):", ""]
+    for i, turn in enumerate(history, 1):
+        q = turn.get("question") or "(无题)"
+        a = turn.get("user_answer") or "(无答)"
+        ev = turn.get("evaluation") or {}
+        score = ev.get("score") or 0
+        lines.append(f"## 第 {i} 题 — {q}")
+        lines.append(f"答: {a}")
+        lines.append(f"  agent 评分: {score:.2f}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _to_julian(dt) -> float:

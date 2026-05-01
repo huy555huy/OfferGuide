@@ -30,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     p_once.add_argument(
         "job",
         choices=(
+            "extract_facts",
             "discover_jobs",
             "corpus_classify",
             "silence_check",

@@ -511,6 +511,8 @@
             <details class="nav-more">
                 <summary>更多</summary>
                 <div class="nav-more-panel">
+                    <a href="/tailor"     class="{% if active_tab == 'tailor' %}active{% endif %}">简历微调</a>
+                    <a href="/mock"       class="{% if active_tab == 'mock' %}active{% endif %}">模拟面试</a>
                     <a href="/compare"    class="{% if active_tab == 'compare' %}active{% endif %}">岗位对比</a>
                     <a href="/interviews" class="{% if active_tab == 'interviews' %}active{% endif %}">面经库</a>
                     <a href="/stories"    class="{% if active_tab == 'stories' %}active{% endif %}">故事库</a>

@@ -43,6 +43,8 @@ class TestRegistry:
             "post_interview_reflection",
             "successful_profile",
             "profile_resume_gap",
+            "tailor_resume",
+            "mock_interview",
         }
 
     def test_get_adapter_returns_module(self) -> None:
