@@ -37,3 +37,6 @@ resume.pdf
 .idea/
 .vscode/
 .claude/
+
+# 个人开发日志——面试自用，不推 GitHub
+DEVLOG.md
