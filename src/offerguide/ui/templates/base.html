@@ -95,12 +95,65 @@
             font-size: 0.875rem;
             font-weight: 500;
             transition: all 0.12s;
+            white-space: nowrap;
         }
         .topbar nav a:hover { background: var(--bg-subtle); color: var(--text); }
         .topbar nav a.active {
             background: var(--primary-soft);
             color: var(--primary-hover);
             font-weight: 600;
+        }
+
+        /* 「更多」折叠下拉菜单 */
+        .nav-more {
+            position: relative;
+        }
+        .nav-more summary {
+            list-style: none; cursor: pointer; user-select: none;
+            color: var(--text-muted);
+            padding: 0.4rem 0.8rem;
+            border-radius: var(--radius-sm);
+            font-size: 0.875rem;
+            font-weight: 500;
+            display: inline-flex; align-items: center; gap: 0.25rem;
+        }
+        .nav-more summary::-webkit-details-marker { display: none; }
+        .nav-more summary::after {
+            content: "▾";
+            font-size: 0.7rem;
+            opacity: 0.6;
+            transition: transform 0.15s;
+        }
+        .nav-more[open] summary::after { transform: rotate(180deg); }
+        .nav-more summary:hover { background: var(--bg-subtle); color: var(--text); }
+        .nav-more[open] summary {
+            background: var(--bg-subtle); color: var(--text);
+        }
+        .nav-more-panel {
+            position: absolute; top: calc(100% + 4px); right: 0;
+            background: var(--bg-elev);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-md);
+            min-width: 160px;
+            padding: 0.375rem;
+            z-index: 100;
+            display: flex; flex-direction: column; gap: 0.125rem;
+        }
+        .nav-more-panel a {
+            padding: 0.4rem 0.75rem;
+            border-radius: var(--radius-sm);
+            color: var(--text);
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+        .nav-more-panel a:hover {
+            background: var(--bg-subtle);
+            text-decoration: none;
+        }
+        .nav-more-panel a.active {
+            background: var(--primary-soft);
+            color: var(--primary-hover);
         }
 
         .status-strip {
@@ -452,15 +505,20 @@
         <div class="brand"><span class="dot"></span> OfferGuide</div>
         <nav>
             <a href="/"             class="{% if active_tab == 'home' %}active{% endif %}">今日</a>
-            <a href="/pipeline"     class="{% if active_tab == 'pipeline' %}active{% endif %}">Pipeline</a>
+            <a href="/pipeline"     class="{% if active_tab == 'pipeline' %}active{% endif %}">投递看板</a>
             <a href="/quick-eval"   class="{% if active_tab == 'quick_eval' %}active{% endif %}">评估</a>
-            <a href="/compare"      class="{% if active_tab == 'compare' %}active{% endif %}">Compare</a>
-            <a href="/applications" class="{% if active_tab == 'applications' %}active{% endif %}">Applications</a>
-            <a href="/interviews"   class="{% if active_tab == 'interviews' %}active{% endif %}">面经</a>
-            <a href="/stories"      class="{% if active_tab == 'stories' %}active{% endif %}">Stories</a>
-            <a href="/reflect"      class="{% if active_tab == 'reflect' %}active{% endif %}">Reflect</a>
-            <a href="/inbox"        class="{% if active_tab == 'inbox' %}active{% endif %}">Inbox</a>
-            <a href="/dashboard"    class="{% if active_tab == 'dashboard' %}active{% endif %}">系统</a>
+            <a href="/applications" class="{% if active_tab == 'applications' %}active{% endif %}">投递记录</a>
+            <details class="nav-more">
+                <summary>更多</summary>
+                <div class="nav-more-panel">
+                    <a href="/compare"    class="{% if active_tab == 'compare' %}active{% endif %}">岗位对比</a>
+                    <a href="/interviews" class="{% if active_tab == 'interviews' %}active{% endif %}">面经库</a>
+                    <a href="/stories"    class="{% if active_tab == 'stories' %}active{% endif %}">故事库</a>
+                    <a href="/reflect"    class="{% if active_tab == 'reflect' %}active{% endif %}">面试复盘</a>
+                    <a href="/inbox"      class="{% if active_tab == 'inbox' %}active{% endif %}">待办收件箱</a>
+                    <a href="/dashboard"  class="{% if active_tab == 'dashboard' %}active{% endif %}">系统状态</a>
+                </div>
+            </details>
         </nav>
         <div class="status-strip">
             {% if profile_loaded %}

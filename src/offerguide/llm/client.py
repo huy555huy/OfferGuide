@@ -33,6 +33,34 @@ DEFAULT_MODEL = "deepseek-v4-flash"
 Role = Literal["system", "user", "assistant"]
 
 
+def _normalize_base_url(raw: str) -> str:
+    """Make a user-supplied base URL POST-able as ``{base}/chat/completions``.
+
+    DeepSeek's official endpoint accepts ``/chat/completions`` directly off
+    the host root (``https://api.deepseek.com/chat/completions`` works). Most
+    other OpenAI-compatible proxies (one-api, ccvibe, FastGPT, OpenRouter,
+    Together, etc.) namespace their chat endpoint under ``/v1``. Auto-append
+    ``/v1`` when the user gave us a bare host so a hand-rolled
+    ``BASE_URL=https://my-proxy.example.com`` still works without surgery.
+
+    Rules:
+      - if path already contains ``/v1`` or ``/chat`` → leave alone
+      - if it's the official DeepSeek host → leave alone
+      - otherwise append ``/v1``
+    """
+    raw = raw.rstrip("/")
+    if not raw:
+        return DEFAULT_DEEPSEEK_BASE
+    # Already has a versioned path — trust the user
+    if "/v1" in raw or "/chat" in raw:
+        return raw
+    # Official DeepSeek endpoint accepts /chat/completions off the root
+    if raw.startswith("https://api.deepseek.com"):
+        return raw
+    # Custom proxy with bare host — assume OpenAI-standard /v1 namespace
+    return raw + "/v1"
+
+
 class LLMError(RuntimeError):
     """Wraps any non-2xx / malformed response so callers can catch one type."""
 
@@ -60,11 +88,12 @@ class LLMClient:
         timeout_s: float = 60.0,
     ) -> None:
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
-        self.base_url = (
+        raw_base = (
             base_url
             or os.environ.get("DEEPSEEK_BASE_URL")
             or DEFAULT_DEEPSEEK_BASE
         ).rstrip("/")
+        self.base_url = _normalize_base_url(raw_base)
         self.default_model = (
             default_model or os.environ.get("OFFERGUIDE_DEFAULT_MODEL") or DEFAULT_MODEL
         )

@@ -193,10 +193,11 @@ class TestEventLogging:
 
 
 def test_topbar_has_applications_link(app_setup) -> None:
+    """主导航保留「投递记录」入口（中文化后）。"""
     app, _ = app_setup
     resp = TestClient(app).get("/")
     assert 'href="/applications"' in resp.text
-    assert ">Applications<" in resp.text
+    assert ">投递记录<" in resp.text
 
 
 def test_active_tab_highlights_applications(app_setup) -> None:

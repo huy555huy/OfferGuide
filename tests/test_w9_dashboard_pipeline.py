@@ -454,15 +454,17 @@ class TestHomeIntegration:
         assert "字节跳动" in resp.text
         assert "沉默" in resp.text or "跟进" in resp.text
 
-    def test_home_renders_pipeline_count_links(self, app_setup) -> None:
+    def test_home_renders_pipeline_count_link(self, app_setup) -> None:
+        """Home shows the active-pipeline count as a clickable stat
+        card linking to /pipeline. The 5-column mini-kanban moved to
+        /pipeline itself to keep home uncluttered (总分式)."""
         app, store = app_setup
         j = _seed_job(store, title="x", company="C")
         _seed_app(store, j, status="1st_interview")
         resp = TestClient(app).get("/")
-        # Pipeline mini links to /pipeline
         assert "/pipeline" in resp.text
-        # Interview count = 1 should appear somewhere
-        assert ">1<" in resp.text or "1\n" in resp.text
+        # The 投递战况 stat card carries the count
+        assert "投递战况" in resp.text
 
 
 # ═══════════════════════════════════════════════════════════════════

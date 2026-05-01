@@ -24,10 +24,13 @@ NotifyChannel = Literal["console", "feishu", "telegram"]
 class Settings:
     """All runtime configuration. Frozen → safe to share across threads/coroutines."""
 
-    # LLM
+    # LLM — name kept ``deepseek_*`` for backwards-compat with existing
+    # callers, but in practice these accept any OpenAI-compatible endpoint
+    # (DeepSeek native, ccvibe Claude proxy, OpenRouter, one-api, etc.).
+    # See ``Settings.from_env`` for the env-var fallback chain.
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"
-    default_model: str = "deepseek-v4-flash"
+    default_model: str = "claude-sonnet-4-6"
 
     # Notification — at most one of feishu/telegram is used per send,
     # picked from `notify_channel` (or per-call override).
@@ -46,15 +49,51 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
-        """Build a Settings from environment variables. Missing → defaults."""
+        """Build a Settings from environment variables. Missing → defaults.
+
+        LLM credentials accept three naming schemes for compatibility:
+
+        - ``DEEPSEEK_API_KEY`` / ``DEEPSEEK_BASE_URL`` — OfferGuide's
+          original env names, kept for backwards compatibility
+        - ``TOKEN`` / ``BASE_URL`` — short user-friendly names that
+          read naturally in a hand-edited ``.env``
+        - ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL`` — fallback for
+          OpenAI-compatible proxy deployments
+
+        First-defined wins. Smart-quote-style trailing ``”`` characters
+        are stripped (a common copy-paste hazard in Chinese keyboard
+        layouts).
+        """
+        # Resolve API key + base URL across the three accepted env names
+        api_key = (
+            os.environ.get("DEEPSEEK_API_KEY")
+            or os.environ.get("TOKEN")
+            or os.environ.get("OPENAI_API_KEY")
+            or None
+        )
+        base_url = (
+            os.environ.get("DEEPSEEK_BASE_URL")
+            or os.environ.get("BASE_URL")
+            or os.environ.get("OPENAI_BASE_URL")
+            or "https://api.deepseek.com"
+        )
+        # Strip stray quote chars (smart-quote copy-paste hazard)
+        for ch in ("”", "“", '"', "'", "´"):
+            if api_key:
+                api_key = api_key.strip().strip(ch)
+            base_url = base_url.strip().strip(ch)
+
         notify_raw = os.environ.get("OFFERGUIDE_NOTIFY", "console").lower()
         notify_channel: NotifyChannel = (
             notify_raw if notify_raw in ("console", "feishu", "telegram") else "console"  # type: ignore[assignment]
         )
         return cls(
-            deepseek_api_key=os.environ.get("DEEPSEEK_API_KEY") or None,
-            deepseek_base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-            default_model=os.environ.get("OFFERGUIDE_DEFAULT_MODEL", "deepseek-v4-flash"),
+            deepseek_api_key=api_key,
+            deepseek_base_url=base_url,
+            default_model=os.environ.get(
+                "OFFERGUIDE_DEFAULT_MODEL",
+                os.environ.get("MODEL", "claude-sonnet-4-6"),
+            ),
             feishu_webhook_url=os.environ.get("FEISHU_WEBHOOK_URL") or None,
             telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN") or None,
             telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID") or None,

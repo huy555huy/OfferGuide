@@ -52,6 +52,20 @@ class JobContext:
 
     notifier: Any | None = None
 
+    # Optional — populated when the user has configured a resume so
+    # SKILL-using jobs (discover_jobs auto-eval, etc.) can run.
+    runtime: Any | None = None
+    """SkillRuntime — None when LLM is not configured. Built once at
+    scheduler start; passed to jobs that auto-invoke SKILLs."""
+
+    skills: list[Any] = field(default_factory=list)
+    """List of SkillSpec discovered at boot. Empty list means SKILL
+    discovery wasn't run (e.g. headless tests)."""
+
+    user_profile_text: str | None = None
+    """Resume text loaded from OFFERGUIDE_RESUME_PDF. None when no
+    resume is configured — jobs that need it should skip gracefully."""
+
 
 @dataclass
 class JobSpec:
@@ -171,16 +185,20 @@ def build_default_scheduler(
     *,
     settings: Settings | None = None,
 ) -> AutonomousScheduler:
-    """Build a scheduler with our 3 default jobs registered:
+    """Build a scheduler with the 4 default jobs registered:
 
-    - silence_check       (daily 09:00)
-    - corpus_refresh      (weekly Mon 08:00)
+    - discover_jobs       (daily 06:30) — spider sweep + auto-eval
+    - silence_check       (daily 09:00) — tracker sweep
+    - corpus_refresh      (weekly Mon 08:00) — agentic 面经
     - brief_update        (daily 23:00, after the day's events settled)
     """
     from ..agentic.search import build_default_search
+    from ..profile import load_resume_pdf
+    from ..skills import SkillRuntime, discover_skills
     from ..ui.notify import make_notifier
     from .jobs.brief_update import BRIEF_UPDATE_JOB
     from .jobs.corpus_refresh import CORPUS_REFRESH_JOB
+    from .jobs.discover_jobs import DISCOVER_JOBS_JOB
     from .jobs.silence_check import SILENCE_CHECK_JOB
 
     settings = settings or Settings.from_env()
@@ -201,15 +219,40 @@ def build_default_scheduler(
     except Exception as e:
         log.warning("search backend init failed; corpus_refresh will skip: %s", e)
 
+    # Discover SKILLs + load resume so discover_jobs can auto-eval.
+    # Each is optional — discover_jobs degrades to "ingest only" if missing.
+    from pathlib import Path
+    skills_root = Path(__file__).parent.parent / "skills"
+    skills = []
+    try:
+        skills = discover_skills(skills_root)
+    except Exception as e:
+        log.warning("skill discovery failed; auto-eval disabled: %s", e)
+
+    runtime = None
+    if llm is not None:
+        runtime = SkillRuntime(llm=llm, store=store)
+
+    profile = None
+    if settings.resume_pdf:
+        try:
+            profile = load_resume_pdf(settings.resume_pdf)
+        except Exception as e:
+            log.warning("resume load failed; auto-eval disabled: %s", e)
+
     ctx = JobContext(
         settings=settings,
         store=store,
         llm=llm,
         search=search,
         notifier=make_notifier(settings),
+        runtime=runtime,
+        skills=skills,
+        user_profile_text=profile.raw_resume_text if profile else None,
     )
 
     sched = AutonomousScheduler(ctx)
+    sched.add(DISCOVER_JOBS_JOB)
     sched.add(SILENCE_CHECK_JOB)
     sched.add(CORPUS_REFRESH_JOB)
     sched.add(BRIEF_UPDATE_JOB)

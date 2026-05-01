@@ -291,23 +291,24 @@ class TestHomeStats:
         client = TestClient(app)
         resp = client.get("/")
         assert resp.status_code == 200
-        # New stat labels (replacing the old "已入库 JD / SKILL 调用次数")
+        # 4 lifecycle stat labels (replacing the old "已入库 JD / SKILL 调用次数")
         assert "沉默待跟进" in resp.text
         assert "本周面试" in resp.text
         assert "未跑评估" in resp.text
-        assert "Inbox 待决策" in resp.text
+        assert "投递战况" in resp.text
         # Friendly empty-state copy
         assert (
             "今天战况平稳" in resp.text
             or "没有紧急待办" in resp.text
         )
 
-    def test_home_surfaces_pipeline_mini_kanban(self, app_setup) -> None:
-        """Home page includes the 5-column pipeline overview."""
+    def test_home_links_to_pipeline_page(self, app_setup) -> None:
+        """Home page has a 投递战况 stat card linking to /pipeline.
+        The 5-column kanban itself lives on /pipeline now (总分式 UI)."""
         app, _, _ = app_setup
         resp = TestClient(app).get("/")
-        for label in ("已扫描", "已投递", "HR 已联系", "面试中", "已结束"):
-            assert label in resp.text
+        assert "投递战况" in resp.text
+        assert "/pipeline" in resp.text
 
     def test_quick_eval_keeps_legacy_stats(self, app_setup) -> None:
         """The legacy stat labels migrated to /quick-eval — make sure

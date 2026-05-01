@@ -171,3 +171,30 @@ dependency: a standalone HTML page with ``@page`` rules and a
 ``no-print`` audit panel hits the same UX without the 200MB Chromium
 download. Career-Ops' typography choice (Source Serif 4 for headers
 + system sans for body) carried over directly.
+
+## namewyf/Campus2026 — 校招清单数据源 (W10)
+
+**[namewyf/Campus2026](https://github.com/namewyf/Campus2026)** (393 ⭐) —
+社区维护的 2026 届校招 + 实习信息汇总仓库。``AwesomeJobsSpider``
+(``src/offerguide/spiders/awesome_jobs.py``) 默认抓这个 README 的 markdown
+表格，把每一行（公司 · 投递入口 · 更新日期 · 地点 · 备注）作为一个候选
+``RawJob`` 入库。
+
+为什么这是合法且最佳的做法：
+
+1. 公开 raw 内容 —— ``raw.githubusercontent.com`` 无 cookie / API key、无反爬压力
+2. 维护者期望被消费 —— awesome-style 列表的存在意义就是被引用，仓库 README
+   明确写着「欢迎共创、欢迎引用」
+3. Git 有版本历史 —— 失效 JD 会被维护者下架，我们每天定时拉就是「跟着维护者的节奏」
+
+我们只**消费**这个仓库；不 fork、不 vendor、不 mirror 内容。每条入库的
+``RawJob.extras['github_repo']`` 都保留 ``namewyf/Campus2026`` 作为来源。
+
+## ccvibe.cc — Claude API 网关（开发期使用）
+
+**[ccvibe.cc](https://ccvibe.cc)** —— 第三方 OpenAI-compatible API 网关，
+代理 Claude 模型 (Opus 4.5/4.6/4.7、Sonnet 4.5/4.6、Haiku 4.5)。开发期
+默认走这个端点是出于成本与可达性考虑；``offerguide.config.Settings``
+也支持原生 DeepSeek、OpenAI、OpenRouter 等任意 OpenAI-compat 端点。
+``llm.client._normalize_base_url`` 会自动处理 ``/v1`` 路径补全，所以用户
+只需在 ``.env`` 写 ``BASE_URL=https://my-proxy``、``TOKEN=sk-...`` 就可以。

@@ -29,7 +29,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_once.add_argument(
         "job",
-        choices=("silence_check", "corpus_refresh", "brief_update"),
+        choices=(
+            "discover_jobs",
+            "silence_check",
+            "corpus_refresh",
+            "brief_update",
+        ),
         help="Which job to run",
     )
 
