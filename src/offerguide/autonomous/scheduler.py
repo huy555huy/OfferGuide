@@ -197,6 +197,7 @@ def build_default_scheduler(
     from ..skills import SkillRuntime, discover_skills
     from ..ui.notify import make_notifier
     from .jobs.brief_update import BRIEF_UPDATE_JOB
+    from .jobs.corpus_classify import CORPUS_CLASSIFY_JOB
     from .jobs.corpus_refresh import CORPUS_REFRESH_JOB
     from .jobs.discover_jobs import DISCOVER_JOBS_JOB
     from .jobs.silence_check import SILENCE_CHECK_JOB
@@ -253,6 +254,7 @@ def build_default_scheduler(
 
     sched = AutonomousScheduler(ctx)
     sched.add(DISCOVER_JOBS_JOB)
+    sched.add(CORPUS_CLASSIFY_JOB)
     sched.add(SILENCE_CHECK_JOB)
     sched.add(CORPUS_REFRESH_JOB)
     sched.add(BRIEF_UPDATE_JOB)

@@ -178,7 +178,7 @@ class CorpusCollector:
                 continue
 
             try:
-                was_new, _ = interview_corpus.insert(
+                was_new, ie_id = interview_corpus.insert(
                     self.store,
                     company=company,
                     raw_text=clean_text,
@@ -188,6 +188,15 @@ class CorpusCollector:
                 )
                 if was_new:
                     inserted += 1
+                    # Run quality classifier inline so successful_profile
+                    # synthesis sees the score immediately rather than
+                    # waiting for the next daily corpus_classify job.
+                    self._classify_inline(
+                        item_id=ie_id,
+                        text=clean_text,
+                        company=company,
+                        role_hint=verdict.get("role_hint") or role_hint,
+                    )
                 else:
                     skipped_dup += 1
             except ValueError as e:
@@ -208,12 +217,22 @@ class CorpusCollector:
     # ── internals ──────────────────────────────────────────────────
 
     def _make_queries(self, company: str, role_hint: str | None) -> list[str]:
+        """Build a multi-pronged query set covering面经 / offer 复盘 /
+        项目分享 — all three are evidence types that ``successful_profile``
+        synthesizes from. Year span 2025-2027 because the user's timeline
+        (May 2026 → 2027届 暑期实习 → 2027届 秋招) crosses two recruit
+        cycles, and successful candidates' offer posts often mention
+        cycle they applied in.
+        """
         out = [
-            f"{company} 面经 校招 2026",
-            f"{company} 实习面经 牛客",
+            f"{company} 面经 暑期实习 2026",
+            f"{company} 面经 校招 2027",
+            f"{company} offer 复盘 牛客",
+            f"{company} 实习经历 复盘",
         ]
         if role_hint:
             out.append(f"{company} {role_hint} 面经")
+            out.append(f"{company} {role_hint} 项目分享")
         out.append(f'"{company}" interview experience site:nowcoder.com')
         return out
 
@@ -255,6 +274,34 @@ class CorpusCollector:
             return json.loads(resp.content)
         except json.JSONDecodeError:
             return None
+
+    def _classify_inline(
+        self,
+        *,
+        item_id: int,
+        text: str,
+        company: str,
+        role_hint: str | None,
+    ) -> None:
+        """Run corpus_quality.classify_one + persist verdict on a freshly
+        ingested item. Failure is logged but never bubbles up — the row
+        keeps its default score and gets retried by corpus_classify
+        daemon next day.
+        """
+        from .. import corpus_quality
+
+        try:
+            verdict = corpus_quality.classify_one(
+                text=text,
+                company=company,
+                role_hint=role_hint,
+                llm=self.llm,
+            )
+            corpus_quality.persist_verdict(
+                self.store, item_id=item_id, verdict=verdict
+            )
+        except Exception as e:
+            log.warning("inline classify failed for id=%s: %s", item_id, e)
 
     def close(self) -> None:
         self._http.close()

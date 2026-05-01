@@ -257,7 +257,7 @@ class TestCorpusCollector:
         store = corpus_setup
         # Search backend returns 1 nowcoder hit
         search = StubSearch({
-            "字节跳动 面经 校招 2026": [
+            "字节跳动 面经 暑期实习 2026": [
                 SearchHit(title="字节面经", url="https://www.nowcoder.com/d/123", snippet="s"),
             ]
         })
@@ -295,7 +295,7 @@ class TestCorpusCollector:
     def test_rejects_low_quality(self, corpus_setup) -> None:
         store = corpus_setup
         search = StubSearch({
-            "字节跳动 面经 校招 2026": [
+            "字节跳动 面经 暑期实习 2026": [
                 SearchHit(title="random", url="https://www.nowcoder.com/x", snippet="s"),
             ]
         })
@@ -321,7 +321,7 @@ class TestCorpusCollector:
         store = corpus_setup
         # All hits are from random sites (not in _PREFERRED_DOMAINS)
         search = StubSearch({
-            "字节跳动 面经 校招 2026": [
+            "字节跳动 面经 暑期实习 2026": [
                 SearchHit(title="t", url="https://example.com/x", snippet="s"),
                 SearchHit(title="t", url="https://random.cn/y", snippet="s"),
             ]

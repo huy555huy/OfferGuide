@@ -58,15 +58,15 @@ SAMPLE_MD = """\
 
 | 公司     | 招聘状态&&投递链接 | 更新日期   | 地点 | 备注 |
 | -------- | ------------------- | ---------- | ---- | ---- |
-| 阿里巴巴 | [校招正式批](https://talent.alibaba.com/campus/x) | 2025/7/1   | 全国 | 7月开启 |
-| 字节跳动 | [校招正式批](https://jobs.bytedance.com/zh/position) | 2025/7/1   | 全国 | 7月开启 |
-| 腾讯     | [校招正式批](https://join.qq.com/post.html?query=p_2) | 2025/7/1   | 北京 |  |
+| 阿里巴巴 | [校招正式批](https://talent.alibaba.com/campus/x) | 2026/4/15   | 全国 | 7月开启 |
+| 字节跳动 | [校招正式批](https://jobs.bytedance.com/zh/position) | 2026/4/15   | 全国 | 7月开启 |
+| 腾讯     | [校招正式批](https://join.qq.com/post.html?query=p_2) | 2026/4/15   | 北京 |  |
 
 ### 银行&&保险
 
 | 公司   | 招聘状态&&投递链接 | 更新日期 | 地点 | 备注 |
 | ------ | ------------------- | -------- | ---- | ---- |
-| 招商银行 | [校招正式批](https://career.cmbchina.com/) | 2025/7/1 | 全国 | |
+| 招商银行 | [校招正式批](https://career.cmbchina.com/) | 2026/4/15 | 全国 | |
 
 ## 实习信息
 
@@ -74,7 +74,7 @@ SAMPLE_MD = """\
 
 | 公司 | 投递链接 | 更新 | 地点 | 备注 |
 | ---- | -------- | ---- | ---- | ---- |
-| 美团 | [实习](https://campus.meituan.com/intern) | 2025/8/1 | 北京 |  |
+| 美团 | [实习](https://campus.meituan.com/intern) | 2026/4/20 | 北京 |  |
 """
 
 

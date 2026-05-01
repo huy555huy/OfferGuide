@@ -82,6 +82,7 @@ class AwesomeJobsSpider:
         sections_keep_substrings: tuple[str, ...] = (
             "互联网", "AI", "校招", "实习",
         ),
+        max_stale_days: int | None = 180,
     ) -> None:
         self.sources = list(sources or DEFAULT_SOURCES)
         self.branch = branch
@@ -89,6 +90,18 @@ class AwesomeJobsSpider:
         """Only emit rows whose enclosing section name contains any of these
         substrings. Drops irrelevant categories like 银行 / 国企 by default;
         pass an empty tuple to keep everything."""
+
+        self.max_stale_days = max_stale_days
+        """Drop entries whose ``update_date`` (parsed from the README)
+        is older than this many days. None = no date filter.
+
+        The default 180 days is calibrated to current realities of
+        Chinese 2026届 → 2027届 校招 transition (May 2026): keep
+        entries dated 2025-12 or later, drop earlier ones. Setting
+        a larger window means stale 2026届 校招 entries stay; setting
+        smaller means fresher entries only at the cost of dropping
+        always-on 校招 portals (most 字节/阿里 portal URLs are stable
+        across years)."""
 
     def run(self, *, max_items: int = 30) -> SpiderResult:
         out = SpiderResult(spider_name=self.name)
@@ -112,6 +125,8 @@ class AwesomeJobsSpider:
             for row in rows:
                 if not self._section_ok(row):
                     continue
+                if self._too_stale(row):
+                    continue
                 key = (row.company, row.apply_url)
                 if key in seen:
                     continue
@@ -121,6 +136,34 @@ class AwesomeJobsSpider:
                 if len(out.raw_jobs) >= max_items:
                     return out
         return out
+
+    def _too_stale(self, row: _TableRow) -> bool:
+        """Drop entries whose ``update_date`` is too old, configurable
+        via ``max_stale_days``.
+
+        Date format in namewyf/Campus2026 is ``2025/7/20`` style; we
+        also accept ISO ``2025-07-20``. Empty / unparseable dates are
+        kept (no filter applied — better to over-include than
+        silently drop)."""
+        if self.max_stale_days is None or not row.update_date:
+            return False
+
+        from datetime import datetime, timedelta
+
+        raw = row.update_date.strip().replace("/", "-")
+        # Pad single-digit month/day: "2025-7-1" → "2025-07-01"
+        parts = raw.split("-")
+        if len(parts) == 3:
+            try:
+                y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+                posted = datetime(y, m, d)
+            except (ValueError, TypeError):
+                return False
+        else:
+            return False
+
+        cutoff = datetime.now() - timedelta(days=self.max_stale_days)
+        return posted < cutoff
 
     def _section_ok(self, row: _TableRow) -> bool:
         """Match against the row's deepest heading, not the H2 ancestor.
