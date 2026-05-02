@@ -26,6 +26,10 @@ data/
 *.sqlite3
 profile.yaml
 resume.pdf
+*.docx
+中文简历*
+中文简历.docx
+胡阳_*
 
 # Secrets
 .env
