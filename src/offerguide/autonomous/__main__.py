@@ -32,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=(
             "extract_facts",
             "discover_jobs",
+            "jd_enrich",
             "corpus_classify",
             "silence_check",
             "corpus_refresh",

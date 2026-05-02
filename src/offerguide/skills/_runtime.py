@@ -69,6 +69,7 @@ class SkillRuntime:
         temperature: float = 0.3,
         model: str | None = None,
         strict_inputs: bool = True,
+        inject_long_term_memory: bool = True,
     ) -> SkillResult:
         """Render the SKILL with `inputs`, call the LLM, store the run, return SkillResult.
 
@@ -79,10 +80,33 @@ class SkillRuntime:
         `strict_inputs=True` (the default) rejects keys that aren't declared in
         ``spec.inputs``. Set ``strict_inputs=False`` only when you explicitly
         want to pass debug context that is allowed to drift between calls.
+
+        `inject_long_term_memory=True` (default) prepends relevant user_facts
+        (mem0 v3-style retrieval) to the system message. Hash + persistence
+        still see the *canonical* input, NOT the injected memory — same logical
+        invocation hashes the same regardless of evolving memory state, so
+        GEPA trainset deduplication stays correct. Set to False for SKILLs
+        that explicitly don't want memory (rare).
         """
         canonical = _canonicalize_inputs(spec, inputs, strict=strict_inputs)
 
         system_msg = spec.body
+        # ── Long-term memory injection (W12 fix: close the loop) ───────────
+        # user_facts retrieve runs against a query built from the canonical
+        # inputs (entities + key text), prepended to system_msg. Failure is
+        # silent — memory is enrichment, not requirement.
+        if inject_long_term_memory:
+            try:
+                from .. import user_facts as _uf
+                memory_query = _build_memory_query(spec, canonical)
+                memory_block = _uf.retrieve_for_prompt(
+                    self._store, query=memory_query, top_k=8,
+                )
+                if memory_block:
+                    system_msg = memory_block + "\n\n" + system_msg
+            except Exception:
+                pass
+
         user_msg = _render_inputs(spec, canonical)
         input_hash = _hash_invocation(spec, canonical)
 
@@ -211,6 +235,29 @@ def _stringify(val: Any) -> str:
     if isinstance(val, dict | list):
         return json.dumps(val, ensure_ascii=False, indent=2)
     return str(val)
+
+
+def _build_memory_query(spec: SkillSpec, inputs: dict[str, Any]) -> str:
+    """Construct a retrieve query from a SKILL's canonical inputs.
+
+    We concatenate the SKILL name + the most-discriminating input values
+    (company / role / job_text first lines / user_resume first lines).
+    The query feeds user_facts.retrieve which uses Jaccard + entity match.
+
+    Capped to 800 chars so the retrieval call is fast.
+    """
+    parts = [spec.name]
+    # Prioritized keys — entities + short identifiers first
+    for key in ("company", "role_focus", "role_hint", "role"):
+        v = inputs.get(key)
+        if v:
+            parts.append(str(v))
+    # Then short snippets from longer fields
+    for key in ("job_text", "user_resume", "master_resume"):
+        v = inputs.get(key)
+        if v:
+            parts.append(str(v)[:200])  # only first 200 chars
+    return " ".join(parts)[:800]
 
 
 def _hash_invocation(spec: SkillSpec, inputs: dict[str, Any]) -> str:

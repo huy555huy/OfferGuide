@@ -127,17 +127,64 @@ class AutonomousScheduler:
         )
 
     def _wrap(self, spec: JobSpec):
-        """Wrap a job func in error handling + structured logging."""
+        """Wrap a job func in error handling + structured logging +
+        daemon_runs persistence (so /dashboard can show health)."""
         def _run() -> None:
             log.info("autonomous job start: %s", spec.name)
+            run_id = self._record_start(spec.name)
             try:
                 result = spec.func(self.ctx)
+                self._record_end(run_id, status="ok", summary=result)
                 log.info("autonomous job done: %s → %s", spec.name, result)
             except Exception as e:
+                self._record_end(
+                    run_id, status="error", summary={}, error_text=str(e)[:500]
+                )
                 log.exception("autonomous job FAILED: %s: %s", spec.name, e)
 
         _run.__name__ = f"_run_{spec.name}"
         return _run
+
+    def _record_start(self, job_name: str) -> int | None:
+        """Insert daemon_runs row, return its id. Failure is silent —
+        we don't want telemetry to crash the job."""
+        try:
+            import json as _json
+            with self.ctx.store.connect() as conn:
+                cur = conn.execute(
+                    "INSERT INTO daemon_runs(job_name, status, summary_json) "
+                    "VALUES (?, 'running', ?) RETURNING id",
+                    (job_name, _json.dumps({})),
+                )
+                return int(cur.fetchone()[0])
+        except Exception:
+            return None
+
+    def _record_end(
+        self,
+        run_id: int | None,
+        *,
+        status: str,
+        summary: Any,
+        error_text: str | None = None,
+    ) -> None:
+        if run_id is None:
+            return
+        try:
+            import json as _json
+            payload = _json.dumps(
+                summary if isinstance(summary, dict) else {"result": str(summary)},
+                ensure_ascii=False,
+                default=str,
+            )[:4000]
+            with self.ctx.store.connect() as conn:
+                conn.execute(
+                    "UPDATE daemon_runs SET status = ?, ended_at = julianday('now'), "
+                    "summary_json = ?, error_text = ? WHERE id = ?",
+                    (status, payload, error_text, run_id),
+                )
+        except Exception:
+            pass
 
     def run_blocking(self) -> None:
         """Block forever. Ctrl-C / SIGTERM stops it."""
@@ -156,13 +203,27 @@ class AutonomousScheduler:
     def trigger_once(self, name: str) -> Any:
         """Run job *name* once immediately, returning its result.
 
-        Used by the CLI ``run-once`` subcommand and by tests — bypasses
-        the scheduler so we don't need to wait for a real trigger.
+        Used by the CLI ``run-once`` subcommand and by tests. Routes
+        through ``_wrap`` so daemon_runs telemetry records the
+        invocation just like a real scheduled tick — otherwise
+        run-once would leave a hole in the health dashboard.
         """
         spec = next((j for j in self._jobs if j.name == name), None)
         if spec is None:
             raise KeyError(f"no job registered with name {name!r}")
-        return spec.func(self.ctx)
+        # Run through _wrap so daemon_runs gets the row, but capture
+        # the result for the CLI / test caller (the wrapped runner
+        # otherwise discards return value).
+        run_id = self._record_start(name)
+        try:
+            result = spec.func(self.ctx)
+            self._record_end(run_id, status="ok", summary=result)
+            return result
+        except Exception as e:
+            self._record_end(
+                run_id, status="error", summary={}, error_text=str(e)[:500],
+            )
+            raise
 
     def list_jobs(self) -> list[str]:
         return [j.name for j in self._jobs]
@@ -201,6 +262,7 @@ def build_default_scheduler(
     from .jobs.corpus_refresh import CORPUS_REFRESH_JOB
     from .jobs.discover_jobs import DISCOVER_JOBS_JOB
     from .jobs.extract_facts import EXTRACT_FACTS_JOB
+    from .jobs.jd_enrich import JD_ENRICH_JOB
     from .jobs.silence_check import SILENCE_CHECK_JOB
 
     settings = settings or Settings.from_env()
@@ -256,6 +318,7 @@ def build_default_scheduler(
     sched = AutonomousScheduler(ctx)
     sched.add(EXTRACT_FACTS_JOB)
     sched.add(DISCOVER_JOBS_JOB)
+    sched.add(JD_ENRICH_JOB)
     sched.add(CORPUS_CLASSIFY_JOB)
     sched.add(SILENCE_CHECK_JOB)
     sched.add(CORPUS_REFRESH_JOB)

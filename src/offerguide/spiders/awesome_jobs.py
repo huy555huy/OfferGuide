@@ -82,7 +82,7 @@ class AwesomeJobsSpider:
         sections_keep_substrings: tuple[str, ...] = (
             "互联网", "AI", "校招", "实习",
         ),
-        max_stale_days: int | None = 180,
+        max_stale_days: int | None = 365,
     ) -> None:
         self.sources = list(sources or DEFAULT_SOURCES)
         self.branch = branch
@@ -95,13 +95,15 @@ class AwesomeJobsSpider:
         """Drop entries whose ``update_date`` (parsed from the README)
         is older than this many days. None = no date filter.
 
-        The default 180 days is calibrated to current realities of
-        Chinese 2026届 → 2027届 校招 transition (May 2026): keep
-        entries dated 2025-12 or later, drop earlier ones. Setting
-        a larger window means stale 2026届 校招 entries stay; setting
-        smaller means fresher entries only at the cost of dropping
-        always-on 校招 portals (most 字节/阿里 portal URLs are stable
-        across years)."""
+        The default 365 days is calibrated to keep "always-on portal"
+        entries (字节/阿里/腾讯 etc. — same portal URL serves multiple
+        recruit years). Earlier 180 was too aggressive for 2026 May
+        timing: namewyf/Campus2026 README dated entries 2025/7-9 (when
+        2026届 校招 opened) — most of those are still **valid** as
+        2027届 暑期实习/秋招 entrance for the same companies. The
+        校招 portal URL doesn't change across years; only the inside
+        listings rotate. ``jd_enricher`` then handles the per-listing
+        currency check."""
 
     def run(self, *, max_items: int = 30) -> SpiderResult:
         out = SpiderResult(spider_name=self.name)

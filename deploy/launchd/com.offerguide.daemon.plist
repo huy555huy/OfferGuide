@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+OfferGuide autonomous daemon — macOS launchd unit.
+
+Install:
+  cp deploy/launchd/com.offerguide.daemon.plist ~/Library/LaunchAgents/
+  launchctl load ~/Library/LaunchAgents/com.offerguide.daemon.plist
+
+Verify it's running:
+  launchctl list | grep offerguide
+  tail -f /tmp/offerguide.daemon.log
+
+Stop / unload:
+  launchctl unload ~/Library/LaunchAgents/com.offerguide.daemon.plist
+
+Edit BEFORE installing:
+  - Replace /Users/huy/new_try with your actual repo path
+  - Replace /opt/anaconda3/bin/python with your Python interpreter path
+    (find with: which python)
+  - .env should sit next to OFFERGUIDE_DB; envvars below pick them up
+-->
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.offerguide.daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/anaconda3/bin/python</string>
+    <string>-m</string>
+    <string>offerguide.autonomous</string>
+    <string>run</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/huy/new_try</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONPATH</key>
+    <string>/Users/huy/new_try/src</string>
+    <key>OFFERGUIDE_DB</key>
+    <string>/Users/huy/new_try/.offerguide/store.db</string>
+    <key>OFFERGUIDE_RESUME_PDF</key>
+    <string>/Users/huy/new_try/data/resume.pdf</string>
+    <!-- BASE_URL / TOKEN are read from .env in WorkingDirectory -->
+  </dict>
+
+  <!-- KeepAlive: respawn if it crashes -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Don't run on system boot — wait for user login -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/offerguide.daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/offerguide.daemon.err.log</string>
+
+  <!-- Throttle restarts: at most one restart per 30s -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+</dict>
+</plist>

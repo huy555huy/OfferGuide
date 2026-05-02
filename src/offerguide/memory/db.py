@@ -202,6 +202,21 @@ CREATE TABLE IF NOT EXISTS behavioral_stories (
     created_at        REAL DEFAULT (julianday('now'))
 );
 
+-- ``daemon_runs`` records each scheduled-job execution so the UI can show
+-- "is the autonomous daemon actually running, and what did each job do
+-- last night". Without this, users have no signal between "daemon
+-- crashed silently" and "daemon is humming".
+CREATE TABLE IF NOT EXISTS daemon_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_name     TEXT NOT NULL,
+    started_at   REAL NOT NULL DEFAULT (julianday('now')),
+    ended_at     REAL,
+    status       TEXT NOT NULL,        -- 'running' | 'ok' | 'error'
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    error_text   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_daemon_runs_job ON daemon_runs(job_name, started_at);
+
 -- ``user_facts`` is the long-term memory layer (W12, mem0 v3-style).
 -- Single-pass ADD-only: new facts append, never UPDATE/DELETE — accumulation
 -- of evidence beats clobber-update for downstream retrieval recall.

@@ -107,6 +107,61 @@
     {% endif %}
 </div>
 
+{# ─── daemon health (W12 fix: was the daemon actually running?) ─── #}
+<div class="card">
+    <div class="card-header">
+        <h2>Daemon 健康</h2>
+        <span class="meta">7 个 cron job — 看 deploy/README.md 启动指南</span>
+    </div>
+    {% if daemon_health %}
+    <table style="width: 100%; border-collapse: collapse;">
+        <thead style="text-align: left; font-size: 0.78rem; color: var(--text-muted); border-bottom: 1px solid var(--border-soft);">
+            <tr>
+                <th style="padding: 0.4rem 0;">Job</th>
+                <th>上次运行</th>
+                <th>状态</th>
+                <th>过去 24 小时</th>
+                <th>last summary</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for j in daemon_health %}
+        <tr style="border-bottom: 1px solid var(--border-soft); font-size: 0.85rem;">
+            <td style="padding: 0.4rem 0;"><code>{{ j.name }}</code></td>
+            <td class="muted small">{{ j.last_run_when }}</td>
+            <td>
+                {% if j.status == 'ok' %}
+                    <span class="pill low">✓ ok</span>
+                {% elif j.status == 'error' %}
+                    <span class="pill high">✗ error</span>
+                {% elif j.status == 'running' %}
+                    <span class="pill primary">⏳ running</span>
+                {% else %}
+                    <span class="pill" style="background: var(--bg-warm); color: var(--text-muted);">从未</span>
+                {% endif %}
+            </td>
+            <td class="muted small">
+                {{ j.run_count_24h }} 次{% if j.error_count_24h > 0 %} <span style="color: var(--danger);">· {{ j.error_count_24h }} 失败</span>{% endif %}
+            </td>
+            <td class="muted small" style="max-width: 380px; overflow: hidden; text-overflow: ellipsis;">
+                {{ j.last_summary_str|truncate(80) }}
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% set never_ran = daemon_health|selectattr("status", "equalto", "never")|list|length %}
+    {% if never_ran == 7 %}
+    <div class="warning-box" style="margin-top: 0.625rem; padding: 0.625rem 0.875rem; background: var(--warning-soft); border-left: 3px solid var(--warning); border-radius: var(--radius-sm); font-size: 0.85rem;">
+        ⚠ <strong>所有 daemon 从未运行</strong>。看 <code>deploy/README.md</code> 启动 launchd / tmux：
+        <code>python -m offerguide.autonomous run</code>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="empty">无 daemon 健康数据</div>
+    {% endif %}
+</div>
+
 {# ─── company briefs (autonomous agent output) ─── #}
 <div class="card">
     <div class="card-header">

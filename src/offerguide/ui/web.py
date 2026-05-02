@@ -1328,6 +1328,7 @@ def create_app(
                 evolutions=_recent_evolutions(store, limit=10),
                 recent_runs=_recent_skill_runs(store, limit=10),
                 briefs=briefs_mod.list_briefs(store, limit=10),
+                daemon_health=_daemon_health(store),
                 active_tab="dashboard",
             ),
         )
@@ -1916,6 +1917,76 @@ def _list_jobs_by_ids(store: Store, ids: list[int]) -> list[dict[str, Any]]:
         for r in rows
     }
     return [by_id[i] for i in ids if i in by_id]
+
+
+def _daemon_health(store: Store) -> list[dict[str, Any]]:
+    """Per-job health summary for /dashboard 'daemon 健康' card.
+
+    For each known job name, find the latest daemon_runs row and report:
+    last_run_when (humanized), last_status, last_summary_str, run_count,
+    error_count_24h. If a job has no rows ever, status = 'never'.
+
+    The 7 known job names are hardcoded — order matches the daily timeline.
+    """
+    import json as _json
+
+    job_names = (
+        "extract_facts",   # 02:00
+        "discover_jobs",   # 06:30
+        "jd_enrich",       # 06:45
+        "corpus_classify", # 07:00
+        "silence_check",   # 09:00
+        "corpus_refresh",  # Mon 08:00
+        "brief_update",    # 23:00
+    )
+    out: list[dict[str, Any]] = []
+    with store.connect() as conn:
+        for name in job_names:
+            latest = conn.execute(
+                "SELECT started_at, ended_at, status, summary_json, error_text "
+                "FROM daemon_runs WHERE job_name = ? "
+                "ORDER BY started_at DESC LIMIT 1",
+                (name,),
+            ).fetchone()
+            count24h = conn.execute(
+                "SELECT COUNT(*), SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) "
+                "FROM daemon_runs WHERE job_name = ? "
+                "  AND started_at >= julianday('now', '-1 day')",
+                (name,),
+            ).fetchone()
+            run_count = int(count24h[0] or 0) if count24h else 0
+            err_count = int(count24h[1] or 0) if count24h else 0
+            if latest is None:
+                out.append({
+                    "name": name, "status": "never", "last_run_when": "—",
+                    "last_summary_str": "从未运行 — daemon 可能没启动",
+                    "run_count_24h": 0, "error_count_24h": 0,
+                })
+                continue
+            started_at, ended_at, status, summary_json, error_text = latest
+            try:
+                age_seconds = (
+                    (_to_julian(__import__('datetime').datetime.now(tz=UTC))
+                     - float(started_at)) * 86400
+                )
+            except Exception:
+                age_seconds = 0
+            try:
+                summary = _json.loads(summary_json) if summary_json else {}
+            except Exception:
+                summary = {}
+            summary_str = (
+                ", ".join(f"{k}={v}" for k, v in list(summary.items())[:5])
+                if summary else (error_text or "(no summary)")
+            )
+            out.append({
+                "name": name, "status": status,
+                "last_run_when": _humanize_age(age_seconds),
+                "last_summary_str": summary_str,
+                "run_count_24h": run_count,
+                "error_count_24h": err_count,
+            })
+    return out
 
 
 def _mock_history_to_transcript(history: list[dict], company: str) -> str:

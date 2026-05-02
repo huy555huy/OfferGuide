@@ -4,6 +4,7 @@ Each module exports a JobSpec instance the scheduler can register:
 
 - ``extract_facts.EXTRACT_FACTS_JOB``       daily 02:00 — mine user_facts from skill_runs
 - ``discover_jobs.DISCOVER_JOBS_JOB``       daily 06:30 — spider sweep + auto-eval
+- ``jd_enrich.JD_ENRICH_JOB``               daily 06:45 — fetch + LLM-extract thin JD details
 - ``corpus_classify.CORPUS_CLASSIFY_JOB``   daily 07:00 — classify pending 面经
 - ``silence_check.SILENCE_CHECK_JOB``       daily 09:00 — tracker sweep
 - ``corpus_refresh.CORPUS_REFRESH_JOB``     weekly Mon 08:00 — agentic 面经
@@ -19,6 +20,7 @@ from . import (
     corpus_refresh,
     discover_jobs,
     extract_facts,
+    jd_enrich,
     silence_check,
 )
 
@@ -28,5 +30,6 @@ __all__ = [
     "corpus_refresh",
     "discover_jobs",
     "extract_facts",
+    "jd_enrich",
     "silence_check",
 ]
