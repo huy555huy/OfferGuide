@@ -1508,6 +1508,48 @@ def create_app(
 
     # ── Browser extension ingest endpoint ──────────────────────────────
 
+    @app.get("/api/search/test", response_class=JSONResponse)
+    def search_test() -> dict:
+        """Run a canary query against each search backend, return health.
+
+        UI uses this to tell the user "your search backend is reachable"
+        BEFORE relying on it for daily corpus_refresh sweeps. National
+        firewalls can block DDG; Bing might serve CAPTCHA on certain
+        IPs; Tavily depends on API key. This endpoint surfaces all 3.
+        """
+        import os as _os
+
+        from ..agentic.search import (
+            BingCNSearch,
+            DuckDuckGoSearch,
+            build_default_search,
+            health_check,
+        )
+        try:
+            tavily_check: dict | None = None
+            if _os.environ.get("TAVILY_API_KEY"):
+                from ..agentic.search import TavilySearch
+                try:
+                    tavily_check = health_check(TavilySearch())
+                except Exception as e:
+                    tavily_check = {
+                        "name": "tavily", "ok": False, "hit_count": 0,
+                        "sample_titles": [], "error_str": str(e)[:200],
+                    }
+            return {
+                "default_chain": health_check(build_default_search()),
+                "bing_cn":       health_check(BingCNSearch()),
+                "duckduckgo":    health_check(DuckDuckGoSearch()),
+                "tavily":        tavily_check or {
+                    "name": "tavily", "ok": None, "hit_count": 0,
+                    "sample_titles": [],
+                    "error_str": "TAVILY_API_KEY 未配置 — 设了自动启用",
+                },
+                "guidance": _search_guidance_message(),
+            }
+        except Exception as e:
+            return {"error": str(e)[:300]}
+
     @app.post("/api/extension/ingest", response_class=JSONResponse)
     def extension_ingest(payload: ExtensionJDPayload) -> dict:
         """Accept JD data from the Boss browser extension and ingest as a job."""
@@ -1917,6 +1959,18 @@ def _list_jobs_by_ids(store: Store, ids: list[int]) -> list[dict[str, Any]]:
         for r in rows
     }
     return [by_id[i] for i in ids if i in by_id]
+
+
+def _search_guidance_message() -> str:
+    """One-line guidance shown next to /api/search/test results."""
+    import os as _os
+    if _os.environ.get("TAVILY_API_KEY"):
+        return "已配 Tavily — 最稳定。Bing/DDG 作为兜底。"
+    return (
+        "未配 TAVILY_API_KEY。强烈推荐：去 https://tavily.com 注册"
+        "（1000 次/月免费），TAVILY_API_KEY=tvly-... 加到 .env, "
+        "重启即自动启用。Bing CN 国内偶发 CAPTCHA, DDG 国内常被墙。"
+    )
 
 
 def _daemon_health(store: Store) -> list[dict[str, Any]]:

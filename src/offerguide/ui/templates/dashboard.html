@@ -107,6 +107,27 @@
     {% endif %}
 </div>
 
+{# ─── search backend 健康 (W12-fix: 国内 DDG 不通; 一键测试 chain/Bing/DDG/Tavily) ─── #}
+<div class="card">
+    <div class="card-header">
+        <h2>面经搜索后端 健康</h2>
+        <span class="meta">corpus_collector / corpus_refresh 用</span>
+    </div>
+    <div class="muted small" style="margin-bottom: 0.5rem;">
+        懒加载 — 点按钮才会真发 3 个网络请求 (15-30 秒)。
+        <strong>没配 TAVILY_API_KEY</strong> 就只测 Bing CN / DDG。
+    </div>
+    <button hx-get="/api/search/test"
+            hx-target="#search-test-result"
+            hx-swap="innerHTML"
+            hx-indicator="#search-spinner"
+            onclick="document.getElementById('search-test-result').innerHTML='<div class=muted>测试中...</div>'">
+        🔍 测试搜索后端是否可达
+    </button>
+    <span id="search-spinner" class="muted htmx-indicator">⏳ 跑 3 个 backend, 每个 ≤15s…</span>
+    <pre id="search-test-result" style="margin-top: 0.625rem; font-size: 0.78rem; max-height: 320px; overflow-y: auto; background: var(--bg-subtle); padding: 0.75rem; border-radius: var(--radius-sm); white-space: pre-wrap;"></pre>
+</div>
+
 {# ─── daemon health (W12 fix: was the daemon actually running?) ─── #}
 <div class="card">
     <div class="card-header">
