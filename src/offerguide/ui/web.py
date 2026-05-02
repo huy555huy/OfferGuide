@@ -727,6 +727,131 @@ def create_app(
             ),
         )
 
+    @app.post("/api/tailor/docx", response_class=HTMLResponse)
+    def tailor_docx_run(
+        request: Request,
+        job_id: str = Form(...),
+    ) -> Any:
+        """Real .docx tailoring — preserves Word format end-to-end.
+
+        Reads the user's master resume (must be .docx via OFFERGUIDE_RESUME_PDF),
+        the selected job's JD text, runs ``docx_tailor.tailor_docx()`` with
+        real LLM, and saves the output to ``data/tailored/<job_id>_<ts>.docx``.
+        Renders a result fragment with summary + change_log + download link.
+        """
+        import time as _time
+        from pathlib import Path as _Path
+
+        from ..skills.tailor_resume.docx_tailor import tailor_docx
+
+        if profile is None or not getattr(profile, "source_pdf", None):
+            return templates.TemplateResponse(
+                request, "_tailor_docx_result.html",
+                _ctx(request, error="没加载简历——设 OFFERGUIDE_RESUME_PDF 后重启"),
+            )
+        master_path = _Path(profile.source_pdf)
+        if master_path.suffix.lower() != ".docx":
+            return templates.TemplateResponse(
+                request, "_tailor_docx_result.html",
+                _ctx(request, error=(
+                    "DOCX tailoring 要求 master 简历是 .docx 格式。"
+                    f"现在是 {master_path.suffix}。把 OFFERGUIDE_RESUME_PDF "
+                    "指向 .docx 文件后重启。"
+                )),
+            )
+        if runtime is None:
+            return templates.TemplateResponse(
+                request, "_tailor_docx_result.html",
+                _ctx(request, error="未配置 LLM——设 OFFERGUIDE_LLM_API_KEY 后重启"),
+            )
+
+        try:
+            jid = int(job_id)
+        except ValueError:
+            return templates.TemplateResponse(
+                request, "_tailor_docx_result.html",
+                _ctx(request, error="job_id 必须是整数"),
+            )
+
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT title, company, raw_text FROM jobs WHERE id = ?", (jid,),
+            ).fetchone()
+        if row is None:
+            return templates.TemplateResponse(
+                request, "_tailor_docx_result.html",
+                _ctx(request, error=f"找不到 job #{jid}"),
+            )
+        title, company, job_text = row
+        company = (company or "").strip() or "(未知公司)"
+
+        # Build output filename + path
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_company = company.replace("/", "_").replace(" ", "_")[:20]
+        output_dir = _Path("data/tailored")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_filename = f"胡阳_{safe_company}_{ts}.docx"
+        output_path = output_dir / output_filename
+
+        try:
+            # Use the runtime's LLM directly (it's the same instance)
+            llm = runtime._llm
+            result = tailor_docx(
+                input_path=master_path,
+                output_path=output_path,
+                jd_text=job_text,
+                company=company,
+                role_focus=title or "",
+                master_resume_text=profile.raw_resume_text,
+                llm=llm,
+            )
+        except Exception as e:
+            return templates.TemplateResponse(
+                request, "_tailor_docx_result.html",
+                _ctx(request, error=f"tailor_docx 失败: {e}"),
+            )
+
+        return templates.TemplateResponse(
+            request, "_tailor_docx_result.html",
+            _ctx(
+                request,
+                docx_result=result,
+                summary=result.summary(),
+                changes=result.changes,
+                skipped=result.skipped[:10],  # cap display
+                download_filename=output_filename,
+                job_title=title, job_company=company,
+                _time=_time,  # for cache-bust query
+            ),
+        )
+
+    @app.get("/api/tailor/download/{filename}")
+    def tailor_download(filename: str) -> Any:
+        """Serve a previously-tailored .docx for download.
+
+        Filename validation: must match the format we wrote
+        (``胡阳_<company>_<ts>.docx``) — refuse path traversal.
+        """
+        from pathlib import Path as _Path
+
+        from fastapi.responses import FileResponse
+
+        # Defense in depth: filename must not contain path separators
+        if "/" in filename or "\\" in filename or ".." in filename:
+            raise HTTPException(400, "invalid filename")
+        if not filename.endswith(".docx"):
+            raise HTTPException(400, "not a docx")
+
+        path = _Path("data/tailored") / filename
+        if not path.exists():
+            raise HTTPException(404, "file not found (regenerate?)")
+        return FileResponse(
+            str(path),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=filename,
+        )
+
     @app.post("/api/tailor/run", response_class=HTMLResponse)
     def tailor_run(
         request: Request,

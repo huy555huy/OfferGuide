@@ -1,0 +1,136 @@
+{% if error %}
+<div class="card"><div class="error">⚠ {{ error }}</div></div>
+{% elif docx_result %}
+
+<style>
+    .docx-summary {
+        display: grid; grid-template-columns: repeat(4, 1fr);
+        gap: 0.5rem; margin-bottom: 1rem;
+    }
+    .docx-summary .stat {
+        background: var(--bg-elev); border: 1px solid var(--border);
+        padding: 0.625rem 0.75rem; border-radius: var(--radius-sm);
+    }
+    .docx-summary .stat .label {
+        font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase;
+    }
+    .docx-summary .stat .num {
+        font-family: var(--font-serif); font-size: 1.5rem; font-weight: 600;
+        margin-top: 0.25rem;
+    }
+    .change-row {
+        background: var(--bg-elev); border: 1px solid var(--border);
+        border-left: 3px solid var(--success);
+        border-radius: var(--radius-sm); padding: 0.625rem 0.75rem;
+        margin-bottom: 0.5rem; font-size: 0.85rem;
+    }
+    .change-row .idx {
+        font-family: var(--font-mono); color: var(--text-muted);
+        font-size: 0.7rem;
+    }
+    .change-row .ratl {
+        color: var(--text-muted); font-size: 0.78rem; font-style: italic;
+        margin: 0.25rem 0 0.5rem;
+    }
+    .change-row .diff {
+        display: grid; grid-template-columns: 1fr 1fr;
+        gap: 0.5rem; font-size: 0.78rem;
+    }
+    .change-row .before {
+        color: var(--danger); text-decoration: line-through;
+        opacity: 0.85; padding: 0.25rem;
+        background: var(--danger-soft); border-radius: 4px;
+    }
+    .change-row .after {
+        color: var(--success); padding: 0.25rem;
+        background: var(--success-soft); border-radius: 4px;
+    }
+    .skip-row {
+        font-size: 0.78rem; color: var(--text-muted);
+        padding: 0.25rem 0.5rem; border-bottom: 1px dashed var(--border-soft);
+    }
+    .skip-row code { background: var(--bg-subtle); padding: 0 0.25rem; border-radius: 3px; }
+    .download-card {
+        background: linear-gradient(135deg, var(--success-soft), var(--bg-elev));
+        border: 2px solid var(--success); border-radius: var(--radius-lg);
+        padding: 1.25rem; margin-bottom: 1rem; text-align: center;
+    }
+    .download-card .filename {
+        font-family: var(--font-mono); font-size: 0.85rem;
+        color: var(--text-muted); margin-bottom: 0.5rem;
+    }
+    .download-card a.btn {
+        font-size: 1rem; padding: 0.625rem 1.25rem;
+        background: var(--success);
+    }
+</style>
+
+<div class="card">
+    <div class="card-header">
+        <h2>{{ job_company }} · {{ job_title|truncate(40) }} 简历微调结果</h2>
+        <span class="meta">DOCX 全程保格式</span>
+    </div>
+
+    <div class="docx-summary">
+        <div class="stat">
+            <div class="label">总段落</div>
+            <div class="num">{{ summary.total_paragraphs }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">可改写</div>
+            <div class="num">{{ summary.eligible }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">真改了</div>
+            <div class="num" style="color: var(--success);">{{ summary.rewritten }}</div>
+        </div>
+        <div class="stat">
+            <div class="label">受保护跳过</div>
+            <div class="num" style="color: var(--text-muted);">{{ summary.skipped }}</div>
+        </div>
+    </div>
+
+    <div class="download-card">
+        <div class="filename">{{ download_filename }}</div>
+        <a href="/api/tailor/download/{{ download_filename }}" class="btn" download>
+            ⬇ 下载 .docx
+        </a>
+    </div>
+</div>
+
+{% if changes %}
+<div class="card">
+    <div class="card-header">
+        <h2>真改写的 {{ changes|length }} 段</h2>
+        <span class="meta">每条带 rationale 引用 JD / ATS 关键词</span>
+    </div>
+    {% for c in changes %}
+    <div class="change-row">
+        <div>
+            <span class="idx">para #{{ c.index }}</span>
+        </div>
+        <div class="ratl">↳ {{ c.rationale }}</div>
+        <div class="diff">
+            <div class="before">{{ c.original_text|truncate(160) }}</div>
+            <div class="after">{{ c.new_text|truncate(160) }}</div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if skipped %}
+<div class="card">
+    <div class="card-header">
+        <h2>受保护未动的段落 (前 10)</h2>
+        <span class="meta">姓名 / 学校 / 日期 / 多栏布局 — 不允许 LLM 改</span>
+    </div>
+    {% for p in skipped %}
+    <div class="skip-row">
+        <code>{{ p.skip_reason }}</code> [{{ p.index }}] {{ p.original_text|truncate(70) }}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% endif %}

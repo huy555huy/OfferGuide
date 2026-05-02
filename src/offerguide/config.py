@@ -64,15 +64,19 @@ class Settings:
         are stripped (a common copy-paste hazard in Chinese keyboard
         layouts).
         """
-        # Resolve API key + base URL across the three accepted env names
+        # Resolve API key + base URL — `OFFERGUIDE_LLM_*` is the canonical
+        # naming (W12-fix-c). Older `TOKEN/BASE_URL/DEEPSEEK_*/OPENAI_*`
+        # still work as fallbacks so existing .env files don't break.
         api_key = (
-            os.environ.get("DEEPSEEK_API_KEY")
+            os.environ.get("OFFERGUIDE_LLM_API_KEY")
+            or os.environ.get("DEEPSEEK_API_KEY")
             or os.environ.get("TOKEN")
             or os.environ.get("OPENAI_API_KEY")
             or None
         )
         base_url = (
-            os.environ.get("DEEPSEEK_BASE_URL")
+            os.environ.get("OFFERGUIDE_LLM_BASE_URL")
+            or os.environ.get("DEEPSEEK_BASE_URL")
             or os.environ.get("BASE_URL")
             or os.environ.get("OPENAI_BASE_URL")
             or "https://api.deepseek.com"
@@ -90,9 +94,11 @@ class Settings:
         return cls(
             deepseek_api_key=api_key,
             deepseek_base_url=base_url,
-            default_model=os.environ.get(
-                "OFFERGUIDE_DEFAULT_MODEL",
-                os.environ.get("MODEL", "claude-sonnet-4-6"),
+            default_model=(
+                os.environ.get("OFFERGUIDE_LLM_MODEL")
+                or os.environ.get("OFFERGUIDE_DEFAULT_MODEL")
+                or os.environ.get("MODEL")
+                or "claude-sonnet-4-6"
             ),
             feishu_webhook_url=os.environ.get("FEISHU_WEBHOOK_URL") or None,
             telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN") or None,

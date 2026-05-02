@@ -50,7 +50,13 @@
                 {% endfor %}
             </div>
             <div class="actions" style="margin-top: 0.75rem;">
-                <button type="submit" {% if not profile_loaded %}disabled{% endif %}>跑 tailor_resume</button>
+                <button type="submit" {% if not profile_loaded %}disabled{% endif %}>📝 markdown 版 (含 change_log)</button>
+                <button type="submit"
+                        formaction="/api/tailor/docx"
+                        {% if not profile_loaded %}disabled{% endif %}
+                        title="保留 Word 格式; master 简历必须是 .docx">
+                    📄 .docx 版 (保格式可下载)
+                </button>
                 <span id="spinner" class="muted htmx-indicator">⏳ Claude Sonnet 30-90 秒…</span>
             </div>
         </form>
