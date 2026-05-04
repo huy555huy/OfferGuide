@@ -74,33 +74,122 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request) -> Any:
-        """Daily standup home — what should the user do *today*?
+        """Home (W13.x rewrite) — agent-driven, not dashboard-driven.
 
-        Combines:
-          - 4 stat cards (silent / upcoming / unscored / inbox)
-          - Action-item punch list (sorted by priority)
-          - Pipeline mini-kanban (compact 5-column preview)
-          - Quick-eval form (still embedded for one-tap JD evaluation)
+        The pre-W13 home was a daemon-style stat panel ("4 stat cards + 5
+        action items"). That's "show me what cron observed", not "what does
+        my copilot think about my situation right now".
+
+        New shape:
+          - Centerpiece: the most recent agent run's final answer (with
+            critic_score + run timestamp + "rerun now" button)
+          - Pending agent_suggestion inbox items (the things agent thinks
+            you should decide)
+          - Quick-stats strip (just numbers, not "推荐操作" — leave that to agent)
+          - Quick links to /agent + /apply + /evolution
         """
-        from .. import daily_brief as db_mod
-        from .. import pipeline_view as pv_mod
+        # Most recent agent_run for the hero
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT id, goal, final_answer, critic_score, critic_notes, "
+                "       latency_ms, started_at, status, iterations, trigger_kind "
+                "FROM agent_runs WHERE final_answer IS NOT NULL "
+                "  AND status = 'ok' "
+                "ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+        latest_run = None
+        if row:
+            latest_run = {
+                "id": row[0], "goal": row[1], "final_answer": row[2],
+                "critic_score": row[3], "critic_notes": row[4],
+                "latency_ms": row[5], "started_at": row[6],
+                "status": row[7], "iterations": row[8],
+                "trigger_kind": row[9],
+            }
 
-        brief = db_mod.build(store, max_per_pillar=5)
-        pipeline = pv_mod.build(store)
-        items = inbox_mod.list_items(store, status="pending", limit=10)
+        # Pending agent_suggestion items
+        suggestions = [
+            i for i in inbox_mod.list_items(store, status="pending", limit=20)
+            if i.kind == "agent_suggestion"
+        ][:6]
+
+        # Just-stats (not action lists — agent gives those)
+        with store.connect() as conn:
+            n_jobs = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE length(raw_text) >= 200"
+            ).fetchone()[0]
+            n_apps_active = conn.execute(
+                "SELECT COUNT(*) FROM applications "
+                "WHERE status NOT IN ('offer','rejected','withdrawn')"
+            ).fetchone()[0]
+            n_apps_offer = conn.execute(
+                "SELECT COUNT(*) FROM applications WHERE status='offer'"
+            ).fetchone()[0]
+            n_pending_inbox = conn.execute(
+                "SELECT COUNT(*) FROM inbox_items WHERE status='pending'"
+            ).fetchone()[0]
+
         return templates.TemplateResponse(
             request,
             "home.html",
             _ctx(
                 request,
-                items=items,
-                stats=_quick_stats(store),
-                brief=brief,
-                pipeline=pipeline,
-                pipeline_stages=pv_mod.KANBAN_STAGES,
+                latest_run=latest_run,
+                suggestions=suggestions,
+                stats={
+                    "jobs": n_jobs,
+                    "active_apps": n_apps_active,
+                    "offers": n_apps_offer,
+                    "pending_inbox": n_pending_inbox,
+                },
+                runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
                 active_tab="home",
             ),
         )
+
+    @app.post("/api/home/wake-agent", response_class=JSONResponse)
+    async def home_wake_agent(request: Request) -> Any:
+        """Trigger an agent run from the home page (manual user kickoff).
+
+        Reuses the /api/agent/stream behavior but with a "巡检" goal preset.
+        Returns the new run's id so the page can poll/redirect.
+        """
+        if runtime is None or not settings.deepseek_api_key:
+            raise HTTPException(400, "agent 不可用 — 缺 OFFERGUIDE_LLM_API_KEY")
+
+        from ..agent.loop import AgentLoop
+        llm = LLMClient(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            default_model=settings.default_model,
+        )
+        try:
+            agent = AgentLoop(
+                llm=llm, runtime=runtime, store=store, skills=skills,
+                master_resume_text=profile.raw_resume_text if profile else "",
+                max_iterations=6, critic_enabled=True,
+            )
+            result = agent.run(
+                goal=(
+                    "用户刚打开 home 页, 想看你对当前求职状况的评估。"
+                    "看 snapshot, 给一段诚实的当下情况评估 (做了啥 / 待办优先级 / 有没有该提醒的事)。"
+                    "不要为了显得忙就强行调工具——简短判断更有价值。"
+                ),
+                trigger_kind="user_button",
+            )
+        finally:
+            try:
+                llm.close()
+            except Exception:
+                pass
+
+        return {
+            "run_id": result.run_id,
+            "iterations": result.iterations,
+            "critic_score": result.critic_score,
+            "latency_ms": result.latency_ms,
+            "final_answer": result.final_answer,
+        }
 
     # /quick-eval + /chat removed in W13.1 — superseded by /agent (model in main
     # position decides what to do, no need for a separate "paste JD then pick

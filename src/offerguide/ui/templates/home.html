@@ -1,130 +1,239 @@
 {% extends "base.html" %}
-{% block title %}OfferGuide — 今日{% endblock %}
+{% block title %}OfferGuide{% endblock %}
 {% block content %}
 
 <style>
-    /* 总分式：极简概览，详情靠子页面承接 */
-    .stat.linkable {
-        display: block; text-decoration: none; color: inherit;
-        transition: border-color 0.12s, transform 0.06s, box-shadow 0.12s;
-    }
-    .stat.linkable:hover {
-        border-color: var(--primary);
-        transform: translateY(-1px);
-        box-shadow: var(--shadow-md);
-        text-decoration: none;
-    }
-
-    .action-list { margin: 0; padding: 0; list-style: none; }
-    .action-item {
-        display: flex; align-items: flex-start; gap: 0.625rem;
-        padding: 0.625rem 0.75rem; margin-bottom: 0.5rem;
+    .hero {
         background: var(--bg-elev);
         border: 1px solid var(--border);
-        border-left: 3px solid var(--text-muted);
+        border-left: 4px solid var(--primary);
+        border-radius: var(--radius);
+        padding: 1.5rem 1.75rem;
+        margin-bottom: 1.25rem;
+    }
+    .hero h2 {
+        margin: 0 0 0.5rem;
+        font-family: var(--font-serif);
+        font-size: 1.15rem; font-weight: 600;
+        display: flex; align-items: center; gap: 0.5rem;
+    }
+    .hero .meta {
+        color: var(--text-muted); font-size: 0.78rem;
+        margin-bottom: 0.875rem;
+    }
+    .hero .meta .pill {
+        font-size: 0.7rem;
+        margin-left: 0.375rem;
+    }
+    .hero .answer {
+        white-space: pre-wrap; font-size: 0.95rem; line-height: 1.65;
+        color: var(--text);
+    }
+    .hero .actions {
+        display: flex; gap: 0.5rem;
+        margin-top: 1rem; padding-top: 0.875rem;
+        border-top: 1px solid var(--border-soft);
+    }
+
+    .stats-strip {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.625rem;
+        margin-bottom: 1.25rem;
+    }
+    .stats-strip .stat-mini {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
         border-radius: var(--radius-sm);
-        text-decoration: none; color: var(--text);
+        padding: 0.625rem 0.875rem;
+        text-align: center;
+    }
+    .stats-strip .stat-mini .label {
+        font-size: 0.7rem; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.05em;
+        margin-bottom: 0.25rem;
+    }
+    .stats-strip .stat-mini .value {
+        font-family: var(--font-serif);
+        font-size: 1.6rem; font-weight: 600;
+    }
+
+    .quick-link-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.625rem;
+    }
+    .quick-link {
+        display: block; padding: 0.875rem 1rem;
+        background: var(--bg-elev); color: var(--text);
+        border: 1px solid var(--border); border-radius: var(--radius-sm);
+        text-decoration: none;
         transition: all 0.12s;
     }
-    .action-item:hover {
-        background: var(--bg-subtle); text-decoration: none;
-        transform: translateX(2px);
+    .quick-link:hover {
+        border-color: var(--primary); transform: translateY(-1px);
+        text-decoration: none;
     }
-    .action-item.high   { border-left-color: var(--danger); }
-    .action-item.medium { border-left-color: var(--warning); }
-    .action-item.low    { border-left-color: var(--success); }
-    .action-item .meta { flex: 1; min-width: 0; }
-    .action-item .title { font-weight: 500; font-size: 0.9rem; }
-    .action-item .detail { color: var(--text-muted); font-size: 0.78rem; margin-top: 0.125rem; }
-    .action-item .arrow { color: var(--text-dim); font-size: 1rem; }
+    .quick-link .qicon { font-size: 1.4rem; margin-bottom: 0.25rem; }
+    .quick-link .qtitle { font-weight: 600; font-size: 0.92rem; }
+    .quick-link .qdesc { color: var(--text-muted); font-size: 0.78rem; margin-top: 0.125rem; }
+
+    .suggestion-card {
+        display: flex; gap: 0.625rem; align-items: flex-start;
+        padding: 0.75rem 0.875rem;
+        background: var(--bg-elev);
+        border: 1px solid var(--border-soft);
+        border-radius: var(--radius-sm);
+        margin-bottom: 0.5rem;
+        text-decoration: none; color: var(--text);
+    }
+    .suggestion-card .icon { color: var(--primary); }
+    .suggestion-card .body { flex: 1; }
+    .suggestion-card .title { font-weight: 600; font-size: 0.875rem; }
+    .suggestion-card .source { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.125rem; }
 </style>
 
-<div class="page-title">
-    <div>
-        <h1>今日驾驶舱</h1>
-        <p>
-            {% if brief.action_items %}
-                有 {{ brief.action_items|length }} 件事建议你今天处理。点击下方卡片进入详情。
-            {% else %}
-                今天战况平稳——没有紧急待办，可以去 <a href="/quick-eval">评估</a> 几个新岗位。
-            {% endif %}
-        </p>
-    </div>
-</div>
+{# ─────────── 1. Hero: latest agent assessment ─────────── #}
 
-{# ── 4 个可点击 stat（每张卡都是一个详情入口） ── #}
-<div class="stats">
-    <a href="/applications" class="stat linkable">
-        <div class="label">沉默待跟进</div>
-        <div class="value">{{ brief.silent_followups|length }}</div>
-        <div class="delta">
-            {% if brief.silent_followups %}
-                最久 {{ brief.silent_followups[0].silence_days|int }} 天 · {{ brief.silent_followups[0].company }}
-            {% else %}
-                所有投递都在节奏内
-            {% endif %}
-        </div>
-    </a>
-    <a href="/applications" class="stat linkable">
-        <div class="label">本周面试</div>
-        <div class="value">{{ brief.upcoming_interviews|length }}</div>
-        <div class="delta">
-            {% if brief.upcoming_interviews %}
-                最近 {{ brief.upcoming_interviews[0].when_human }} · {{ brief.upcoming_interviews[0].company }}
-            {% else %}
-                未来 7 天无面试
-            {% endif %}
-        </div>
-    </a>
-    <a href="/quick-eval" class="stat linkable">
-        <div class="label">未跑评估</div>
-        <div class="value">{{ brief.unscored_jobs|length }}</div>
-        <div class="delta">
-            {% if brief.unscored_jobs %}
-                建议先跑高优先级
-            {% else %}
-                评估全跟上
-            {% endif %}
-        </div>
-    </a>
-    <a href="/pipeline" class="stat linkable">
-        <div class="label">投递战况</div>
-        <div class="value">{{ pipeline.total_active }}</div>
-        <div class="delta">
-            {% if pipeline.total_active > 0 %}
-                进行中 · 已结束 {{ pipeline.counts.terminal }}
-            {% else %}
-                还没有投递
-            {% endif %}
-        </div>
-    </a>
-</div>
-
-{# ── 行动建议清单（最关键的部分——告诉用户今天该干嘛） ── #}
-<div class="card">
-    <div class="card-header">
-        <h2>今日行动建议</h2>
-        <span class="meta">按紧急程度排序</span>
+<div class="hero">
+    {% if latest_run %}
+    <h2>🤖 Agent 当前评估</h2>
+    <div class="meta">
+        run #{{ latest_run.id }}
+        · {{ latest_run.iterations }} 次迭代
+        · {{ ((latest_run.latency_ms or 0) / 1000) | round(1) }}s
+        · trigger=<code>{{ latest_run.trigger_kind }}</code>
+        {% if latest_run.critic_score is not none %}
+        · critic <span class="pill {% if latest_run.critic_score >= 0.7 %}low{% elif latest_run.critic_score >= 0.4 %}middle{% else %}high{% endif %}">{{ "%.2f"|format(latest_run.critic_score) }}</span>
+        {% endif %}
     </div>
-    {% if brief.action_items %}
-    <ul class="action-list">
-        {% for it in brief.action_items %}
-        <a href="{{ it.action_url }}" class="action-item {{ it.priority }}">
-            <div class="meta">
-                <div class="title">{{ it.title }}</div>
-                <div class="detail">{{ it.detail }}</div>
-            </div>
-            <span class="arrow">→</span>
-        </a>
-        {% endfor %}
-    </ul>
+    <div class="answer">{{ latest_run.final_answer }}</div>
+    <div class="actions">
+        <button class="btn" onclick="wakeAgent()" {% if not runtime_ready %}disabled{% endif %}>
+            ↻ 让 agent 重新评估
+        </button>
+        <a class="btn secondary" href="/agent/runs/{{ latest_run.id }}">看完整 trajectory</a>
+        <a class="btn ghost" href="/agent">手动给 agent 一个新 goal</a>
+    </div>
     {% else %}
-    <div class="empty">
-        <div style="font-size: 1.5rem; margin-bottom: 0.25rem;">☕</div>
-        <div>今天没有紧急待办</div>
-        <div class="small muted">趁此空档去 <a href="/stories">扩充故事库</a>，或在 <a href="/quick-eval">评估</a> 跑几个新岗位</div>
+    <h2>🤖 Agent</h2>
+    <div class="muted">还没有 agent 跑过。点下面按钮让它读读现状, 给你一段评估。</div>
+    <div class="actions">
+        <button class="btn" onclick="wakeAgent()" {% if not runtime_ready %}disabled{% endif %}>
+            ▶ 唤醒 agent (10-30s)
+        </button>
     </div>
     {% endif %}
 </div>
+
+{# ─────────── 2. Stats strip (just facts, no rule-based actions) ─────────── #}
+
+<div class="stats-strip">
+    <div class="stat-mini">
+        <div class="label">Jobs in queue</div>
+        <div class="value">{{ stats.jobs }}</div>
+    </div>
+    <div class="stat-mini">
+        <div class="label">Active apps</div>
+        <div class="value">{{ stats.active_apps }}</div>
+    </div>
+    <div class="stat-mini">
+        <div class="label">Offers</div>
+        <div class="value">{{ stats.offers }}</div>
+    </div>
+    <div class="stat-mini">
+        <div class="label">Pending inbox</div>
+        <div class="value">{{ stats.pending_inbox }}</div>
+    </div>
+</div>
+
+{# ─────────── 3. Pending agent suggestions ─────────── #}
+
+{% if suggestions %}
+<div class="card">
+    <div class="card-header">
+        <h2>Agent 给你的待决策建议</h2>
+        <span class="meta">{{ suggestions|length }} / 显示 6 · <a href="/inbox">看全部 →</a></span>
+    </div>
+    {% for s in suggestions %}
+    <a href="/inbox" class="suggestion-card">
+        <span class="icon">💬</span>
+        <div class="body">
+            <div class="title">{{ s.title }}</div>
+            <div class="source">
+                {% if s.source_skill_name %}
+                来自 {{ s.source_skill_name }}
+                {% if s.source_agent_run_id %}· agent run #{{ s.source_agent_run_id }}{% endif %}
+                {% endif %}
+                {% if s.proposed_action %}· 批准 → 调 <code>{{ s.proposed_action.tool }}</code>{% endif %}
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% endif %}
+
+{# ─────────── 4. Quick links ─────────── #}
+
+<div class="card">
+    <div class="card-header">
+        <h2>常用入口</h2>
+    </div>
+    <div class="quick-link-grid">
+        <a class="quick-link" href="/agent">
+            <div class="qicon">🤖</div>
+            <div class="qtitle">Agent</div>
+            <div class="qdesc">手动给一个 goal, 看 agent 实时执行</div>
+        </a>
+        <a class="quick-link" href="/applications">
+            <div class="qicon">📤</div>
+            <div class="qtitle">投递记录</div>
+            <div class="qdesc">所有 application + 状态时间线</div>
+        </a>
+        <a class="quick-link" href="/tailor">
+            <div class="qicon">📄</div>
+            <div class="qtitle">简历微调</div>
+            <div class="qdesc">docx 保格式 + LLM 改写</div>
+        </a>
+        <a class="quick-link" href="/mock">
+            <div class="qicon">🎤</div>
+            <div class="qtitle">模拟面试</div>
+            <div class="qdesc">turn-based, agent 当面试官</div>
+        </a>
+        <a class="quick-link" href="/evolution">
+            <div class="qicon">🧬</div>
+            <div class="qtitle">SKILL 进化</div>
+            <div class="qdesc">看每个 SKILL 的 fitness + 灰度</div>
+        </a>
+        <a class="quick-link" href="/inbox">
+            <div class="qicon">📥</div>
+            <div class="qtitle">Inbox</div>
+            <div class="qdesc">{{ stats.pending_inbox }} 个待决策</div>
+        </a>
+    </div>
+</div>
+
+<script>
+async function wakeAgent() {
+    const btns = document.querySelectorAll('button.btn');
+    btns.forEach(b => b.disabled = true);
+    const status = document.querySelector('.hero .meta');
+    if (status) status.innerHTML = '⏳ agent 思考中... 10-30s';
+
+    try {
+        const r = await fetch('/api/home/wake-agent', {method: 'POST'});
+        if (r.ok) {
+            location.reload();
+        } else {
+            const err = await r.text();
+            alert('agent 失败: ' + err);
+            btns.forEach(b => b.disabled = false);
+        }
+    } catch (e) {
+        alert('网络错误: ' + e);
+        btns.forEach(b => b.disabled = false);
+    }
+}
+</script>
 
 {% endblock %}
