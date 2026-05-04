@@ -354,6 +354,41 @@ ACTION_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "send_notification",
+            "description": (
+                "推送一条通知到用户的飞书 / Telegram (取决于 settings.notify_channel)。"
+                "**这是给用户主动联系的高级通道**——比 inbox suggestion 更打扰, 留给真急事:"
+                "面试日 24h 内 / silent app 14+ 天必须跟进 / 高匹配 JD 第一时间通知。"
+                "\n\n何时**别**用: (a) 一般 maintenance 事项 (用 write_suggestion 进 inbox 就行); "
+                "(b) 短时间内已经推过类似的 (会让用户嫌烦, 自己跟踪上下文); "
+                "(c) 用户深夜 (除非真 24h-critical)。"
+                "\n\n推 push 是**有成本的**——用户每收到一条都要分心看。一周 push 超过 3 次就太多了。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "推送标题 (≤ 50 字, 用户收到第一眼看到的)",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "推送正文 (中文, 1-3 句话, 用户能 act 的内容)",
+                    },
+                    "level": {
+                        "type": "string",
+                        "enum": ["info", "warn", "high"],
+                        "description": "info=一般通知 / warn=该处理 / high=紧急(只用于真紧急事)",
+                    },
+                },
+                "required": ["title", "body"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "meta_reflect",
             "description": (
                 "看你自己最近的 N 次 agent_runs + 用户 thumbs 反馈, 思考你自己的行为 pattern, "
@@ -835,10 +870,15 @@ class AgentLoop:
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
         critic_enabled: bool = True,
         critic_model: str | None = None,
+        notifier: Any = None,
     ) -> None:
         self._llm = llm
         self._runtime = runtime
         self._store = store
+        # W14: optional notifier for send_notification action tool.
+        # When None, send_notification returns "no notifier configured" — agent
+        # sees this and adapts (probably writes a write_suggestion instead).
+        self._notifier = notifier
         self._skills: dict[str, SkillSpec] = {s.name: s for s in skills}
         # Order: lookups first (cheap reads), then actions (write helpers like
         # evolve_skill), then maintenance (W13.2: spider/classifier/etc), then
@@ -1266,7 +1306,42 @@ class AgentLoop:
         if tc.name == "meta_reflect":
             return self._execute_meta_reflect(tc)
 
+        if tc.name == "send_notification":
+            return self._execute_send_notification(tc)
+
         return f"ERROR: action tool '{tc.name}' is declared but not implemented"
+
+    def _execute_send_notification(self, tc: ToolCall) -> str:
+        """W14 — agent decides to push a notification to user (Feishu/Telegram).
+
+        When notifier is None (no channel configured), returns informative
+        ERROR so agent knows to use write_suggestion as fallback.
+        """
+        if self._notifier is None:
+            return (
+                "ERROR: send_notification 没配 notifier. 用户没设 Feishu / Telegram。"
+                "改用 write_suggestion 写到 inbox 让用户下次访问看到。"
+            )
+        title = (tc.arguments.get("title") or "").strip()
+        body = (tc.arguments.get("body") or "").strip()
+        level = tc.arguments.get("level") or "info"
+        if not title or not body:
+            return "ERROR: send_notification requires title + body"
+        if level not in ("info", "warn", "high"):
+            level = "info"
+
+        try:
+            result = self._notifier.notify(title=title, body=body, level=level)
+        except Exception as e:
+            log.exception("send_notification dispatch crashed")
+            return f"ERROR: notifier raised {type(e).__name__}: {e}"
+
+        if not getattr(result, "ok", False):
+            err = getattr(result, "error", "unknown")
+            channel = getattr(result, "channel", "?")
+            return f"ERROR: {channel} push failed: {err}"
+        channel = getattr(result, "channel", "?")
+        return f"OK: 已通过 {channel} 推送 [{level}] '{title}'"
 
     def _execute_meta_reflect(self, tc: ToolCall) -> str:
         """Agent records an observation about its OWN behavior pattern (W13.6).

@@ -339,19 +339,54 @@ def build_agent_wake_scheduler(
     )
 
     def _wake_agent_job(_jc: JobContext) -> dict[str, Any]:
-        """The single job: wake the central agent + let it decide what to do."""
+        """The single job: wake the central agent + let it decide what to do.
+
+        W14: dynamic goal stitching — base wake goal + urgent context that
+        agent should know about FIRST. Right now we surface "goals that look
+        off-track" because those are the things the user would want the
+        agent to think about before doing housekeeping.
+        """
         if llm is None:
             return {"skipped": "no LLM configured"}
         if runtime is None:
             return {"skipped": "no SkillRuntime"}
 
+        # Build the goal text. Start with base, then append any urgent context
+        # so it's the LAST thing in the prompt → highest recency weight.
+        goal_parts = [_AGENT_WAKE_GOAL]
+        try:
+            from .. import goals as _gmod
+            active_goals = _gmod.list_active_goals(store)
+            urgent_lines: list[str] = []
+            for g in active_goals[:3]:
+                progress = _gmod.compute_progress(store, g)
+                if not progress.is_on_track:
+                    urgent_lines.append(
+                        f"- 「{g.title}」 off-track: "
+                        + (f"剩 {progress.days_left} 天, "
+                           if progress.days_left is not None else "")
+                        + f"funnel {progress.apps_active}/{progress.apps_total}"
+                          f", {progress.offers} offer"
+                    )
+                if progress.apps_silent_14d > 0:
+                    urgent_lines.append(
+                        f"- 「{g.title}」: {progress.apps_silent_14d} 个申请 14+ 天没回, 该判断 give up 还是最后催"
+                    )
+            if urgent_lines:
+                goal_parts.append(
+                    "\n\n# 此刻已知急事 (W14 注入, 应优先考虑):\n" + "\n".join(urgent_lines)
+                )
+        except Exception as e:
+            log.debug("goal off-track injection failed (non-fatal): %s", e)
+
         agent = AgentLoop(
             llm=llm, runtime=runtime, store=store,
             skills=skills, master_resume_text=master_resume,
             max_iterations=8, critic_enabled=True,
+            notifier=notifier,
         )
         result = agent.run(
-            goal=_AGENT_WAKE_GOAL,
+            goal="".join(goal_parts),
             trigger_kind="cron_wake",
         )
         return {

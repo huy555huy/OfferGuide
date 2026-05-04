@@ -41,10 +41,53 @@
             {{ iterations }} 次迭代 ·
             {{ latency_ms or 0 }}ms ·
             critic={{ "%.2f"|format(critic_score) if critic_score is not none else "—" }}
+            {% if cost_usd is defined and cost_usd %}
+            · 成本 ${{ "%.4f"|format(cost_usd) }}
+            {% endif %}
         </p>
     </div>
     <a href="/agent" class="btn ghost">← 回到 Agent 主页</a>
 </div>
+
+{# ─────────── W14 联动: 这次 run 写出来的 inbox suggestions ─────────── #}
+
+{% if suggestions %}
+<div class="card">
+    <div class="card-header">
+        <h2>这次 run 写到 inbox 的建议 ({{ suggestions|length }})</h2>
+        <span class="meta">用户 approve/reject 会作为 user_thumbs 信号反流</span>
+    </div>
+    {% for s in suggestions %}
+    <div style="display: flex; gap: 0.5rem; padding: 0.5rem 0; border-bottom: 1px solid var(--border-soft); align-items: center;">
+        <a href="/inbox" style="font-family: monospace;">inbox#{{ s.id }}</a>
+        <strong>{{ s.title }}</strong>
+        <span style="margin-left: auto;">
+            <span class="pill {{ s.status }}">{{ s.status }}</span>
+            {% if s.decision_note %}<span class="muted small">{{ s.decision_note }}</span>{% endif %}
+        </span>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{# ─────────── W14 联动: evolution signals 这次 run 触发了哪些 ─────────── #}
+
+{% if signals %}
+<div class="card">
+    <div class="card-header">
+        <h2>这次 run 注入 evolution 的信号 ({{ signals|length }})</h2>
+        <span class="meta">critic + thumbs + outcome 都会汇总到这里</span>
+    </div>
+    {% for s in signals %}
+    <div style="padding: 0.5rem 0; border-bottom: 1px solid var(--border-soft); font-size: 0.875rem;">
+        <code>{{ s.skill_name }} v{{ s.skill_version }}</code> ·
+        <strong>{{ s.kind }}</strong> = {{ "%.2f"|format(s.value) }}
+        (weight {{ s.weight }})
+        {% if s.notes %}<div class="small muted">{{ s.notes|truncate(120) }}</div>{% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
 
 <div class="card">
     <div class="card-header">

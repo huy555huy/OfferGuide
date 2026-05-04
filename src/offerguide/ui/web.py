@@ -168,6 +168,7 @@ def create_app(
                 llm=llm, runtime=runtime, store=store, skills=skills,
                 master_resume_text=profile.raw_resume_text if profile else "",
                 max_iterations=6, critic_enabled=True,
+                notifier=notifier,
             )
             result = agent.run(
                 goal=(
@@ -833,6 +834,7 @@ def create_app(
             skills=skills,
             master_resume_text=profile.raw_resume_text if profile else "",
             max_iterations=max(1, min(int(max_iterations), 12)),
+            notifier=notifier,
         )
 
         main_loop = asyncio.get_running_loop()
@@ -1433,25 +1435,103 @@ def create_app(
             log_mod = __import__("logging").getLogger(__name__)
             log_mod.debug("apply outcome signal write failed: %s", e)
 
+        # W14 联动: outcome → user_facts. Terminal outcomes (offer/rejected) are
+        # high-quality preference signals — extract them as user_facts so future
+        # agent runs see them in the snapshot's user_facts section. This closes
+        # the loop: agent suggests → user marks outcome → fact lands → agent
+        # respects in future suggestions.
+        try:
+            from .. import user_facts as _uf
+            with store.connect() as conn:
+                row = conn.execute(
+                    "SELECT j.company, j.title FROM applications a "
+                    "LEFT JOIN jobs j ON j.id = a.job_id WHERE a.id = ?",
+                    (app_id,),
+                ).fetchone()
+            if row and row[0]:
+                company, title = row
+                fact_text = None
+                kind = None
+                confidence = 0.85
+                if status == "offer":
+                    fact_text = f"用户拿到 offer: {company} {title or ''} 岗位"
+                    kind = "experience"
+                    confidence = 1.0
+                elif status == "rejected":
+                    fact_text = (
+                        f"用户被 {company} {title or ''} 岗位拒了 "
+                        f"(future agent 推类似岗位时降优先级)"
+                    )
+                    kind = "company_signal"
+                    confidence = 0.85
+                elif status == "interview":
+                    fact_text = f"用户进入 {company} {title or ''} 面试阶段"
+                    kind = "experience"
+                    confidence = 0.95
+                if fact_text and kind:
+                    _uf.add_fact(
+                        store,
+                        fact_text=fact_text, kind=kind, confidence=confidence,
+                        source_skill="apply_lifecycle",
+                        entities=[company] + ([title] if title else []),
+                    )
+        except Exception as e:
+            log_mod = __import__("logging").getLogger(__name__)
+            log_mod.debug("apply outcome → user_facts failed: %s", e)
+
         return {"app_id": app_id, "status": status}
 
     @app.get("/agent/runs/{run_id}", response_class=HTMLResponse)
     def agent_run_detail(request: Request, run_id: int) -> Any:
-        """Read a persisted agent_runs row + render its trajectory + critic."""
+        """Read a persisted agent_runs row + render its trajectory + critic.
+
+        W14: also surface inbox suggestions this run created (reverse link)
+        and any user_thumbs signals that fed back into evolution_signals.
+        """
         with store.connect() as conn:
             row = conn.execute(
                 "SELECT trigger_kind, goal, status, iterations, final_answer, "
                 "       trajectory_json, critic_score, critic_notes, latency_ms, "
-                "       started_at, ended_at, error_text "
+                "       started_at, ended_at, error_text, cost_usd "
                 "FROM agent_runs WHERE id = ?",
                 (run_id,),
             ).fetchone()
-        if row is None:
-            raise HTTPException(404, f"agent_runs#{run_id} not found")
+            if row is None:
+                raise HTTPException(404, f"agent_runs#{run_id} not found")
+            # W14: which inbox suggestions came from this run?
+            sug_rows = conn.execute(
+                "SELECT id, title, status, decided_at, decision_note "
+                "FROM inbox_items "
+                "WHERE source_agent_run_id = ? "
+                "ORDER BY created_at DESC",
+                (run_id,),
+            ).fetchall()
+            # W14: which evolution_signals reference this run?
+            sig_rows = conn.execute(
+                "SELECT skill_name, skill_version, signal_kind, signal_value, "
+                "       signal_weight, notes "
+                "FROM evolution_signals "
+                "WHERE notes LIKE ? "
+                "ORDER BY created_at DESC LIMIT 20",
+                (f"%agent_run#{run_id}%",),
+            ).fetchall()
+
         try:
             trajectory = json_loads(row[5] or "[]")
         except json.JSONDecodeError:
             trajectory = []
+
+        suggestions = [
+            {"id": r[0], "title": r[1], "status": r[2],
+             "decided_at": r[3], "decision_note": r[4]}
+            for r in sug_rows
+        ]
+        signals = [
+            {"skill_name": r[0], "skill_version": r[1], "kind": r[2],
+             "value": r[3], "weight": r[4], "notes": r[5]}
+            for r in sig_rows
+        ]
+
         return templates.TemplateResponse(
             request,
             "agent_run_detail.html",
@@ -1465,6 +1545,9 @@ def create_app(
                 latency_ms=row[8],
                 started_at=row[9], ended_at=row[10],
                 error_text=row[11],
+                cost_usd=row[12],
+                suggestions=suggestions,
+                signals=signals,
                 active_tab="agent",
             ),
         )
@@ -1496,8 +1579,13 @@ def create_app(
 
     @app.get("/tailor", response_class=HTMLResponse)
     def tailor_view(request: Request, job_id: str = "") -> Any:
-        """简历微调入口页 — 选 JD + 显示 master resume + 一键 tailor。"""
+        """简历微调入口页 — 选 JD + 显示 master resume + 一键 tailor.
+
+        W14: 同时列出 data/tailored/ 里已有的 docx 文件 (按 mtime 排倒序),
+        让用户能直接预览 / 下载 / 重做, 不必每次重新跑 LLM。
+        """
         from .. import briefs as briefs_mod  # noqa: F401 (potential import cycle guard)
+        from pathlib import Path as _Path
 
         # List recent jobs that have raw_text >= 200 chars (real JD body, not just metadata)
         with store.connect() as conn:
@@ -1512,6 +1600,22 @@ def create_app(
             for r in jobs_rows
         ]
         master_resume_text = profile.raw_resume_text if profile else ""
+
+        # W14: existing tailored docx history
+        existing_tailored: list[dict] = []
+        tailored_dir = _Path("data/tailored")
+        if tailored_dir.exists():
+            for f in sorted(
+                tailored_dir.glob("*.docx"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )[:20]:
+                existing_tailored.append({
+                    "filename": f.name,
+                    "size_kb": f.stat().st_size // 1024,
+                    "mtime": f.stat().st_mtime,
+                })
+
         return templates.TemplateResponse(
             request, "tailor.html",
             _ctx(
@@ -1519,6 +1623,7 @@ def create_app(
                 jobs=jobs,
                 selected_job_id=job_id,
                 master_resume=master_resume_text,
+                existing_tailored=existing_tailored,
                 active_tab="tailor",
             ),
         )
