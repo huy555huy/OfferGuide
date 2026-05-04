@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — 转化漏斗{% endblock %}
+{% block content %}
+
+<style>
+    .funnel-container { max-width: 800px; margin: 0 auto; }
+    .stage {
+        display: flex; align-items: center; gap: 1rem;
+        padding: 0.875rem 1.25rem;
+        margin-bottom: 0.5rem;
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        position: relative;
+    }
+    .stage .stage-bar {
+        position: absolute; left: 0; top: 0; bottom: 0;
+        background: linear-gradient(90deg, var(--primary-soft), var(--bg-elev));
+        border-radius: var(--radius);
+        z-index: 0;
+    }
+    .stage > * { position: relative; z-index: 1; }
+    .stage .label {
+        font-family: var(--font-serif);
+        font-size: 1.05rem; font-weight: 600;
+        min-width: 100px;
+    }
+    .stage .count {
+        font-family: var(--font-serif);
+        font-size: 1.6rem; font-weight: 600;
+        color: var(--primary);
+        min-width: 60px;
+    }
+    .stage .pcts { color: var(--text-muted); font-size: 0.825rem; flex: 1; }
+    .stage.dim .label, .stage.dim .count { color: var(--text-dim); }
+</style>
+
+<div class="page-title">
+    <div>
+        <h1>转化漏斗</h1>
+        <p>
+            投递 → 提交 → HR 看 → HR 回复 → 进面试 → offer.
+            状态来自 application_events 表 (你在 /apply/&lt;id&gt; 标记的)。
+            数据少看 funnel 没意义, 至少 10+ 投递再看转化才稳定。
+        </p>
+    </div>
+</div>
+
+<div class="funnel-container">
+    {% for s in stages %}
+    <div class="stage {% if s.count == 0 %}dim{% endif %}">
+        <div class="stage-bar" style="width: {{ s.from_top_pct or 0 }}%;"></div>
+        <span class="label">{{ s.label }}</span>
+        <span class="count">{{ s.count }}</span>
+        <span class="pcts">
+            {% if s.from_top_pct is not none %}
+                vs 投递: {{ "%.0f"|format(s.from_top_pct) }}%
+            {% endif %}
+            {% if s.from_prev_pct is not none and not loop.first %}
+                · vs 上一阶: {{ "%.0f"|format(s.from_prev_pct) }}%
+            {% endif %}
+        </span>
+    </div>
+    {% endfor %}
+</div>
+
+{% if companies %}
+<div class="card" style="margin-top: 1.25rem;">
+    <div class="card-header">
+        <h2>按公司分布</h2>
+        <span class="meta">前 {{ companies|length }} 名</span>
+    </div>
+    <table style="width: 100%;">
+        <thead>
+            <tr style="text-align: left; border-bottom: 1px solid var(--border);">
+                <th style="padding: 0.5rem 0.625rem;">公司</th>
+                <th style="padding: 0.5rem 0.625rem;">投递数</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for c in companies %}
+            <tr style="border-bottom: 1px solid var(--border-soft);">
+                <td style="padding: 0.5rem 0.625rem;">{{ c.name }}</td>
+                <td style="padding: 0.5rem 0.625rem;"><strong>{{ c.count }}</strong></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% endblock %}

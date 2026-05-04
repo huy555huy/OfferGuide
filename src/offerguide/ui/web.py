@@ -903,6 +903,135 @@ def create_app(
 
     # ─────────── W13.6 long-horizon goals (north star) ────────────────
 
+    # ─────────────── W13.8 funnel + portfolio ────────────────────────
+
+    @app.get("/funnel", response_class=HTMLResponse)
+    def funnel_view(request: Request) -> Any:
+        """Conversion funnel: applied → submitted → viewed → replied →
+        interview → offer. Computes per-stage counts + percentage carryovers."""
+        funnel_stages = [
+            ("applied",    "投递", None),
+            ("submitted",  "已提交", "submitted"),
+            ("viewed",     "HR 看了", "viewed"),
+            ("replied",    "HR 回复", "replied"),
+            ("interview",  "进面试", "interview"),
+            ("offer",      "拿 offer", "offer"),
+        ]
+        stage_counts: list[dict] = []
+        with store.connect() as conn:
+            # 总投递数 = applications 里所有
+            total_apps = conn.execute(
+                "SELECT COUNT(*) FROM applications"
+            ).fetchone()[0]
+            stage_counts.append({
+                "key": "applied", "label": "投递", "count": total_apps,
+                "from_prev_pct": None, "from_top_pct": 100.0 if total_apps else 0.0,
+            })
+            prev = total_apps
+            for key, label, event_kind in funnel_stages[1:]:
+                if event_kind:
+                    n = conn.execute(
+                        "SELECT COUNT(DISTINCT application_id) "
+                        "FROM application_events WHERE kind = ?",
+                        (event_kind,),
+                    ).fetchone()[0]
+                else:
+                    n = 0
+                from_prev = (n / prev * 100) if prev else None
+                from_top = (n / total_apps * 100) if total_apps else 0.0
+                stage_counts.append({
+                    "key": key, "label": label, "count": n,
+                    "from_prev_pct": from_prev, "from_top_pct": from_top,
+                })
+                prev = n if n else prev  # don't divide by 0 in next iter
+
+            # Per-company breakdown
+            company_rows = conn.execute(
+                "SELECT j.company, COUNT(DISTINCT a.id) AS n "
+                "FROM applications a LEFT JOIN jobs j ON j.id = a.job_id "
+                "WHERE j.company IS NOT NULL "
+                "GROUP BY j.company ORDER BY n DESC LIMIT 10"
+            ).fetchall()
+            companies = [
+                {"name": r[0], "count": r[1]} for r in company_rows
+            ]
+
+        return templates.TemplateResponse(
+            request, "funnel.html",
+            _ctx(request, stages=stage_counts, companies=companies, active_tab=None),
+        )
+
+    @app.get("/portfolio", response_class=HTMLResponse)
+    def portfolio_view(request: Request) -> Any:
+        """Public-friendly metrics page about the OfferGuide build itself.
+
+        Privacy: NO user data (resume, names, application details, company
+        names). Just aggregate numbers + agent-level metrics that are
+        meaningful as evidence-of-build for a portfolio.
+        """
+        with store.connect() as conn:
+            # Agent runs metrics
+            n_agent_runs = conn.execute(
+                "SELECT COUNT(*) FROM agent_runs"
+            ).fetchone()[0]
+            n_skill_runs = conn.execute(
+                "SELECT COUNT(*) FROM skill_runs"
+            ).fetchone()[0]
+            avg_critic = conn.execute(
+                "SELECT AVG(critic_score) FROM agent_runs WHERE critic_score IS NOT NULL"
+            ).fetchone()[0]
+            total_cost = conn.execute(
+                "SELECT SUM(cost_usd) FROM agent_runs"
+            ).fetchone()[0]
+            # Evolution metrics
+            n_variants = conn.execute(
+                "SELECT COUNT(*) FROM skill_variants"
+            ).fetchone()[0]
+            n_live_variants = conn.execute(
+                "SELECT COUNT(*) FROM skill_variants WHERE status='live'"
+            ).fetchone()[0]
+            n_signals = conn.execute(
+                "SELECT COUNT(*) FROM evolution_signals"
+            ).fetchone()[0]
+            # Per-skill recent fitness (no SKILL details, just name + count + score)
+            skill_rows = conn.execute(
+                "SELECT skill_name, COUNT(*) as n, AVG(signal_value) as avg_v "
+                "FROM evolution_signals WHERE signal_kind='critic' "
+                "GROUP BY skill_name HAVING n >= 3 "
+                "ORDER BY n DESC LIMIT 12"
+            ).fetchall()
+            skill_metrics = [
+                {"name": r[0], "n_signals": r[1], "avg_critic": r[2]}
+                for r in skill_rows
+            ]
+            # Last 14 days agent run count for sparkline
+            daily_rows = conn.execute(
+                "SELECT CAST((julianday('now') - started_at) AS INT) AS days_ago, "
+                "       COUNT(*) AS n "
+                "FROM agent_runs WHERE started_at >= julianday('now') - 14 "
+                "GROUP BY days_ago"
+            ).fetchall()
+            daily_counts = [0] * 14
+            for d, n in daily_rows:
+                if 0 <= d < 14:
+                    daily_counts[13 - d] = n  # right-most = today
+        return templates.TemplateResponse(
+            request, "portfolio.html",
+            _ctx(
+                request,
+                n_agent_runs=n_agent_runs,
+                n_skill_runs=n_skill_runs,
+                avg_critic=avg_critic,
+                total_cost=total_cost or 0.0,
+                n_variants=n_variants,
+                n_live_variants=n_live_variants,
+                n_signals=n_signals,
+                skill_metrics=skill_metrics,
+                daily_counts=daily_counts,
+                active_tab=None,
+            ),
+        )
+
     @app.get("/goals", response_class=HTMLResponse)
     def goals_view(request: Request) -> Any:
         from .. import goals as _goals
@@ -2193,6 +2322,66 @@ def create_app(
             }
         except Exception as e:
             return {"error": str(e)[:300]}
+
+    # ─────────────────── W13.8 extension support ─────────────────────────
+    # Boss直聘/牛客 浏览器扩展用 GET /api/extension/{ping,package} 查/拉
+    # 投递包。CORS 必须开 (扩展从 https://www.zhipin.com 来 fetch http://localhost)。
+
+    @app.get("/api/extension/ping", response_class=JSONResponse)
+    def extension_ping() -> JSONResponse:
+        """Health check endpoint for the browser extension popup."""
+        resp = JSONResponse({"ok": True, "version": "0.1.0"})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
+
+    @app.get("/api/extension/package", response_class=JSONResponse)
+    def extension_get_package(company: str) -> JSONResponse:
+        """Return the most recent apply_assistant package for a company.
+
+        Used by the browser extension content script — when user is on a
+        Boss直聘 / 牛客 page, the extension sniffs company name from
+        title and asks here for a paste-ready package.
+
+        Looks up via skill_runs.input_json LIKE filter (a bit hacky but
+        the pre-W13.x schema doesn't index by company; would need a
+        join through jobs to do better, leave for later).
+        """
+        company = (company or "").strip()
+        if not company:
+            return _ext_response(404, {"error": "company required"})
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT s.id, s.output_json, j.id "
+                "FROM skill_runs s "
+                "LEFT JOIN jobs j ON j.company = ? "
+                "WHERE s.skill_name = 'apply_assistant' "
+                "  AND s.input_json LIKE ? "
+                "ORDER BY s.created_at DESC LIMIT 1",
+                (company, f'%"company": "{company}"%'),
+            ).fetchone()
+        if row is None:
+            return _ext_response(404, {
+                "error": "no apply package",
+                "hint": f"先去 OfferGuide /apply/<job_id> 跑 apply_assistant 给 {company} 准备一份",
+            })
+        run_id, output_json, job_id = row
+        try:
+            package = json_loads(output_json)
+        except (json.JSONDecodeError, TypeError):
+            return _ext_response(500, {"error": "stored package is corrupt"})
+        return _ext_response(200, {
+            "skill_run_id": run_id,
+            "package": package,
+            "job_id": job_id,
+            "company": company,
+        })
+
+    def _ext_response(status: int, body: dict) -> JSONResponse:
+        """Wrap with CORS headers (extension origin is the platform site, not localhost)."""
+        resp = JSONResponse(body, status_code=status)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        return resp
 
     @app.post("/api/extension/ingest", response_class=JSONResponse)
     def extension_ingest(payload: ExtensionJDPayload) -> dict:

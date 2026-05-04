@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Portfolio{% endblock %}
+{% block content %}
+
+<style>
+    .hero-stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 1rem; margin-bottom: 1.25rem;
+    }
+    .hero-stat {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--primary);
+        border-radius: var(--radius);
+        padding: 1rem 1.25rem;
+    }
+    .hero-stat .num {
+        font-family: var(--font-serif);
+        font-size: 2rem; font-weight: 600;
+        color: var(--primary);
+    }
+    .hero-stat .lbl {
+        font-size: 0.78rem; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.05em;
+        margin-bottom: 0.25rem;
+    }
+    .hero-stat .desc { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.25rem; }
+
+    .sparkline {
+        display: flex; align-items: flex-end; gap: 2px;
+        height: 40px; margin-top: 0.5rem;
+    }
+    .sparkline .bar {
+        flex: 1; background: var(--primary-soft);
+        border-radius: 2px 2px 0 0;
+        min-height: 2px;
+        position: relative;
+    }
+    .sparkline .bar.active { background: var(--primary); }
+
+    .skill-row {
+        display: grid;
+        grid-template-columns: 1fr 80px 80px;
+        align-items: center; gap: 0.625rem;
+        padding: 0.5rem 0; font-size: 0.875rem;
+        border-bottom: 1px solid var(--border-soft);
+    }
+    .skill-row .skill-bar {
+        height: 6px; background: var(--bg-subtle); border-radius: 999px;
+        position: relative; overflow: hidden;
+    }
+    .skill-row .skill-bar > div {
+        height: 100%; background: linear-gradient(90deg, var(--danger), var(--warning), var(--success));
+    }
+</style>
+
+<div class="page-title">
+    <div>
+        <h1>OfferGuide · Build Portfolio</h1>
+        <p>
+            这是 OfferGuide 这个项目的<strong>构建 metrics</strong>。所有数字
+            都是 agent / SKILL / evolution 框架自身的可观测信息——
+            <strong>不包含</strong>用户简历内容、申请细节、公司名 (隐私优先)。
+        </p>
+    </div>
+</div>
+
+{# ─────────── Hero stats ─────────── #}
+
+<div class="hero-stats">
+    <div class="hero-stat">
+        <div class="lbl">Agent runs</div>
+        <div class="num">{{ n_agent_runs }}</div>
+        <div class="desc">中央 agent loop 的真实唤醒次数</div>
+    </div>
+    <div class="hero-stat">
+        <div class="lbl">SKILL invocations</div>
+        <div class="num">{{ n_skill_runs }}</div>
+        <div class="desc">11 SKILLs 的实际被调用次数</div>
+    </div>
+    <div class="hero-stat">
+        <div class="lbl">avg critic</div>
+        <div class="num">{{ "%.2f"|format(avg_critic) if avg_critic is not none else "—" }}</div>
+        <div class="desc">agent 自我评估均值 (constitutional critic)</div>
+    </div>
+    <div class="hero-stat">
+        <div class="lbl">total cost</div>
+        <div class="num">${{ "%.2f"|format(total_cost) }}</div>
+        <div class="desc">所有 agent runs LLM 累计成本</div>
+    </div>
+</div>
+
+{# ─────────── Activity sparkline ─────────── #}
+
+<div class="card">
+    <div class="card-header">
+        <h2>近 14 天 agent 活跃度</h2>
+        <span class="meta">每个柱 = 一天的 agent run 次数</span>
+    </div>
+    {% set max_count = daily_counts|max %}
+    <div class="sparkline">
+    {% for n in daily_counts %}
+        <div class="bar {% if n > 0 %}active{% endif %}"
+             title="day -{{ 13 - loop.index0 }}: {{ n }} runs"
+             style="height: {{ ((n / max_count * 100) if max_count else 0)|round(0) }}%;"></div>
+    {% endfor %}
+    </div>
+    <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-muted); margin-top: 0.25rem;">
+        <span>13 天前</span><span>今天</span>
+    </div>
+</div>
+
+{# ─────────── Self-evolution stats ─────────── #}
+
+<div class="card">
+    <div class="card-header">
+        <h2>SKILL 进化 (W13.1)</h2>
+    </div>
+    <div class="hero-stats" style="margin-bottom: 0.5rem;">
+        <div class="hero-stat">
+            <div class="lbl">总变种数</div>
+            <div class="num">{{ n_variants }}</div>
+            <div class="desc">shadow + canary + live + retired + failed</div>
+        </div>
+        <div class="hero-stat">
+            <div class="lbl">live 变种</div>
+            <div class="num">{{ n_live_variants }}</div>
+            <div class="desc">当前生产用的进化版本</div>
+        </div>
+        <div class="hero-stat">
+            <div class="lbl">总反馈信号</div>
+            <div class="num">{{ n_signals }}</div>
+            <div class="desc">critic + thumbs + outcome 总累积</div>
+        </div>
+    </div>
+</div>
+
+{# ─────────── Per-SKILL critic averages ─────────── #}
+
+{% if skill_metrics %}
+<div class="card">
+    <div class="card-header">
+        <h2>SKILL critic 评分</h2>
+        <span class="meta">≥ 3 个信号才上榜</span>
+    </div>
+    {% for sm in skill_metrics %}
+    <div class="skill-row">
+        <span><code>{{ sm.name }}</code> <span class="muted small">({{ sm.n_signals }} 信号)</span></span>
+        <div class="skill-bar">
+            <div style="width: {{ (sm.avg_critic * 100)|round(0) }}%;"></div>
+        </div>
+        <span style="text-align: right; font-family: var(--font-mono);">{{ "%.2f"|format(sm.avg_critic) }}</span>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{# ─────────── Project info ─────────── #}
+
+<div class="card" style="margin-top: 1.25rem;">
+    <div class="card-header">
+        <h2>关于 OfferGuide</h2>
+    </div>
+    <p style="font-size: 0.92rem; line-height: 1.7;">
+        Ambient Job-Hunt Copilot for Chinese campus recruitment.
+        Single-user local-first agent that wakes on cron, reads system state,
+        decides which SKILLs to invoke against a north-star goal, and
+        evolves its own prompts via critic + user-thumbs + app-outcome
+        signal aggregation (W13.1 GEPA-style closed loop).
+    </p>
+    <div style="margin-top: 0.75rem;">
+        <a href="https://github.com/" target="_blank">GitHub →</a>
+    </div>
+</div>
+
+{% endblock %}

@@ -294,6 +294,7 @@ class LLMClient:
         model: str | None = None,
         temperature: float = 0.4,
         tool_choice: str = "auto",
+        cache_system_prompt: bool = True,
         extra: Mapping[str, Any] | None = None,
     ) -> LLMResponse:
         """Chat with OpenAI-spec function/tool calling.
@@ -306,6 +307,13 @@ class LLMClient:
           - ``"none"``: model must reply directly
           - ``"required"``: model must pick a tool (some providers ignore)
 
+        ``cache_system_prompt=True`` (W13.8): tag the system message with
+        Anthropic's prompt-cache marker so subsequent iterations within
+        the same trajectory hit the prompt cache (50% input-token cost
+        reduction past the first call). ccvibe / OpenAI-compat proxies
+        that don't support cache_control silently ignore the marker —
+        no behavioral degradation either way.
+
         Returns LLMResponse where ``tool_calls`` is non-empty if the model
         called a tool; ``content`` is the (possibly empty) text the model
         emitted alongside the tool call. Caller is responsible for
@@ -316,9 +324,25 @@ class LLMClient:
             raise LLMError(
                 "No API key configured. Set OFFERGUIDE_LLM_API_KEY (or DEEPSEEK_API_KEY)."
             )
+        # Mutate-copy so we can stamp cache_control on the system msg
+        prepared_messages = [dict(m) for m in messages]
+        if cache_system_prompt and prepared_messages:
+            sys_msg = prepared_messages[0]
+            if sys_msg.get("role") == "system" and isinstance(sys_msg.get("content"), str):
+                # Convert content from string to content-block list with cache_control
+                # marker. Anthropic & OpenAI both accept this shape; non-Anthropic
+                # backends just ignore the cache_control field.
+                sys_msg["content"] = [
+                    {
+                        "type": "text",
+                        "text": sys_msg["content"],
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ]
+
         body: dict[str, Any] = {
             "model": model or self.default_model,
-            "messages": [dict(m) for m in messages],
+            "messages": prepared_messages,
             "temperature": temperature,
             "stream": False,
             "tools": [dict(t) for t in tools],

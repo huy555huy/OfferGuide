@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>OfferGuide Helper</title>
+  <style>
+    body {
+      width: 320px; padding: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+      font-size: 13px;
+      color: #2c2925;
+      margin: 0;
+    }
+    h1 { font-size: 14px; margin: 0 0 8px; color: #cc785c; }
+    .row { display: flex; justify-content: space-between; padding: 6px 0;
+           border-bottom: 1px solid #f3efe5; }
+    .row:last-child { border-bottom: none; }
+    .label { color: #79716a; font-size: 12px; }
+    .value { font-family: monospace; font-weight: 600; }
+    .warning { background: #fbf0e8; padding: 8px 10px;
+               border-radius: 6px; font-size: 11px;
+               margin-top: 8px; color: #b85f44; }
+    .safety {
+      background: #e8efe6; padding: 8px 10px;
+      border-radius: 6px; font-size: 11px; margin-top: 8px;
+      color: #6b8e6b;
+    }
+    a { color: #cc785c; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    button {
+      background: #cc785c; color: white; border: none;
+      padding: 6px 12px; border-radius: 4px; cursor: pointer;
+      font-size: 12px; margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>🛠 OfferGuide Helper</h1>
+
+  <div class="row">
+    <span class="label">本地 OfferGuide</span>
+    <span class="value" id="health-status">检查中...</span>
+  </div>
+  <div class="row">
+    <span class="label">本小时复制次数</span>
+    <span class="value" id="copy-count">—</span>
+  </div>
+  <div class="row">
+    <span class="label">支持平台</span>
+    <span class="value">Boss · 牛客</span>
+  </div>
+
+  <div class="safety">
+    🔒 <strong>安全承诺</strong>: 本扩展仅把 OfferGuide 准备好的内容
+    复制到剪贴板。绝不替你点提交、发送或导航。所有操作都需要你手动确认。
+  </div>
+
+  <div class="warning">
+    ⚠ <strong>风控提醒</strong>: 单一平台短时间内大量复制 + 粘贴 + 提交
+    可能被判定为机器行为。建议每条建议至少手动改 1-2 个字, 节奏自然。
+  </div>
+
+  <div style="margin-top: 12px;">
+    <a href="http://localhost:8000/" target="_blank">打开 OfferGuide →</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
