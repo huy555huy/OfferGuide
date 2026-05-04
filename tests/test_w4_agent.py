@@ -7,6 +7,13 @@ without depending on DEEPSEEK_API_KEY.
 
 from __future__ import annotations
 
+import pytest
+pytest.skip(
+    "W13.1: agent/graph.py + agent/state.py removed (W4 LangGraph). Replaced by AgentLoop. "
+    "TODO(W13-cleanup): rebuild equivalent prep_node coverage against AgentLoop trajectory.",
+    allow_module_level=True,
+)
+
 import json
 from pathlib import Path
 from typing import Any
@@ -74,7 +81,7 @@ def test_score_only_dispatches_only_score() -> None:
         {
             "requested_action": "score",
             "job_text": "AI Agent at ByteDance",
-            "user_profile_text": "胡阳 ...",
+            "user_profile_text": "TestUser ...",
         }
     )
     assert [c[0] for c in rt.calls] == ["score_match"]

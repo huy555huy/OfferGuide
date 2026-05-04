@@ -36,7 +36,7 @@ output_schema: |
       "after":  <float 0..1>,
       "rationale": <str>
     },
-    "suggested_filename": <str, e.g. "胡阳_字节AI_Agent后端实习_2026-05-02.pdf">
+    "suggested_filename": <str, e.g. "<姓名>_<目标公司>_<岗位>_<YYYY-MM-DD>.pdf">
   }
 evolved_at: null
 parent_version: null

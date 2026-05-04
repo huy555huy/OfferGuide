@@ -61,13 +61,13 @@ class TestEligibility:
     def test_multi_column_skipped(self) -> None:
         # Tab-separated 学校 / 时间
         eligible, reason = _is_eligible(
-            "上海财经大学\t\t\t09/2025-06/2027", run_count=5, is_bold=True,
+            "某高校\t\t\t09/2025-06/2027", run_count=5, is_bold=True,
         )
         assert not eligible
         assert reason == "multi_column_layout"
         # 3+ spaces also caught
         eligible, reason = _is_eligible(
-            "上海财经大学    09/2025-06/2027", run_count=5, is_bold=True,
+            "某高校    09/2025-06/2027", run_count=5, is_bold=True,
         )
         assert not eligible
 
@@ -96,9 +96,11 @@ class TestProfileLoader:
             pytest.skip("user resume not present in test env")
         profile = load_resume_pdf(path)
         assert isinstance(profile, UserProfile)
-        assert "胡阳" in profile.raw_resume_text
-        assert "上海财经大学" in profile.raw_resume_text
+        # Don't hard-code user-identifying strings here (the file content is the
+        # real user's resume; assertions should be content-shape only)
         assert len(profile.raw_resume_text) > 1000
+        # Some Chinese characters should have come through
+        assert any("一" <= ch <= "鿿" for ch in profile.raw_resume_text)
         assert profile.source_pdf and profile.source_pdf.endswith(".docx")
 
     def test_unsupported_format_raises(self, tmp_path) -> None:
@@ -183,7 +185,7 @@ class TestDocxTailorWithStub:
         assert "LangGraph + DSPy + Pydantic" in new.paragraphs[18].text
 
         # Verify untouched para keeps content
-        assert orig.paragraphs[1].text == new.paragraphs[1].text  # 胡阳
+        assert orig.paragraphs[1].text == new.paragraphs[1].text  # TestUser
         assert orig.paragraphs[7].text == new.paragraphs[7].text  # multi-column
 
         # Verify para 18 paragraph-level style preserved

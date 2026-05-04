@@ -196,7 +196,7 @@ def test_runtime_invokes_prepare_interview_and_persists(tmp_path: Path) -> None:
         {
             "company": "字节跳动",
             "job_text": "AI Agent 实习，要求 LangGraph 经验",
-            "user_profile": "胡阳，应用统计专硕，做过 Deep Research Agent",
+            "user_profile": "TestUser，应用统计专硕，做过 Deep Research Agent",
             "past_experiences": "",
         },
     )

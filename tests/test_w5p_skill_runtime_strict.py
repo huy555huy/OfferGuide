@@ -126,7 +126,7 @@ def test_render_and_persist_use_same_canonical_inputs(tmp_path: Path) -> None:
 
     rt.invoke(
         spec,
-        {"job_text": "前端实习生", "user_profile": "胡阳"},
+        {"job_text": "前端实习生", "user_profile": "TestUser"},
         strict_inputs=False,
     )
 
@@ -151,7 +151,7 @@ def test_render_iterates_inputs_in_declared_order(tmp_path: Path) -> None:
     rt = SkillRuntime(llm, store)  # type: ignore[arg-type]
 
     # Pass in reversed order
-    rt.invoke(spec, {"user_profile": "胡阳", "job_text": "前端"})
+    rt.invoke(spec, {"user_profile": "TestUser", "job_text": "前端"})
 
     user_msg = llm.calls[0]["messages"][1]["content"]
     # job_text must appear before user_profile in the rendered output

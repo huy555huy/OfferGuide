@@ -405,30 +405,39 @@ class TestDashboardBriefs:
 
 
 class TestAutonomousCLI:
-    def test_list_command(self, tmp_path: Path, monkeypatch, capsys) -> None:
+    """W13.2: scheduler now registers ONE job (wake_agent), not 7 daemons."""
+
+    def test_list_command_shows_wake_agent(self, tmp_path: Path, monkeypatch, capsys) -> None:
         from offerguide.autonomous.__main__ import main
 
         monkeypatch.setenv("OFFERGUIDE_DB", str(tmp_path / "auto.db"))
         rc = main(["list"])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "silence_check" in out
-        assert "corpus_refresh" in out
-        assert "brief_update" in out
+        # Old 7-daemon names gone; the only job is wake_agent
+        assert "wake_agent" in out
+        assert "silence_check" not in out  # was a job in pre-W13.2
 
-    def test_run_once_silence_check(self, tmp_path: Path, monkeypatch, capsys) -> None:
+    def test_run_once_wake_agent_skips_when_no_llm(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """Without OFFERGUIDE_LLM_API_KEY, wake_agent should skip gracefully."""
         from offerguide.autonomous.__main__ import main
 
         monkeypatch.setenv("OFFERGUIDE_DB", str(tmp_path / "auto.db"))
-        rc = main(["run-once", "silence_check"])
+        # Strip any inherited LLM env so the job sees None
+        monkeypatch.delenv("OFFERGUIDE_LLM_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("TOKEN", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        rc = main(["run-once"])
         assert rc == 0
-        # silence_check returns counters dict — should appear in stdout
         out = capsys.readouterr().out
-        assert "silence_check" in out
+        assert "wake_agent" in out
+        # Should report the skip reason (no LLM)
+        assert "skip" in out.lower() or "no LLM" in out
 
-    def test_run_once_unknown_job_argparse_rejects(self, tmp_path: Path, monkeypatch) -> None:
+    def test_run_once_no_subcommand_fails_argparse(self, tmp_path: Path, monkeypatch) -> None:
         from offerguide.autonomous.__main__ import main
 
         monkeypatch.setenv("OFFERGUIDE_DB", str(tmp_path / "auto.db"))
         with pytest.raises(SystemExit):
-            main(["run-once", "no_such_job"])
+            main([])

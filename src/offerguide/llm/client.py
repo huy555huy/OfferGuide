@@ -22,7 +22,7 @@ import json
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import httpx
@@ -31,6 +31,61 @@ DEFAULT_DEEPSEEK_BASE = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 
 Role = Literal["system", "user", "assistant"]
+
+
+def _parse_tool_arguments(args_raw: str) -> dict[str, Any]:
+    """Parse a tool-call ``arguments`` JSON string, robust to ccvibe quirks.
+
+    Standard OpenAI: ``arguments`` is a JSON-string of an object.
+    ccvibe (Claude proxy) bug: sometimes returns CONCATENATED JSON objects
+    like ``"{}{\\"city\\": \\"x\\"}"`` — strict ``json.loads`` raises
+    ``Extra data`` and we'd lose the real arguments. Caught in W13 first
+    dogfood (model called read_job 5 times, args always empty).
+
+    Strategy:
+      1. ``json.loads`` happy path
+      2. Use ``raw_decode`` to walk forward, collecting each valid object
+      3. Return the FIRST non-empty dict found (or the last one if all empty)
+      4. On total failure, return empty dict — caller surfaces the error
+         to the model so it can self-correct
+    """
+    if not args_raw:
+        return {}
+    s = args_raw.strip()
+    # Happy path: clean single object
+    try:
+        parsed = json.loads(s)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback: walk through concatenated objects
+    decoder = json.JSONDecoder()
+    found: list[dict[str, Any]] = []
+    idx = 0
+    while idx < len(s):
+        # Skip whitespace
+        while idx < len(s) and s[idx] in " \t\r\n,":
+            idx += 1
+        if idx >= len(s):
+            break
+        try:
+            obj, end = decoder.raw_decode(s, idx)
+        except json.JSONDecodeError:
+            # Couldn't parse from here — give up
+            break
+        if isinstance(obj, dict):
+            found.append(obj)
+        idx = end
+
+    if not found:
+        return {}
+    # Prefer the first non-empty dict; fall back to the last one
+    for obj in found:
+        if obj:
+            return obj
+    return found[-1]
 
 
 def _strip_md_codefence(s: str) -> str:
@@ -92,6 +147,27 @@ class LLMError(RuntimeError):
 
 
 @dataclass
+class ToolCall:
+    """One function-call the model decided to make.
+
+    OpenAI/Claude tool-call payload:
+      ``{"id": "...", "type": "function",
+         "function": {"name": "skill_name", "arguments": "<json string>"}}``
+    We surface ``arguments`` already-parsed as a dict (best-effort) — the
+    model often returns malformed JSON for ``arguments``, so callers should
+    handle missing/unexpected keys defensively.
+    """
+    id: str
+    name: str
+    arguments: dict[str, Any]
+    arguments_raw: str = ""
+    """Original JSON-string of arguments — preserved so we can echo it back
+    verbatim in the assistant message when continuing the multi-turn
+    tool-call loop (echoing parsed-then-re-serialized JSON loses key order
+    and can confuse some providers' state tracking)."""
+
+
+@dataclass
 class LLMResponse:
     content: str
     model: str
@@ -100,6 +176,14 @@ class LLMResponse:
     cost_usd: float = 0.0
     latency_ms: int = 0
     raw: dict[str, Any] | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    """When the model used a tool, this is non-empty AND ``content`` may be
+    empty (or contain a brief 'thinking' preamble depending on provider).
+    Empty when no tool was called."""
+    finish_reason: str = ""
+    """OpenAI-spec finish_reason: 'stop' | 'tool_calls' | 'length' | ...
+    Useful for the agent loop to detect ``length`` (context cap hit) vs a
+    clean stop."""
 
 
 class LLMClient:
@@ -194,6 +278,114 @@ class LLMClient:
             completion_tokens=int(usage.get("completion_tokens", 0)),
             latency_ms=latency_ms,
             raw=payload,
+        )
+
+    def chat_with_tools(
+        self,
+        messages: list[Mapping[str, Any]],
+        *,
+        tools: list[Mapping[str, Any]],
+        model: str | None = None,
+        temperature: float = 0.4,
+        tool_choice: str = "auto",
+        extra: Mapping[str, Any] | None = None,
+    ) -> LLMResponse:
+        """Chat with OpenAI-spec function/tool calling.
+
+        Use this — not ``chat()`` — when you want the model to **decide**
+        which tool to call. The agent loop in ``offerguide.agent.loop``
+        is the primary user. ``tool_choice``:
+
+          - ``"auto"`` (default): model picks tool or replies directly
+          - ``"none"``: model must reply directly
+          - ``"required"``: model must pick a tool (some providers ignore)
+
+        Returns LLMResponse where ``tool_calls`` is non-empty if the model
+        called a tool; ``content`` is the (possibly empty) text the model
+        emitted alongside the tool call. Caller is responsible for
+        appending the assistant message + tool results to ``messages`` and
+        looping back here for the next decision.
+        """
+        if not self.api_key:
+            raise LLMError(
+                "No API key configured. Set OFFERGUIDE_LLM_API_KEY (or DEEPSEEK_API_KEY)."
+            )
+        body: dict[str, Any] = {
+            "model": model or self.default_model,
+            "messages": [dict(m) for m in messages],
+            "temperature": temperature,
+            "stream": False,
+            "tools": [dict(t) for t in tools],
+            "tool_choice": tool_choice,
+        }
+        if extra:
+            body.update(extra)
+
+        t0 = time.monotonic()
+        try:
+            resp = self._http.post(
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+            )
+        except httpx.HTTPError as e:
+            raise LLMError(f"HTTP transport error: {e}") from e
+
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        if resp.status_code != 200:
+            raise LLMError(
+                f"LLM HTTP {resp.status_code}: {resp.text[:600]}"
+            )
+        try:
+            payload = resp.json()
+        except json.JSONDecodeError as e:
+            raise LLMError(f"LLM returned non-JSON body: {e}") from e
+
+        try:
+            choice = payload["choices"][0]
+            message = choice["message"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise LLMError(f"LLM response missing choices[0].message: {payload}") from e
+
+        content = message.get("content") or ""
+        finish_reason = choice.get("finish_reason") or ""
+
+        # Parse tool_calls (OpenAI canonical shape; Claude-via-proxy returns same)
+        tool_calls: list[ToolCall] = []
+        for tc in (message.get("tool_calls") or []):
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            args_raw = fn.get("arguments") or ""
+            args_parsed: dict[str, Any] = {}
+            if isinstance(args_raw, str) and args_raw:
+                # ccvibe / Claude proxies sometimes emit concatenated JSON
+                # objects in ``arguments`` — use the robust parser, not strict
+                # json.loads. See ``_parse_tool_arguments`` docstring.
+                args_parsed = _parse_tool_arguments(args_raw)
+            elif isinstance(args_raw, dict):
+                args_parsed = args_raw
+                args_raw = json.dumps(args_raw, ensure_ascii=False)
+            tool_calls.append(ToolCall(
+                id=str(tc.get("id") or f"call_{len(tool_calls)}"),
+                name=str(fn.get("name") or ""),
+                arguments=args_parsed,
+                arguments_raw=args_raw if isinstance(args_raw, str) else "",
+            ))
+
+        usage = payload.get("usage", {})
+        return LLMResponse(
+            content=content,
+            model=payload.get("model", body["model"]),
+            prompt_tokens=int(usage.get("prompt_tokens", 0)),
+            completion_tokens=int(usage.get("completion_tokens", 0)),
+            latency_ms=latency_ms,
+            raw=payload,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
         )
 
     def close(self) -> None:

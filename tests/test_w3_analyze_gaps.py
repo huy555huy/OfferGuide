@@ -205,7 +205,7 @@ def test_runtime_invokes_analyze_gaps_and_persists(tmp_path: Path) -> None:
 
     result = rt.invoke(
         spec,
-        {"job_text": "AI Agent JD ...", "user_profile": "胡阳 资料 ..."},
+        {"job_text": "AI Agent JD ...", "user_profile": "TestUser 资料 ..."},
     )
 
     assert result.parsed is not None

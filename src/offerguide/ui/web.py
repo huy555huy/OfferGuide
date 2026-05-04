@@ -1,12 +1,13 @@
-"""FastAPI web UI — chat + inbox.
+"""FastAPI web UI — agent + supporting pages.
 
-Routes:
+Routes (after W13.1 cleanup):
 
-    GET  /                     home page: chat form + recent inbox preview
-    POST /chat                 run agent on (job_text, action) → render report fragment
-    GET  /inbox                full inbox view (pending + recent decided)
+    GET  /                     daily standup home
+    GET  /agent                W13 central agent loop entry point
+    GET  /api/agent/stream     SSE streaming agent execution events
+    GET  /agent/runs/{id}      view a persisted agent_runs trajectory
+    GET  /inbox                pending agent suggestions
     POST /inbox/{id}/decide    mark item approved|rejected|dismissed
-    POST /inbox/from-report    enqueue a "consider_jd" item from the latest chat report
 
 The app is intentionally HTMX-driven (no SPA, no JS framework). Server-side
 templates render fragments; the client just swaps DOM nodes. Easier to test,
@@ -24,14 +25,15 @@ from datetime import UTC
 from pathlib import Path
 from typing import Any, Literal
 
+import asyncio
+
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from .. import inbox as inbox_mod
-from ..agent import build_graph
-from ..agent.state import RequestedAction
+from ..agent import AgentLoop
 from ..config import Settings
 from ..llm import LLMClient, LLMError
 from ..memory import Store
@@ -100,22 +102,10 @@ def create_app(
             ),
         )
 
-    @app.get("/quick-eval", response_class=HTMLResponse)
-    def quick_eval_view(request: Request) -> Any:
-        """Standalone JD-evaluation page — same form home embeds, full
-        screen for users who landed here directly (e.g. from action-item
-        click)."""
-        items = inbox_mod.list_items(store, status="pending", limit=10)
-        return templates.TemplateResponse(
-            request,
-            "quick_eval.html",
-            _ctx(
-                request,
-                items=items,
-                stats=_quick_stats(store),
-                active_tab="quick_eval",
-            ),
-        )
+    # /quick-eval + /chat removed in W13.1 — superseded by /agent (model in main
+    # position decides what to do, no need for a separate "paste JD then pick
+    # action" form). The old chat() handler also depended on the W4 LangGraph
+    # build_graph, which is also being retired.
 
     @app.get("/pipeline", response_class=HTMLResponse)
     def pipeline_view(request: Request) -> Any:
@@ -673,6 +663,335 @@ def create_app(
             "notes": result.notes,
         }
 
+    # ─────────────────────────── W13 central agent loop ───────────────────────
+    # Model in the driver's seat: model decides which SKILL to call (via OpenAI
+    # tool-calling), when to stop. The /agent page is the user-facing surface;
+    # the SSE endpoint streams every event (state_snapshot / thinking /
+    # tool_call / tool_result / critique / final) so user sees the agent
+    # think + act in real time.
+
+    @app.get("/agent", response_class=HTMLResponse)
+    def agent_page(request: Request) -> Any:
+        """W13 agent loop UI — pick a goal, watch the agent think + act live."""
+        # Recent runs to show below the form (audit trail)
+        try:
+            with store.connect() as conn:
+                rows = conn.execute(
+                    "SELECT id, trigger_kind, goal, status, iterations, "
+                    "       critic_score, latency_ms, started_at "
+                    "FROM agent_runs ORDER BY started_at DESC LIMIT 8"
+                ).fetchall()
+        except Exception:
+            rows = []
+        recent_runs = [
+            {
+                "id": r[0], "trigger_kind": r[1], "goal": r[2],
+                "status": r[3], "iterations": r[4],
+                "critic_score": r[5], "latency_ms": r[6],
+            }
+            for r in rows
+        ]
+        return templates.TemplateResponse(
+            request,
+            "agent.html",
+            _ctx(
+                request,
+                recent_runs=recent_runs,
+                skill_count=len(skills),
+                tools_ready=runtime is not None and bool(settings.deepseek_api_key),
+                active_tab="agent",
+            ),
+        )
+
+    @app.get("/api/agent/stream")
+    async def agent_stream(
+        request: Request,
+        goal: str,
+        trigger_kind: str = "user_button",
+        max_iterations: int = 6,
+    ) -> StreamingResponse:
+        """SSE endpoint that runs the agent loop in a thread + streams events.
+
+        Each event becomes one ``data: {...}\\n\\n`` SSE frame. The browser-
+        side EventSource (in agent.html) appends each frame to the live
+        panel as it arrives. The connection closes after the loop returns.
+
+        Implementation note: AgentLoop is sync (each LLM call blocks), so we
+        run it in a thread via asyncio.to_thread + a thread-safe queue back
+        to the async generator. We never await inside the agent loop itself —
+        that would defeat the per-iteration streaming effect.
+        """
+        if runtime is None or not settings.deepseek_api_key:
+            async def _err_stream():
+                yield (
+                    "data: " + json_dumps({
+                        "kind": "error",
+                        "message": "OFFERGUIDE_LLM_API_KEY 没配 — agent 无法启动",
+                    }) + "\n\n"
+                )
+            return StreamingResponse(_err_stream(), media_type="text/event-stream")
+
+        # Build a fresh LLMClient per request (cheap; httpx.Client lifecycle)
+        llm = LLMClient(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            default_model=settings.default_model,
+        )
+        agent = AgentLoop(
+            llm=llm,
+            runtime=runtime,
+            store=store,
+            skills=skills,
+            master_resume_text=profile.raw_resume_text if profile else "",
+            max_iterations=max(1, min(int(max_iterations), 12)),
+        )
+
+        main_loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def _on_event_from_thread(ev: Any) -> None:
+            # AgentLoop calls this from its worker thread — bridge to async queue
+            try:
+                main_loop.call_soon_threadsafe(queue.put_nowait, dict(ev))
+            except RuntimeError:
+                # Event loop closed (client disconnected) — drop event
+                pass
+
+        def _run_blocking() -> None:
+            try:
+                result = agent.run(
+                    goal=goal,
+                    trigger_kind=trigger_kind,
+                    on_event=_on_event_from_thread,
+                )
+                _on_event_from_thread({
+                    "kind": "_done",
+                    "run_id": result.run_id,
+                    "iterations": result.iterations,
+                    "critic_score": result.critic_score,
+                    "latency_ms": result.latency_ms,
+                })
+            except Exception as e:
+                _on_event_from_thread({
+                    "kind": "_done", "error": str(e),
+                })
+            finally:
+                # Sentinel so the SSE generator knows to close
+                main_loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        # Kick off the agent in a background thread
+        asyncio.create_task(asyncio.to_thread(_run_blocking))
+
+        async def _sse_gen():
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        ev = await asyncio.wait_for(queue.get(), timeout=60.0)
+                    except asyncio.TimeoutError:
+                        # Heartbeat to keep the connection open through silent stretches
+                        yield ": keepalive\n\n"
+                        continue
+                    if ev is None:
+                        break
+                    yield "data: " + json_dumps(ev, ensure_ascii=False, default=str) + "\n\n"
+            finally:
+                try:
+                    llm.close()
+                except Exception:
+                    pass
+
+        return StreamingResponse(
+            _sse_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",  # disable buffering on nginx-style proxies
+                "Connection": "keep-alive",
+            },
+        )
+
+    @app.get("/evolution", response_class=HTMLResponse)
+    def evolution_page(request: Request) -> Any:
+        """W13.1 evolution observatory.
+
+        Shows: per-SKILL fitness + variants tree + manual promote/fail/evolve
+        buttons. Read-only view; mutations go through dedicated POST routes
+        (audit-friendly).
+        """
+        from .. import evolution as _evo
+
+        # Get every SKILL the system knows about, with current fitness
+        skill_specs = sorted(skills, key=lambda s: s.name) if skills else []
+        skill_views: list[dict[str, Any]] = []
+        for spec in skill_specs:
+            live = _evo.get_live_variant(store, spec.name)
+            canaries = _evo.get_canary_variants(store, spec.name)
+            shadows = _evo.get_shadow_variants(store, spec.name)
+            current_version = live.version if live else spec.version
+            fitness = _evo.compute_fitness(
+                store, skill_name=spec.name, skill_version=current_version,
+            )
+            all_variants = _evo.list_all_variants(
+                store, skill_name=spec.name, limit=20,
+            )
+            skill_views.append({
+                "name": spec.name,
+                "description": (spec.description or "")[:160],
+                "seed_version": spec.version,
+                "current_version": current_version,
+                "fitness": fitness.fitness,
+                "sample_count": fitness.sample_count,
+                "by_kind": fitness.by_kind,
+                "live": live,
+                "canaries": canaries,
+                "shadows": shadows,
+                "variants": all_variants,
+            })
+
+        # Detect candidates ready for evolution (model-bypass check)
+        try:
+            triggers = _evo.detect_evolution_candidates(store)
+        except Exception:
+            triggers = []
+
+        return templates.TemplateResponse(
+            request,
+            "evolution.html",
+            _ctx(
+                request,
+                skill_views=skill_views,
+                triggers=triggers,
+                evolution_threshold=_evo.EVOLUTION_THRESHOLD,
+                min_signals=_evo.MIN_SIGNALS_FOR_TRIGGER,
+                cooldown_days=_evo.EVOLUTION_COOLDOWN_DAYS,
+                active_tab="evolution",
+            ),
+        )
+
+    @app.post("/api/evolution/evolve/{skill_name}", response_class=JSONResponse)
+    def evolution_trigger_evolve(skill_name: str, num_variants: int = 3) -> dict:
+        """Manually trigger evolve_skill on one SKILL (admin override).
+
+        Normally the agent calls evolve_skill itself when it detects the
+        candidate; this endpoint lets the user kick off evolution by hand
+        from the /evolution UI.
+        """
+        from ..evolution.evolve import evolve_skill as _evolve
+
+        if not settings.deepseek_api_key:
+            raise HTTPException(400, "OFFERGUIDE_LLM_API_KEY 没配, 无法 evolve")
+        llm = LLMClient(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            default_model=settings.default_model,
+        )
+        try:
+            result = _evolve(
+                store=store, llm=llm,
+                skill_name=skill_name,
+                num_variants=max(1, min(int(num_variants), 5)),
+            )
+        finally:
+            llm.close()
+        return {
+            "skill_name": result.skill_name,
+            "parent_version": result.parent_version,
+            "candidates_generated": result.candidates_generated,
+            "candidates_persisted": result.candidates_persisted,
+            "variant_versions": result.variant_versions,
+            "notes": result.notes,
+        }
+
+    @app.post("/api/evolution/release_cycle", response_class=JSONResponse)
+    def evolution_run_release_cycle(dry_run: bool = False) -> dict:
+        """Manually run the gray-release cycle once.
+
+        Same effect as agent calling run_gray_release. Useful for the user
+        to nudge the rollout forward without waiting for the next agent run.
+        """
+        from ..evolution.release import run_release_cycle
+
+        cycle = run_release_cycle(store, dry_run=dry_run)
+        return {
+            "actions": [
+                {"skill_name": a.skill_name, "action": a.action,
+                 "version": a.version, "reason": a.reason}
+                for a in cycle.actions
+            ],
+            "skipped": cycle.skipped,
+            "summary": cycle.render_summary(),
+        }
+
+    @app.post("/api/evolution/promote/{skill_name}/{version}", response_class=JSONResponse)
+    def evolution_manual_promote(skill_name: str, version: str) -> dict:
+        """Manually promote a variant to live (admin override of A/B)."""
+        from ..evolution.registry import (
+            get_variant_by_version,
+            promote_to_canary,
+            promote_to_live,
+        )
+
+        v = get_variant_by_version(store, skill_name, version)
+        if v is None:
+            raise HTTPException(404, f"variant {skill_name}/{version} not found")
+        if v.status == "shadow":
+            ok = promote_to_canary(
+                store, skill_name=skill_name, version=version, traffic_pct=0.2,
+            )
+            return {"action": "promoted_to_canary", "ok": ok,
+                    "traffic_pct": 0.2}
+        if v.status == "canary":
+            ok = promote_to_live(store, skill_name=skill_name, version=version)
+            return {"action": "promoted_to_live", "ok": ok}
+        raise HTTPException(400, f"variant in status {v.status} cannot be promoted")
+
+    @app.post("/api/evolution/fail/{skill_name}/{version}", response_class=JSONResponse)
+    def evolution_manual_fail(skill_name: str, version: str) -> dict:
+        """Manually fail a shadow/canary variant (admin override)."""
+        from ..evolution.registry import fail_variant
+
+        ok = fail_variant(
+            store, skill_name=skill_name, version=version,
+            reason="manual fail from /evolution UI",
+        )
+        return {"action": "failed", "ok": ok}
+
+    @app.get("/agent/runs/{run_id}", response_class=HTMLResponse)
+    def agent_run_detail(request: Request, run_id: int) -> Any:
+        """Read a persisted agent_runs row + render its trajectory + critic."""
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT trigger_kind, goal, status, iterations, final_answer, "
+                "       trajectory_json, critic_score, critic_notes, latency_ms, "
+                "       started_at, ended_at, error_text "
+                "FROM agent_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"agent_runs#{run_id} not found")
+        try:
+            trajectory = json_loads(row[5] or "[]")
+        except json.JSONDecodeError:
+            trajectory = []
+        return templates.TemplateResponse(
+            request,
+            "agent_run_detail.html",
+            _ctx(
+                request,
+                run_id=run_id,
+                trigger_kind=row[0], goal=row[1], status=row[2],
+                iterations=row[3], final_answer=row[4],
+                trajectory=trajectory,
+                critic_score=row[6], critic_notes=row[7],
+                latency_ms=row[8],
+                started_at=row[9], ended_at=row[10],
+                error_text=row[11],
+                active_tab="agent",
+            ),
+        )
+
     @app.get("/cover-letter/{run_id}.html", response_class=HTMLResponse)
     def cover_letter_print(request: Request, run_id: int) -> Any:
         """Print-ready standalone HTML page for one cover letter run.
@@ -791,7 +1110,7 @@ def create_app(
         safe_company = company.replace("/", "_").replace(" ", "_")[:20]
         output_dir = _Path("data/tailored")
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_filename = f"胡阳_{safe_company}_{ts}.docx"
+        output_filename = f"tailored_{safe_company}_{ts}.docx"
         output_path = output_dir / output_filename
 
         try:
@@ -831,7 +1150,7 @@ def create_app(
         """Serve a previously-tailored .docx for download.
 
         Filename validation: must match the format we wrote
-        (``胡阳_<company>_<ts>.docx``) — refuse path traversal.
+        (``tailored_<company>_<ts>.docx``) — refuse path traversal.
         """
         from pathlib import Path as _Path
 
@@ -1458,160 +1777,12 @@ def create_app(
             ),
         )
 
-    @app.post("/chat", response_class=HTMLResponse)
-    def chat(
-        request: Request,
-        job_text: str = Form(...),
-        action: str = Form("score_and_gaps"),
-        company: str = Form(""),
-    ) -> Any:
-        if profile is None:
-            return templates.TemplateResponse(
-                request,
-                "_report.html",
-                _ctx(request, error="未加载简历——设 OFFERGUIDE_RESUME_PDF 后重启。"),
-            )
-        if runtime is None:
-            return templates.TemplateResponse(
-                request,
-                "_report.html",
-                _ctx(request, error="未配置 LLM——设 DEEPSEEK_API_KEY 后重启。"),
-            )
-
-        valid_actions = (
-            "score", "gaps", "score_and_gaps", "prepare_interview", "deep_prep",
-            "cover_letter", "everything",
-        )
-        action_norm: RequestedAction = (
-            action if action in valid_actions else "score_and_gaps"
-        )  # type: ignore[assignment]
-
-        # If user picked an action that needs `company` and didn't provide one,
-        # surface the requirement clearly rather than silently falling back.
-        company_required = (
-            "prepare_interview", "deep_prep", "cover_letter", "everything",
-        )
-        if action_norm in company_required and not company.strip():
-            return templates.TemplateResponse(
-                request,
-                "_report.html",
-                _ctx(
-                    request,
-                    error=(
-                        "面试备战 / 三件套需要填「公司名」字段。请在表单里补充后重试。"
-                    ),
-                ),
-            )
-
-        graph = build_graph(skills=skills, runtime=runtime, store=store)
-        try:
-            result = graph.invoke(
-                {
-                    "messages": [{"role": "user", "content": job_text}],
-                    "requested_action": action_norm,
-                    "job_text": job_text,
-                    "user_profile_text": profile.raw_resume_text,
-                    "company": company.strip() or None,
-                }
-            )
-        except LLMError as e:
-            return templates.TemplateResponse(
-                request,
-                "_report.html",
-                _ctx(request, error=f"LLM 调用失败: {e}"),
-            )
-
-        title_first_line = (job_text.splitlines() or [""])[0][:60]
-
-        # Build Verdict whenever ≥2 SKILLs ran — gives the user a one-line
-        # recommendation + top 4 action items at the top of the report.
-        # Especially important for 'everything' mode, where the report
-        # otherwise scrolls forever.
-        verdict_obj = None
-        skill_outputs = [
-            result.get("score_result"),
-            result.get("gaps_result"),
-            result.get("prep_result"),
-            result.get("deep_prep_result"),
-            result.get("cover_letter_result"),
-        ]
-        if sum(1 for x in skill_outputs if x) >= 2:
-            from .. import briefs as briefs_mod
-            from .. import verdict as verdict_mod
-
-            brief_conf: float | None = None
-            brief_limit: int | None = None
-            if company.strip():
-                row = briefs_mod.get_brief(store, company.strip())
-                if row is not None:
-                    brief_conf = row.brief.confidence
-                    brief_limit = row.brief.current_app_limit
-
-            verdict_obj = verdict_mod.synthesize(
-                score=result.get("score_result"),
-                gaps=result.get("gaps_result"),
-                prep=result.get("prep_result"),
-                deep_prep=result.get("deep_prep_result"),
-                cover_letter=result.get("cover_letter_result"),
-                brief_confidence=brief_conf,
-                brief_app_limit=brief_limit,
-            )
-
-        return templates.TemplateResponse(
-            request,
-            "_report.html",
-            _ctx(
-                request,
-                response=result.get("final_response") or "(空响应)",
-                error=result.get("error"),
-                verdict=verdict_obj,
-                # Structured agent results — templates render visualizations
-                # off these dicts; the markdown ``response`` is the fallback.
-                score=result.get("score_result"),
-                gaps=result.get("gaps_result"),
-                prep=result.get("prep_result"),
-                prep_used_experiences=result.get("prep_used_experiences", 0),
-                deep_prep=result.get("deep_prep_result"),
-                cover_letter=result.get("cover_letter_result"),
-                company=company.strip() or None,
-                inbox_title=f"考虑投递: {title_first_line}",
-                inbox_body=(result.get("final_response") or "")[:800],
-                job_text=job_text[:2000],
-                score_run_id=result.get("score_run_id"),
-                gaps_run_id=result.get("gaps_run_id"),
-                prep_run_id=result.get("prep_run_id"),
-                deep_prep_run_id=result.get("deep_prep_run_id"),
-                cover_letter_run_id=result.get("cover_letter_run_id"),
-            ),
-        )
-
-    @app.post("/inbox/from-report", response_class=HTMLResponse)
-    def inbox_from_report(
-        request: Request,
-        title: str = Form(...),
-        body: str = Form(""),
-        job_text: str = Form(""),
-        score_run_id: str = Form(""),
-        gaps_run_id: str = Form(""),
-    ) -> Any:
-        payload: dict[str, Any] = {"job_text_preview": job_text[:200]}
-        if score_run_id:
-            payload["score_run_id"] = int(score_run_id)
-        if gaps_run_id:
-            payload["gaps_run_id"] = int(gaps_run_id)
-        item = inbox_mod.enqueue(
-            store, kind="consider_jd", title=title, body=body, payload=payload
-        )
-        if notifier is not None:
-            notifier.notify(
-                title=f"OfferGuide: 新候选 #{item.id}",
-                body=item.title,
-                level="info",
-            )
-        items = inbox_mod.list_items(store, status="pending", limit=10)
-        return templates.TemplateResponse(
-            request, "_inbox_list.html", _ctx(request, items=items)
-        )
+    # /chat removed in W13.1 — replaced by /agent (W13 central agent loop).
+    # The old handler dispatched a hardcoded LangGraph (W4 graph.py) over the
+    # SKILLs based on a `requested_action` enum from the form; users now go
+    # to /agent and write a natural-language goal instead. The agent decides
+    # which SKILLs to call, in what order, with what arguments. /inbox/from-report
+    # also went away because it only existed to enqueue from /chat's report.
 
     @app.post("/inbox/{item_id}/decide", response_class=HTMLResponse)
     def decide(
@@ -1846,10 +2017,13 @@ def _application_funnel(store: Store) -> dict[str, Any]:
     return {"total": total, "stages": counts}
 
 
-def _recent_evolutions(store: Store, *, limit: int = 10) -> list[Any]:
-    """Latest evolution_log rows as EvolutionRecord objects."""
-    from ..evolution.diff import _row_to_record
+def _recent_evolutions(store: Store, *, limit: int = 10) -> list[dict[str, Any]]:
+    """Latest evolution_log rows as plain dicts (for dashboard rendering).
 
+    Inlined the row→dict conversion in W13.1 so we can drop the old
+    evolution/diff.py module. The dashboard route gets a full rewrite
+    in W13.5; this is just to keep templates rendering until then.
+    """
     with store.connect() as conn:
         rows = conn.execute(
             "SELECT id, skill_name, parent_version, new_version, metric_name, "
@@ -1857,7 +2031,20 @@ def _recent_evolutions(store: Store, *, limit: int = 10) -> list[Any]:
             "FROM evolution_log ORDER BY created_at DESC, id DESC LIMIT ?",
             (limit,),
         ).fetchall()
-    return [_row_to_record(r) for r in rows]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        before = float(r[5]) if r[5] is not None else 0.0
+        after = float(r[6]) if r[6] is not None else 0.0
+        out.append({
+            "id": r[0], "skill_name": r[1],
+            "parent_version": r[2], "new_version": r[3],
+            "metric_name": r[4],
+            "metric_before": before, "metric_after": after,
+            "metric_before_total": before, "metric_after_total": after,
+            "delta_total": after - before,
+            "notes": r[7], "created_at": r[8],
+        })
+    return out
 
 
 def _recent_skill_runs(store: Store, *, limit: int = 10) -> list[dict[str, Any]]:

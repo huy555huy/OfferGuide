@@ -11,6 +11,13 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
+pytest.skip(
+    "W13.1: agent/graph.py + agent/state.py removed (W4 LangGraph). Replaced by AgentLoop. "
+    "TODO(W13-cleanup): rebuild equivalent prep_node coverage against AgentLoop trajectory.",
+    allow_module_level=True,
+)
+
 import json
 from pathlib import Path
 from typing import Any
@@ -162,7 +169,7 @@ class TestPrepRouting:
                 "messages": [{"role": "user", "content": "面试"}],
                 "requested_action": "prepare_interview",
                 "job_text": "AI Agent 实习 - 字节",
-                "user_profile_text": "胡阳的简历",
+                "user_profile_text": "TestUser的简历",
                 "company": "字节跳动",
             }
         )
@@ -184,7 +191,7 @@ class TestPrepRouting:
                 "messages": [{"role": "user", "content": "do all"}],
                 "requested_action": "everything",
                 "job_text": "AI Agent 实习",
-                "user_profile_text": "胡阳",
+                "user_profile_text": "TestUser",
                 "company": "阿里",
             }
         )

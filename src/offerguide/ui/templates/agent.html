@@ -1,0 +1,341 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Agent{% endblock %}
+{% block content %}
+
+<style>
+    .agent-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    @media (max-width: 920px) { .agent-grid { grid-template-columns: 1fr; } }
+
+    .preset-btn {
+        display: block; width: 100%; text-align: left;
+        background: var(--bg-elev); color: var(--text);
+        border: 1px solid var(--border); padding: 0.625rem 0.75rem;
+        border-radius: var(--radius-sm); cursor: pointer;
+        font-size: 0.825rem; margin-bottom: 0.5rem;
+        transition: border-color 0.12s, background 0.12s;
+    }
+    .preset-btn:hover { border-color: var(--primary); background: var(--primary-soft); }
+    .preset-btn .preset-label { font-weight: 600; color: var(--text); }
+    .preset-btn .preset-hint { color: var(--text-muted); font-size: 0.75rem; margin-top: 0.125rem; }
+
+    .stream-panel {
+        background: var(--bg-subtle);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 0.875rem;
+        max-height: 600px; overflow-y: auto;
+        font-size: 0.825rem; line-height: 1.55;
+    }
+    .stream-panel .empty { padding: 1rem; text-align: center; color: var(--text-muted); }
+
+    .ev {
+        margin-bottom: 0.625rem;
+        padding: 0.625rem 0.75rem;
+        background: var(--bg-elev);
+        border: 1px solid var(--border-soft);
+        border-left: 3px solid var(--text-muted);
+        border-radius: var(--radius-sm);
+    }
+    .ev .ev-header {
+        display: flex; align-items: center; gap: 0.5rem;
+        font-size: 0.7rem; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600;
+        margin-bottom: 0.375rem;
+    }
+    .ev .ev-header .ts { margin-left: auto; color: var(--text-dim); font-family: var(--font-mono); }
+    .ev .ev-body { font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word; }
+    .ev.state_snapshot { border-left-color: #94a3b8; }
+    .ev.state_snapshot .ev-body { font-size: 0.75rem; color: var(--text-muted); max-height: 200px; overflow-y: auto; }
+    .ev.thinking { border-left-color: var(--primary); }
+    .ev.thinking .ev-body { font-family: var(--font-sans); }
+    .ev.tool_call { border-left-color: var(--warning); }
+    .ev.tool_call .ev-body code { background: var(--warning-soft); padding: 0.1rem 0.3rem; border-radius: 3px; }
+    .ev.tool_result { border-left-color: var(--success); }
+    .ev.tool_result .ev-body { font-size: 0.75rem; max-height: 240px; overflow-y: auto; }
+    .ev.critique { border-left-color: #7e22ce; background: #faf5ff; }
+    .ev.critique .ev-body { font-family: var(--font-sans); }
+    .ev.final {
+        border-left-color: var(--success);
+        border-width: 1px 1px 1px 4px;
+        background: var(--success-soft);
+    }
+    .ev.final .ev-body { font-family: var(--font-sans); font-size: 0.95rem; }
+    .ev.error {
+        border-left-color: var(--danger);
+        background: var(--danger-soft);
+    }
+    .ev.error .ev-body { color: var(--danger); }
+    .ev._done {
+        border-left-color: var(--text);
+        background: var(--bg-warm);
+        font-size: 0.85rem;
+    }
+
+    .recent-runs td { font-size: 0.825rem; padding: 0.5rem 0.625rem; }
+    .recent-runs th {
+        font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em;
+        color: var(--text-muted); padding: 0.5rem 0.625rem; text-align: left;
+        border-bottom: 1px solid var(--border);
+    }
+    .recent-runs tr { border-bottom: 1px solid var(--border-soft); }
+    .recent-runs tr:hover { background: var(--bg-subtle); }
+    .recent-runs td a { font-family: var(--font-mono); }
+
+    .running-indicator {
+        display: inline-flex; align-items: center; gap: 0.375rem;
+        font-size: 0.825rem; color: var(--primary);
+    }
+    .running-indicator .dot {
+        width: 8px; height: 8px; border-radius: 999px; background: var(--primary);
+        animation: pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.5; transform: scale(0.85); }
+    }
+</style>
+
+<div class="page-title">
+    <div>
+        <h1>Agent — 模型在主位</h1>
+        <p>不是 Python 决定该调哪个 SKILL, 是 <strong>模型自己看现状决定</strong>。每一步都流式给你看：state 读取 → 思考 → 工具调用 → 结果 → 自我批判 → 收工。共 <strong>{{ skill_count }}</strong> 个 SKILL 作为模型工具。</p>
+    </div>
+</div>
+
+{% if not tools_ready %}
+<div class="error" style="margin-bottom: 1rem;">
+    ⚠️ Agent 不可用 — 缺 <code>OFFERGUIDE_LLM_API_KEY</code> 或 SkillRuntime 没初始化。
+</div>
+{% endif %}
+
+<div class="agent-grid">
+
+    <!-- ──────────── 左侧：goal 输入 + 最近 runs ──────────── -->
+    <div>
+        <div class="card">
+            <div class="card-header">
+                <h2>给 Agent 一个目标</h2>
+                <span class="meta">model 自主决定调哪些 SKILL</span>
+            </div>
+
+            <label class="field">
+                <span class="label-text">Goal (自然语言)</span>
+                <textarea id="goal-input" rows="3" placeholder="例如：检查最近 3 天新爬的字节 jobs，给评分 + 标记需要重点关注的"></textarea>
+            </label>
+
+            <div style="margin-top: 0.75rem;">
+                <div class="section-title" style="margin-top: 0;">快速预设</div>
+
+                <button type="button" class="preset-btn"
+                        onclick="setGoal('巡检最近系统状态：看 jobs 队列有没有该 score 的、applications 有没有 follow-up 该催的、最近 SKILL 运行有没有失败。给一份 5 句话内的执行总结。')">
+                    <div class="preset-label">📋 每日巡检</div>
+                    <div class="preset-hint">无副作用 · 适合首次试 agent</div>
+                </button>
+
+                <button type="button" class="preset-btn"
+                        onclick="setGoal('找一个高优先级岗位（最近爬到 + 还没 score 的）, 给它跑 score_match。如果分数 ≥ 0.65 就再跑 analyze_gaps; 否则跳过。')">
+                    <div class="preset-label">🎯 自动 score 高优 job</div>
+                    <div class="preset-hint">多步骤 · 测试模型决策能力</div>
+                </button>
+
+                <button type="button" class="preset-btn"
+                        onclick="setGoal('给我准备明天的字节 AI Agent 一面：先看 user_facts 里有什么相关偏好/项目/弱点，然后跑 prepare_interview，最后总结 3 个最关键的备战点。')">
+                    <div class="preset-label">🎤 字节 AI Agent 一面备战</div>
+                    <div class="preset-hint">跨 SKILL · 测试上下文使用</div>
+                </button>
+            </div>
+
+            <div class="actions" style="margin-top: 1rem;">
+                <button type="button" id="run-btn" onclick="runAgent()" {% if not tools_ready %}disabled{% endif %}>▶ 启动 Agent</button>
+                <button type="button" class="ghost" onclick="stopAgent()" id="stop-btn" style="display:none;">⏹ 停止</button>
+                <span id="status-display" class="muted"></span>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2>最近 Agent 运行</h2>
+                <span class="meta">{{ recent_runs|length }} / 8 条</span>
+            </div>
+            {% if recent_runs %}
+            <table class="recent-runs" style="width: 100%;">
+                <thead>
+                    <tr>
+                        <th>ID</th><th>Goal</th><th>状态</th><th>步数</th><th>评分</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in recent_runs %}
+                    <tr>
+                        <td><a href="/agent/runs/{{ r.id }}">#{{ r.id }}</a></td>
+                        <td>{{ r.goal|truncate(50) }}</td>
+                        <td>
+                            {% if r.status == 'ok' %}<span class="pill low">ok</span>
+                            {% elif r.status == 'error' %}<span class="pill high">err</span>
+                            {% else %}<span class="pill pending">{{ r.status }}</span>{% endif %}
+                        </td>
+                        <td>{{ r.iterations }}</td>
+                        <td>{{ "%.2f"|format(r.critic_score) if r.critic_score is not none else '—' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty">还没有 agent run — 点上面 ▶ 跑一次试试</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- ──────────── 右侧：实时事件流 ──────────── -->
+    <div>
+        <div class="card">
+            <div class="card-header">
+                <h2>事件流 (live)</h2>
+                <span id="live-status" class="meta">等待启动…</span>
+            </div>
+            <div id="stream-panel" class="stream-panel">
+                <div class="empty">
+                    点左侧 ▶ 后, 模型每一步思考和工具调用都会实时出现在这里。
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let currentEventSource = null;
+
+    function setGoal(text) {
+        document.getElementById('goal-input').value = text;
+    }
+
+    function fmtTs(iso) {
+        try {
+            const d = new Date(iso);
+            return d.toTimeString().slice(0, 8);
+        } catch { return ''; }
+    }
+
+    function escapeHtml(s) {
+        if (s == null) return '';
+        return String(s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function renderEvent(ev) {
+        const panel = document.getElementById('stream-panel');
+        if (panel.querySelector('.empty')) panel.innerHTML = '';
+
+        const div = document.createElement('div');
+        div.className = `ev ${ev.kind}`;
+
+        let bodyHtml = '';
+        switch (ev.kind) {
+            case 'state_snapshot':
+                bodyHtml = `<div class="ev-body">${escapeHtml(ev.snapshot)}</div>`;
+                break;
+            case 'thinking':
+                if (ev.text) {
+                    bodyHtml = `<div class="ev-body">${escapeHtml(ev.text)}</div>`;
+                }
+                if (ev.will_call_tools && ev.tool_call_names && ev.tool_call_names.length) {
+                    bodyHtml += `<div class="ev-body" style="color:var(--text-muted);font-size:0.75rem;margin-top:0.375rem;">→ 准备调: ${ev.tool_call_names.map(escapeHtml).join(', ')}</div>`;
+                }
+                if (!bodyHtml) bodyHtml = `<div class="ev-body" style="color:var(--text-muted);">(模型直接进入工具调用, 无 preamble)</div>`;
+                break;
+            case 'tool_call':
+                bodyHtml = `<div class="ev-body"><code>${escapeHtml(ev.name)}</code>(<span style="color:var(--text-muted);">${escapeHtml(JSON.stringify(ev.arguments).slice(0, 200))}</span>)</div>`;
+                break;
+            case 'tool_result':
+                bodyHtml = `<div class="ev-body" title="完整 ${ev.result_full_len} 字, 这里只显示前 800 字">${escapeHtml(ev.result_preview)}</div>`;
+                break;
+            case 'critique':
+                bodyHtml = `<div class="ev-body"><strong>critic 评分: ${ev.score != null ? ev.score.toFixed(2) : '—'}</strong><br>${escapeHtml(ev.notes || '(no notes)')}</div>`;
+                break;
+            case 'final':
+                bodyHtml = `<div class="ev-body">${escapeHtml(ev.text)}</div>`;
+                break;
+            case 'error':
+                bodyHtml = `<div class="ev-body">⚠ ${escapeHtml(ev.message)}</div>`;
+                break;
+            case '_done':
+                if (ev.error) {
+                    bodyHtml = `<div class="ev-body">连接结束 · 出错: ${escapeHtml(ev.error)}</div>`;
+                } else {
+                    const score = ev.critic_score != null ? `, critic ${ev.critic_score.toFixed(2)}` : '';
+                    bodyHtml = `<div class="ev-body">✓ Agent 收工 · run#${ev.run_id} · ${ev.iterations} 步 · ${(ev.latency_ms/1000).toFixed(1)}s${score}<br><a href="/agent/runs/${ev.run_id}">查看完整 trajectory →</a></div>`;
+                }
+                break;
+            default:
+                bodyHtml = `<div class="ev-body">${escapeHtml(JSON.stringify(ev))}</div>`;
+        }
+
+        div.innerHTML = `
+            <div class="ev-header">
+                <span>${ev.kind}</span>
+                <span class="ts">${fmtTs(ev.at)}</span>
+            </div>
+            ${bodyHtml}
+        `;
+        panel.appendChild(div);
+        panel.scrollTop = panel.scrollHeight;
+    }
+
+    function runAgent() {
+        const goal = document.getElementById('goal-input').value.trim();
+        if (!goal) {
+            alert('先输入或选一个 goal');
+            return;
+        }
+        if (currentEventSource) {
+            currentEventSource.close();
+        }
+
+        // Reset UI
+        document.getElementById('stream-panel').innerHTML = '';
+        document.getElementById('run-btn').disabled = true;
+        document.getElementById('stop-btn').style.display = 'inline-flex';
+        const liveStatus = document.getElementById('live-status');
+        liveStatus.innerHTML = '<span class="running-indicator"><span class="dot"></span>agent 跑中…</span>';
+
+        const url = `/api/agent/stream?goal=${encodeURIComponent(goal)}&trigger_kind=user_button`;
+        currentEventSource = new EventSource(url);
+
+        currentEventSource.onmessage = (e) => {
+            try {
+                const ev = JSON.parse(e.data);
+                renderEvent(ev);
+                if (ev.kind === '_done') {
+                    finishUI();
+                }
+            } catch (err) {
+                console.error('parse error', err, e.data);
+            }
+        };
+
+        currentEventSource.onerror = (e) => {
+            // EventSource auto-reconnects on error; we close it here to avoid that
+            console.warn('SSE error, closing', e);
+            renderEvent({kind: 'error', at: new Date().toISOString(), message: '连接中断'});
+            currentEventSource.close();
+            finishUI();
+        };
+    }
+
+    function stopAgent() {
+        if (currentEventSource) {
+            currentEventSource.close();
+            currentEventSource = null;
+        }
+        finishUI();
+    }
+
+    function finishUI() {
+        document.getElementById('run-btn').disabled = false;
+        document.getElementById('stop-btn').style.display = 'none';
+        document.getElementById('live-status').innerHTML = '<span class="meta">已完成</span>';
+    }
+</script>
+
+{% endblock %}

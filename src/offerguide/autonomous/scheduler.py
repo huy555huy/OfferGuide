@@ -239,31 +239,57 @@ class AutonomousScheduler:
         self.shutdown()
 
 
-# ── Default scheduler factory ──────────────────────────────────────
+# ── W13.2: agent-wake scheduler ────────────────────────────────────
+# The W4-W12 architecture registered 7 hardcoded daemons (discover at 06:30,
+# enrich at 06:45, classify at 07:00...). Each had a fixed schedule + did its
+# work blindly regardless of system state.
+#
+# W13.2 replaces that with ONE job: ``wake_agent``. It fires periodically
+# (default: every 4 hours from 08:00 to 22:00) and runs the central AgentLoop
+# with a "巡检" goal. The agent reads the snapshot (jobs queue, applications,
+# user_facts, recent runs) and decides which maintenance tools to call.
+#
+# This is the architectural difference between "cron-driven" and "agent-driven":
+# the agent SEES STATE before deciding. Cron sees nothing — it just runs.
 
 
-def build_default_scheduler(
+_AGENT_WAKE_GOAL = """你被定时唤醒。当下时刻不一定有事可做。
+
+先看 snapshot 想这两件事:
+- 用户此刻可能在干啥 / 在意啥? (看时间、用户活跃度、user_facts 里最近变化)
+- 系统里有没有真值得现在处理的事? (不是"数字 > 0", 是"再不处理用户会损失")
+
+然后做你判断该做的, **包括"什么也不做"**。
+
+如果你决定动手, 给 final 时说清楚:
+- 做了啥 + 它对用户有什么实际价值
+- 跳过了啥 + 为啥跳过 (说出你的判断, 不是"今天没必要")
+
+如果你决定 lay low, final 写一句:
+- 当前状态简评 (用户能一眼看懂)
+- 为什么现在不动 (节奏 / 优先级 / 等待信号)
+
+记住: 一次"什么也不做但判断准确"的唤醒, 比一次"忙忙叨叨调 5 个工具但没价值"的唤醒, critic 评分会高得多。
+"""
+
+
+def build_agent_wake_scheduler(
     *,
     settings: Settings | None = None,
+    cron_kwargs: dict[str, Any] | None = None,
 ) -> AutonomousScheduler:
-    """Build a scheduler with the 4 default jobs registered:
+    """Build a scheduler with ONE job: wake the W13 central agent loop.
 
-    - discover_jobs       (daily 06:30) — spider sweep + auto-eval
-    - silence_check       (daily 09:00) — tracker sweep
-    - corpus_refresh      (weekly Mon 08:00) — agentic 面经
-    - brief_update        (daily 23:00, after the day's events settled)
+    The agent decides what maintenance to do; we just provide the heartbeat.
+
+    ``cron_kwargs`` overrides the default trigger (every 4 hours, 08-22).
+    Pass e.g. ``{'hour': '*/2'}`` to run every 2 hours instead.
     """
+    from ..agent.loop import AgentLoop
     from ..agentic.search import build_default_search
     from ..profile import load_resume_pdf
     from ..skills import SkillRuntime, discover_skills
     from ..ui.notify import make_notifier
-    from .jobs.brief_update import BRIEF_UPDATE_JOB
-    from .jobs.corpus_classify import CORPUS_CLASSIFY_JOB
-    from .jobs.corpus_refresh import CORPUS_REFRESH_JOB
-    from .jobs.discover_jobs import DISCOVER_JOBS_JOB
-    from .jobs.extract_facts import EXTRACT_FACTS_JOB
-    from .jobs.jd_enrich import JD_ENRICH_JOB
-    from .jobs.silence_check import SILENCE_CHECK_JOB
 
     settings = settings or Settings.from_env()
     store = Store(settings.db_path)
@@ -281,17 +307,15 @@ def build_default_scheduler(
     try:
         search = build_default_search()
     except Exception as e:
-        log.warning("search backend init failed; corpus_refresh will skip: %s", e)
+        log.warning("search backend init failed: %s", e)
 
-    # Discover SKILLs + load resume so discover_jobs can auto-eval.
-    # Each is optional — discover_jobs degrades to "ingest only" if missing.
     from pathlib import Path
     skills_root = Path(__file__).parent.parent / "skills"
     skills = []
     try:
         skills = discover_skills(skills_root)
     except Exception as e:
-        log.warning("skill discovery failed; auto-eval disabled: %s", e)
+        log.warning("skill discovery failed: %s", e)
 
     runtime = None
     if llm is not None:
@@ -302,25 +326,71 @@ def build_default_scheduler(
         try:
             profile = load_resume_pdf(settings.resume_pdf)
         except Exception as e:
-            log.warning("resume load failed; auto-eval disabled: %s", e)
+            log.warning("resume load failed: %s", e)
+
+    master_resume = profile.raw_resume_text if profile else None
+    notifier = make_notifier(settings)
 
     ctx = JobContext(
-        settings=settings,
-        store=store,
-        llm=llm,
-        search=search,
-        notifier=make_notifier(settings),
-        runtime=runtime,
-        skills=skills,
-        user_profile_text=profile.raw_resume_text if profile else None,
+        settings=settings, store=store, llm=llm,
+        search=search, notifier=notifier,
+        runtime=runtime, skills=skills,
+        user_profile_text=master_resume,
+    )
+
+    def _wake_agent_job(_jc: JobContext) -> dict[str, Any]:
+        """The single job: wake the central agent + let it decide what to do."""
+        if llm is None:
+            return {"skipped": "no LLM configured"}
+        if runtime is None:
+            return {"skipped": "no SkillRuntime"}
+
+        agent = AgentLoop(
+            llm=llm, runtime=runtime, store=store,
+            skills=skills, master_resume_text=master_resume,
+            max_iterations=8, critic_enabled=True,
+        )
+        result = agent.run(
+            goal=_AGENT_WAKE_GOAL,
+            trigger_kind="cron_wake",
+        )
+        return {
+            "agent_run_id": result.run_id,
+            "iterations": result.iterations,
+            "critic_score": result.critic_score,
+            "latency_s": round(result.latency_ms / 1000.0, 1),
+            "final": (result.final_answer or "")[:300],
+        }
+
+    cron_kwargs = cron_kwargs or {"hour": "8-22/4"}  # 08:00, 12:00, 16:00, 20:00
+    wake_job = JobSpec(
+        name="wake_agent",
+        func=_wake_agent_job,
+        trigger="cron",
+        trigger_kwargs=cron_kwargs,
+        misfire_grace_time_s=600,  # 10 min grace if laptop was sleeping
+        max_instances=1,
     )
 
     sched = AutonomousScheduler(ctx)
-    sched.add(EXTRACT_FACTS_JOB)
-    sched.add(DISCOVER_JOBS_JOB)
-    sched.add(JD_ENRICH_JOB)
-    sched.add(CORPUS_CLASSIFY_JOB)
-    sched.add(SILENCE_CHECK_JOB)
-    sched.add(CORPUS_REFRESH_JOB)
-    sched.add(BRIEF_UPDATE_JOB)
+    sched.add(wake_job)
     return sched
+
+
+# ── Backward-compat alias (deprecated) ────────────────────────────
+
+
+def build_default_scheduler(
+    *,
+    settings: Settings | None = None,
+) -> AutonomousScheduler:
+    """W13.2 redirect: returns the agent-wake scheduler.
+
+    The old 7-daemon design has been retired. Existing callers that
+    expected ``build_default_scheduler`` get the new architecture.
+    """
+    log.info(
+        "build_default_scheduler is deprecated since W13.2; "
+        "use build_agent_wake_scheduler() directly"
+    )
+    return build_agent_wake_scheduler(settings=settings)

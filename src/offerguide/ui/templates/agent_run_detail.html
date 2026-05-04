@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Agent run #{{ run_id }}{% endblock %}
+{% block content %}
+
+<style>
+    .traj-event {
+        margin-bottom: 0.625rem;
+        padding: 0.625rem 0.75rem;
+        background: var(--bg-elev);
+        border: 1px solid var(--border-soft);
+        border-left: 3px solid var(--text-muted);
+        border-radius: var(--radius-sm);
+    }
+    .traj-event.thinking { border-left-color: var(--primary); }
+    .traj-event.tool_call { border-left-color: var(--warning); }
+    .traj-event.tool_result { border-left-color: var(--success); }
+    .traj-event.critique { border-left-color: #7e22ce; }
+    .traj-event.final { border-left-color: var(--success); background: var(--success-soft); }
+    .traj-event.error { border-left-color: var(--danger); background: var(--danger-soft); }
+    .traj-event .head {
+        display: flex; gap: 0.5rem; align-items: center;
+        font-size: 0.7rem; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;
+        margin-bottom: 0.375rem;
+    }
+    .traj-event .head .ts { margin-left: auto; font-family: var(--font-mono); color: var(--text-dim); }
+    .traj-event .body { font-size: 0.85rem; white-space: pre-wrap; word-break: break-word; }
+    .traj-event .body pre {
+        background: var(--bg-subtle); padding: 0.5rem;
+        border-radius: var(--radius-sm); margin: 0.25rem 0;
+        font-size: 0.75rem; max-height: 320px; overflow-y: auto;
+    }
+</style>
+
+<div class="page-title">
+    <div>
+        <h1>Agent run #{{ run_id }}</h1>
+        <p>
+            trigger=<code>{{ trigger_kind }}</code> ·
+            status=<strong>{{ status }}</strong> ·
+            {{ iterations }} 次迭代 ·
+            {{ latency_ms or 0 }}ms ·
+            critic={{ "%.2f"|format(critic_score) if critic_score is not none else "—" }}
+        </p>
+    </div>
+    <a href="/agent" class="btn ghost">← 回到 Agent 主页</a>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>Goal</h2>
+    </div>
+    <div style="white-space: pre-wrap;">{{ goal }}</div>
+</div>
+
+{% if final_answer %}
+<div class="card">
+    <div class="card-header"><h2>最终回复</h2></div>
+    <div style="white-space: pre-wrap; font-size: 0.95rem; line-height: 1.6;">{{ final_answer }}</div>
+</div>
+{% endif %}
+
+{% if error_text %}
+<div class="card">
+    <div class="card-header"><h2>错误</h2></div>
+    <div class="error">{{ error_text }}</div>
+</div>
+{% endif %}
+
+{% if critic_notes %}
+<div class="card">
+    <div class="card-header"><h2>Critic 评价</h2></div>
+    <div>{{ critic_notes }}</div>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-header">
+        <h2>Trajectory ({{ trajectory|length }} 个事件)</h2>
+    </div>
+    {% if trajectory %}
+    {% for ev in trajectory %}
+    <div class="traj-event {{ ev.kind }}">
+        <div class="head">
+            <span>{{ ev.kind }}</span>
+            <span class="ts">{{ ev.at }}</span>
+        </div>
+        <div class="body">
+            {% if ev.kind == 'state_snapshot' %}
+                <pre>{{ ev.payload.snapshot }}</pre>
+            {% elif ev.kind == 'thinking' %}
+                {{ ev.payload.text or '(no preamble)' }}
+                {% if ev.payload.will_call_tools %}
+                    <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.375rem;">
+                        → 准备调: {{ ev.payload.tool_call_names | join(', ') }}
+                    </div>
+                {% endif %}
+            {% elif ev.kind == 'tool_call' %}
+                <code>{{ ev.payload.name }}</code>(<span style="color:var(--text-muted);">{{ ev.payload.arguments }}</span>)
+            {% elif ev.kind == 'tool_result' %}
+                <pre>{{ ev.payload.result_preview }}</pre>
+                <div style="font-size:0.72rem;color:var(--text-muted);">完整 {{ ev.payload.result_full_len }} 字</div>
+            {% elif ev.kind == 'critique' %}
+                <strong>score:</strong> {{ ev.payload.score }}<br>
+                {{ ev.payload.notes or '' }}
+            {% elif ev.kind == 'final' %}
+                {{ ev.payload.text }}
+            {% elif ev.kind == 'error' %}
+                ⚠ {{ ev.payload.message }}
+            {% else %}
+                <pre>{{ ev.payload }}</pre>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="empty">trajectory 为空（很可能是早期错误，看上面 error 字段）</div>
+    {% endif %}
+</div>
+
+{% endblock %}

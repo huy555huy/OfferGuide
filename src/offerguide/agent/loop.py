@@ -1,0 +1,1253 @@
+"""W13 — central agent loop. **Model in the driver's seat.**
+
+This is the new execution paradigm for OfferGuide: instead of cron jobs
+calling individual SKILLs in hardcoded order (the W4 LangGraph pattern in
+``agent/graph.py``), one model sits in the middle, reads the system state,
+decides which SKILL to call (via OpenAI tool-calling), looks at the result,
+self-critiques, and decides whether to keep going or stop.
+
+Why this matters (per the W13 design conversation):
+- The 11 SKILLs were 11 isolated islands — daemon called them on cron, no
+  cross-SKILL learning. The model only saw individual prompts.
+- Now the model sees the whole state (jobs / applications / user_facts /
+  recent runs) and gets to **decide** what's worth doing — not Python.
+- This is the difference between "model is a JSON formatter" and "model
+  has agency." Per Anthropic's long-running-agent guide, this single-agent
+  loop is the recommended starting topology (multi-agent is unproven).
+
+Architecture:
+    trigger (cron / user button / event)
+        │
+        ▼
+    AgentLoop.run(goal)
+        │
+        ├─── 1. snapshot_state()  → read jobs/apps/facts/recent_runs
+        │                         → persist as event 'state_snapshot'
+        ├─── 2. build_messages(goal, snapshot, tool_schemas)
+        │
+        ├─── 3. iteration loop (≤ max_iterations):
+        │       │
+        │       ├── llm.chat_with_tools(messages, tools)
+        │       │
+        │       ├── if response.tool_calls:
+        │       │     for each tool_call:
+        │       │       emit 'thinking' (the assistant's preamble text)
+        │       │       emit 'tool_call' (name + args)
+        │       │       run SkillRuntime.invoke(spec, args)
+        │       │       emit 'tool_result' (preview)
+        │       │     append assistant + tool_result messages, loop
+        │       │
+        │       └── else:
+        │             emit 'final' — model decided no more tools needed
+        │             break
+        │
+        ├─── 4. self_critique(goal, final_answer, trajectory)
+        │       → critic LLM scores trajectory 0..1 + writes notes
+        │
+        └─── 5. persist agent_runs row + return AgentRunResult
+
+Streaming UX:
+    The ``on_event`` callback fires for every event the loop produces.
+    The /agent/run UI route uses Server-Sent Events to forward each event
+    to the browser in real time, so the user sees the model think and act.
+
+Tool schemas:
+    Each SkillSpec → one OpenAI function tool. Inputs are typed as strings
+    (we don't have richer type info in SKILL.md frontmatter today). The
+    description is the SKILL's `description` field. The body of the SKILL
+    runs only when the model calls the tool; the loop never injects SKILL
+    bodies into its own system prompt.
+
+Non-goals (deliberately):
+- No streaming of token-level model output yet (event-level streaming is
+  enough for "agent is thinking" UX). Add later if needed.
+- No multi-agent / sub-agent personas. Anthropic's own guide says it's
+  unproven; we're starting single-agent.
+- No automatic GEPA from agent_runs.critic_score yet — separate W14 task.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from ..llm import LLMClient, LLMError, ToolCall
+from ..llm.client import _parse_tool_arguments  # robust JSON parser for ccvibe quirks
+from ..memory import Store
+from ..skills import SkillRuntime, SkillSpec
+
+log = logging.getLogger(__name__)
+
+EventCallback = Callable[[Mapping[str, Any]], None]
+
+# Cap the number of LLM <-> tool round-trips. The model can hit ``stop`` on
+# its own and usually does in 1-3 iterations; this is the safety net.
+DEFAULT_MAX_ITERATIONS = 8
+
+# Cap how much of each tool result we feed back to the model. Tool outputs
+# can be 10kb+ markdown blobs (tailor_resume returns the whole rewrite);
+# truncating prevents context bloat for the next decision.
+TOOL_RESULT_CONTEXT_CAP = 6000
+
+# Truncation cap when we surface tool result PREVIEWs to the UI (events are
+# stored verbatim in trajectory_json so nothing is lost).
+TOOL_RESULT_UI_PREVIEW_CAP = 800
+
+
+SYSTEM_PROMPT = """你是用户的求职 copilot。
+关于用户的具体信息（姓名、学校、专业、目标方向、过往项目细节、偏好）都在 user_facts 里——
+那些事实在每次唤醒时会自动注入到你的上下文上方，你直接看就能知道。
+**这个 prompt 里不写任何用户身份信息**，因为如果哪天换了用户、user_facts 内容变了，
+你应该照样能 work。
+
+# 你不是巡检员, 是 copilot
+
+一个真正懂用户的 copilot 大部分时候**不动**：
+- 用户没新需求, 系统没紧急事 → 给一句话现状, 收工不打扰
+- 用户有焦虑信号 (拒投了一堆 / 面试挂了) → 别推新岗位, 等等他
+- 用户即将面试 → 哪怕系统里 thin JDs 一堆, 优先准备面试不是去 enrich
+
+**忙不停 ≠ 好 agent**。多数唤醒应该是 0-1 个 tool call + 一段简短判断。
+只有当你看到真值得做的事 (比如某个 silent 14 天的字节申请该催了 / 用户标 ⭐ 的岗位还没 tailor)
+才动手。
+
+# 三个该问自己的问题
+
+每次唤醒, 先想 (不用说出来):
+1. **此刻用户最该 focus 啥？** 看时间 + 用户活跃度 + user_facts 里最近变化
+2. **系统里有"再不处理就过期"的事吗？** silent 14 天 / 面试日逼近 / 评分高但没 tailor
+3. **我能给用户留下什么有价值的痕迹？** 一份 tailored 简历 / 一个准确的判断, 而不是"调了 3 个工具"
+
+# 你能用的工具
+
+**Lookup（免费, 先用这些拿数据）**
+- `read_job(job_id)`: 返回完整 raw_text
+- `read_user_resume()`: 返回 master 简历全文
+
+**Action（元认知）**
+- `detect_evolution_candidates()`, `evolve_skill(name, n)`, `run_gray_release()`
+
+**Maintenance（系统巡检, 由你判断要不要做）**
+- `discover_new_jobs`, `enrich_thin_jds`, `classify_corpus`,
+  `check_silent_applications`, `refresh_company_corpus`, `extract_facts_from_runs`,
+  `regenerate_company_brief`
+
+**SKILL（实质工作）**
+11 个 (score_match / analyze_gaps / tailor_resume / mock_interview / prepare_interview / ...)
+inputs 通常是完整文本 — 调之前先 lookup。
+
+# 一些必须避免的坏行为
+
+1. **看到数字 > 0 就反射式调对应工具** ← 这是僵硬的 cron 模式
+   snapshot 上 "thin JDs: 4" 不代表你必须立即 enrich。先想用户此刻在意啥。
+2. **重复调刚刚返回的 lookup**: read_job(1) 已经返回过 → 数据在历史里, 直接用别再调一次
+3. **同一工具失败 2 次还是同样错** → 停下来 final 报错, 别无脑重试
+4. **不要为了"看起来在做事"而强行调 SKILL** → 没事可做就直接 final
+
+# 输出
+
+每次回复要么是 tool_call 要么是 final, 别混合。
+- tool_call 时, content 写一句**判断句**: "我看到 X 让我想到 Y, 所以做 Z"
+- final 时, content 写人话总结: 看到了什么 / 做了 (或没做) 什么 / 给用户的建议
+"""
+
+
+CRITIC_PROMPT = """你是用户求职 copilot 的 critic。
+
+# 你不是打分的, 是看一次 agent 行动对用户实际有没有帮助
+
+旧版本的 critic 用 5 个维度 (goal_aligned / tool_choice / iteration_efficiency / transparency / honesty)
+打分。问题: 一个 agent 可以"维度全满分"但**对用户毫无价值** ——
+比如完美执行了"巡检 maintenance" 但当时用户根本不需要巡检。
+
+你看这一次 agent run 的 trajectory + final answer, 问自己:
+
+1. **这次行动给用户留下了什么真实价值？**
+   - 一份 tailored 简历? 一个准确的 score? 一个让用户能 act 的判断?
+   - 还是只是"我跑了 3 个工具" 这种 process 上的忙碌?
+
+2. **agent 有没有正确判断"此刻该不该动"？**
+   - 用户没新需求 + 系统不紧急 → 该 lay low
+   - 反过来, 紧急的事 (silent 14 天 / 面试逼近) 没处理 → 失职
+   - 把这两种判断错了, 就是僵硬
+
+3. **agent 有没有为了"看起来在做事"硬调工具？**
+   - 看到数字 > 0 就反射式 call 对应工具 = cron 模式
+   - 应该是先想"这个数字代表用户的什么需求", 再决定动不动
+
+4. **final answer 是不是诚实 + 用户能 act？**
+   - 别夸大 "完成 3 项任务" 当其中 1 项失败了
+   - 给用户的建议要可执行, 不是空话
+
+# 输出 (严格 JSON, 不要 markdown 代码块)
+
+{
+  "value_delivered": <0..1>, // 给用户的真实价值 0=没有 1=显著
+  "judgment_quality": <0..1>, // 该不该动的判断准不准
+  "honesty": <0..1>, // final 是否如实反映, 不夸大不编造
+  "overall": <0..1>, // 综合 (跟上面 3 个不必算术平均, 你自己加权)
+  "notes": <一句话点评, 必须包含"对用户的实际帮助"判断, 100 字内>,
+  "improvement_hint": <一句话: 下次类似情境怎么做更好, 100 字内>
+}
+"""
+
+
+# ───────────────────────── lookup tools (system) ─────────────────────────
+#
+# These are agent-loop-internal tools (NOT SKILLs). They're free (no LLM
+# call) and let the model fetch full data from the DB on demand. Without
+# these, the model only sees the snapshot's job summaries and can't pass
+# `job_text` / `user_profile` strings to the SKILLs that need them.
+# Discovered necessary in the W13 first dogfood — the agent caught the
+# bug perfectly via critic_score=0.0, "完全没从错误中学习".
+
+LOOKUP_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_job",
+            "description": (
+                "读取某个 job 的完整信息（raw_text 全文 + company / title / location / source）。"
+                "在调任何需要 job_text 字符串参数的 SKILL 之前, 先用这个工具拿到 job_text。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "integer",
+                        "description": "jobs 表里的 id (snapshot 里以 'job#N' 形式列出)",
+                    },
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_user_resume",
+            "description": (
+                "读取用户的 master 简历全文（markdown）。在调 score_match / analyze_gaps / "
+                "tailor_resume 等需要 user_profile / user_resume / master_resume "
+                "字符串参数的 SKILL 之前, 用这个工具拿全文。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+# ─── Action tools (W13.1) — write-side helpers, separate from lookups ───
+# These DO real work (call LLMs, write DB rows) but aren't SKILLs (no
+# SKILL.md, not in skill_runs, not in critic loop). Use them for
+# meta-cognitive operations the agent should be able to drive.
+
+ACTION_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "evolve_skill",
+            "description": (
+                "为表现欠佳的 SKILL 生成 N 个候选 prompt 变种 (W13.1 evolution)。"
+                "调用前: 先用 detect_evolution_candidates 看哪些 SKILL 该进化 "
+                "(or just check the snapshot's '该进化的 SKILL' 段)。"
+                "执行: 把当前 SKILL prompt + 最近表现欠佳的样本喂给一个 meta-LLM, "
+                "让它生成改进版本, 持久化到 skill_variants 表 (status=shadow)。"
+                "灰度发布逻辑会另外把 shadow 变种 promote 到 canary, 这里只生成不放量。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "要进化的 SKILL 名 (e.g. 'score_match')",
+                    },
+                    "num_variants": {
+                        "type": "integer",
+                        "description": "生成多少个候选 (推荐 3, 不超过 5)",
+                    },
+                },
+                "required": ["skill_name"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "detect_evolution_candidates",
+            "description": (
+                "查看当前哪些 SKILL 满足进化条件 (信号数 >= 10 + fitness < 0.55 + 距上次进化 > 7 天)。"
+                "用于 agent 决定要不要调 evolve_skill 时先看一眼有哪些 candidate。返回简洁列表。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_gray_release",
+            "description": (
+                "推进 SKILL 进化的灰度发布状态机一步: shadow → canary → live (或 failed)。"
+                "对每个 SKILL 最多做一个动作: 把 shadow promote 到 canary 20%, "
+                "或者 canary 收够 8 个 signal 后跟 live 比 fitness 决定 promote/fail。"
+                "agent 通常每天调一次 (一次完整巡检)。dry_run=True 只看 plan 不真改。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "True = 只 plan, 不真动 skill_variants 表。默认 False。",
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+LOOKUP_TOOL_NAMES = {sc["function"]["name"] for sc in LOOKUP_TOOL_SCHEMAS}
+ACTION_TOOL_NAMES = {sc["function"]["name"] for sc in ACTION_TOOL_SCHEMAS}
+
+# W13.2 maintenance tools (the 7 daemon jobs as agent-callable actions).
+# These DO real work (spider, classify, web search) — agent decides which to
+# fire on each wake based on the snapshot. Replaces hardcoded cron schedule.
+from .maintenance import MAINTENANCE_TOOL_NAMES, MAINTENANCE_TOOL_SCHEMAS  # noqa: E402
+
+SYSTEM_TOOL_NAMES = LOOKUP_TOOL_NAMES | ACTION_TOOL_NAMES | MAINTENANCE_TOOL_NAMES
+
+
+# ───────────────────────── tool schema generation ─────────────────────────
+
+
+def build_tool_schemas(skills: Iterable[SkillSpec]) -> list[dict[str, Any]]:
+    """Convert a set of SkillSpecs into OpenAI function-tool schemas.
+
+    Each SKILL becomes one function. Inputs are all typed as strings —
+    SKILL.md doesn't carry per-input types today, and OpenAI's tool spec
+    accepts JSON-schema for parameters but we keep it simple: the model
+    is good enough to figure out the right value from the input name +
+    the tool description (which carries the SKILL's full description).
+
+    Returns a list ready to pass as ``tools=`` to ``LLMClient.chat_with_tools``.
+    """
+    tools: list[dict[str, Any]] = []
+    for spec in skills:
+        # Even SKILLs with empty `inputs` get a valid (empty-properties) schema,
+        # so the model can call them with no args.
+        properties: dict[str, dict[str, str]] = {}
+        for input_name in spec.inputs:
+            properties[input_name] = {
+                "type": "string",
+                "description": _input_hint(spec, input_name),
+            }
+        # OpenAI caps function descriptions; trim to keep request lean.
+        description = (spec.description or spec.name)[:1024]
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": spec.name,
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": list(spec.inputs),
+                    "additionalProperties": False,
+                },
+            },
+        })
+    return tools
+
+
+def _input_hint(spec: SkillSpec, input_name: str) -> str:
+    """Best-effort one-liner help for an input parameter.
+
+    SKILL.md doesn't carry per-input docstrings so we use heuristics on the
+    common input names used across the SKILL pack.
+    """
+    common = {
+        "company": "目标公司中文名 (字节/腾讯/小红书/...)",
+        "job_text": "JD 全文 (>= 200 字)",
+        "user_profile": "用户画像或简历 markdown 文本",
+        "user_resume": "用户当前 master 简历 markdown 文本",
+        "master_resume": "用户主简历 markdown 全文 (ground truth, 不能编造)",
+        "role_focus": "目标岗位类型, e.g. 'AI Agent 后端' / '推荐算法'",
+        "role_hint": "岗位简称, e.g. 'AI 算法'",
+        "role": "岗位名称",
+        "past_experiences": "已渲染好的过去面经片段",
+        "successful_profile_json": "successful_profile SKILL 的输出 JSON (可空)",
+        "interview_questions": "已问过的面试题 list",
+        "user_answer": "用户的回答文本",
+        "candidate_jobs_json": "候选 jobs 的 list (id+title+company)",
+    }
+    if input_name in common:
+        return common[input_name]
+    return f"参数 {input_name}, 见 SKILL '{spec.name}' 的 description"
+
+
+# ───────────────────────── state snapshot reader ─────────────────────────
+
+
+def snapshot_state(
+    store: Store,
+    *,
+    max_jobs: int = 8,
+    max_apps: int = 6,
+    max_facts: int = 8,
+    max_runs: int = 5,
+) -> str:
+    """Render the current OfferGuide DB state as a single prompt block.
+
+    The agent reads this once per ``run()`` and uses it to decide what to
+    do. Keep it terse — the model has a finite context window. We surface:
+
+    - **Recent jobs** that have raw_text >= 200 chars (eligible for SKILLs)
+      with their score (if scored) and whether an application exists
+    - **Recent applications** with current status (last 14 days)
+    - **Recent SKILL runs** (last N) with skill_name + latency + success
+    - **Top user_facts** by used_count (most-relied-on memory items)
+
+    Empty sections are omitted so the prompt scales down on a fresh DB.
+    """
+    parts: list[str] = ["# 当前系统状态 (Snapshot)"]
+
+    # ---- jobs (top N most recent with raw_text >= 200) ----
+    try:
+        with store.connect() as conn:
+            jobs = conn.execute(
+                "SELECT id, company, title, location, source, "
+                "       length(raw_text) AS rtl, fetched_at "
+                "FROM jobs WHERE length(raw_text) >= 200 "
+                "ORDER BY fetched_at DESC LIMIT ?",
+                (max_jobs,),
+            ).fetchall()
+    except Exception as e:
+        log.warning("snapshot_state: jobs read failed: %s", e)
+        jobs = []
+    if jobs:
+        parts.append(f"\n## 最近 {len(jobs)} 个待处理 jobs (raw_text>=200)")
+        # Map each job_id -> (latest_score_prob, has_app)
+        job_ids = [j[0] for j in jobs]
+        score_map: dict[int, float | None] = {jid: None for jid in job_ids}
+        app_map: dict[int, str | None] = {jid: None for jid in job_ids}
+        try:
+            with store.connect() as conn:
+                # latest score_match run per job — match input_json by job_id-tagged path
+                # (simple proxy: any skill_run that references this job_id verbatim)
+                # We just check applications table for has_app status:
+                placeholders = ",".join("?" * len(job_ids))
+                if job_ids:
+                    rows = conn.execute(
+                        f"SELECT job_id, status FROM applications "
+                        f"WHERE job_id IN ({placeholders}) "
+                        f"ORDER BY last_status_change DESC",
+                        job_ids,
+                    ).fetchall()
+                    for jid, status in rows:
+                        if app_map.get(jid) is None:
+                            app_map[jid] = status
+        except Exception:
+            pass
+        for jid, company, title, loc, source, rtl, _ts in jobs:
+            app_marker = f" [APP={app_map[jid]}]" if app_map.get(jid) else ""
+            parts.append(
+                f"- job#{jid} | {company or '?'} | {(title or '?')[:40]}"
+                f" | {loc or '?'} | src={source} | jd={rtl}字{app_marker}"
+            )
+
+    # ---- recent applications (last 14 days, regardless of status) ----
+    try:
+        with store.connect() as conn:
+            apps = conn.execute(
+                "SELECT a.id, a.job_id, a.status, j.company, j.title, "
+                "       a.last_status_change "
+                "FROM applications a LEFT JOIN jobs j ON j.id = a.job_id "
+                "WHERE a.last_status_change >= julianday('now') - 14 "
+                "ORDER BY a.last_status_change DESC LIMIT ?",
+                (max_apps,),
+            ).fetchall()
+    except Exception as e:
+        log.warning("snapshot_state: applications read failed: %s", e)
+        apps = []
+    if apps:
+        parts.append(f"\n## 近 14 天 applications ({len(apps)} 条)")
+        for aid, jid, status, company, title, _ts in apps:
+            parts.append(
+                f"- app#{aid} | job#{jid} | {company or '?'}"
+                f" | {(title or '?')[:30]} | status={status}"
+            )
+
+    # ---- recent SKILL runs (last N) ----
+    try:
+        with store.connect() as conn:
+            runs = conn.execute(
+                "SELECT id, skill_name, skill_version, latency_ms, "
+                "       length(output_json) AS out_len, created_at "
+                "FROM skill_runs ORDER BY created_at DESC LIMIT ?",
+                (max_runs,),
+            ).fetchall()
+    except Exception as e:
+        log.warning("snapshot_state: skill_runs read failed: %s", e)
+        runs = []
+    if runs:
+        parts.append(f"\n## 最近 {len(runs)} 个 SKILL 运行")
+        for rid, name, ver, lat, out_len, _ts in runs:
+            parts.append(
+                f"- run#{rid} | {name} v{ver}"
+                f" | {lat or 0}ms | output {out_len}字"
+            )
+
+    # ---- top user_facts by used_count ----
+    try:
+        with store.connect() as conn:
+            facts = conn.execute(
+                "SELECT fact_text, kind, confidence, used_count "
+                "FROM user_facts "
+                "ORDER BY used_count DESC, confidence DESC LIMIT ?",
+                (max_facts,),
+            ).fetchall()
+    except Exception as e:
+        log.warning("snapshot_state: user_facts read failed: %s", e)
+        facts = []
+    if facts:
+        parts.append(f"\n## 高复用 user_facts (top {len(facts)})")
+        for fact, kind, conf, used in facts:
+            fact_short = fact[:140] + ("…" if len(fact) > 140 else "")
+            parts.append(f"- [{kind} conf={conf:.1f} used={used}] {fact_short}")
+
+    # ---- 系统观察 (事实, 不是规则) ----
+    # 早期版本这块叫"维护待办 hints", 每行带"→ 调 X 如果 > 0"——那是把决策树
+    # 写在 prompt 里, 模型只是执行 if-else, 不算 agent。现在改成纯事实陈述,
+    # 让 agent 自己判断这些事实意味着什么 / 此刻该不该处理。
+    try:
+        with store.connect() as conn:
+            thin_jds = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE length(raw_text) < 200"
+            ).fetchone()[0]
+            unclassified = conn.execute(
+                "SELECT COUNT(*) FROM interview_experiences "
+                "WHERE quality_classified_at IS NULL"
+            ).fetchone()[0]
+            silent_apps_7d = conn.execute(
+                "SELECT COUNT(DISTINCT a.id) FROM applications a "
+                "WHERE a.status NOT IN ('offer', 'rejected', 'withdrawn') "
+                "  AND a.last_status_change < julianday('now') - 7"
+            ).fetchone()[0]
+            silent_apps_14d = conn.execute(
+                "SELECT COUNT(DISTINCT a.id) FROM applications a "
+                "WHERE a.status NOT IN ('offer', 'rejected', 'withdrawn') "
+                "  AND a.last_status_change < julianday('now') - 14"
+            ).fetchone()[0]
+            today_discoveries = conn.execute(
+                "SELECT COUNT(*) FROM jobs "
+                "WHERE fetched_at >= julianday('now', '-1 day')"
+            ).fetchone()[0]
+            recent_runs_24h = conn.execute(
+                "SELECT COUNT(*) FROM skill_runs "
+                "WHERE created_at >= julianday('now') - 1"
+            ).fetchone()[0]
+            wakes_last_6h = conn.execute(
+                "SELECT COUNT(*) FROM agent_runs "
+                "WHERE trigger_kind = 'cron_wake' "
+                "  AND started_at >= julianday('now') - 0.25"
+            ).fetchone()[0]
+            user_actions_24h = conn.execute(
+                "SELECT COUNT(*) FROM agent_runs "
+                "WHERE trigger_kind IN ('user_button', 'manual') "
+                "  AND started_at >= julianday('now') - 1"
+            ).fetchone()[0]
+            interviews_within_7d = conn.execute(
+                "SELECT COUNT(*) FROM interviews "
+                "WHERE scheduled_at IS NOT NULL "
+                "  AND scheduled_at BETWEEN julianday('now') AND julianday('now') + 7"
+            ).fetchone()[0]
+    except Exception as e:
+        log.warning("snapshot_state: observations failed: %s", e)
+        thin_jds = unclassified = silent_apps_7d = silent_apps_14d = 0
+        today_discoveries = recent_runs_24h = wakes_last_6h = 0
+        user_actions_24h = interviews_within_7d = 0
+
+    # 时间情境 (周几 / 早晚) — 让 agent 知道现在是什么时间, 用户大概在干啥
+    from datetime import datetime as _dt
+    try:
+        from zoneinfo import ZoneInfo
+        now = _dt.now(ZoneInfo("Asia/Shanghai"))
+    except Exception:
+        now = _dt.now()
+    weekday_cn = "一二三四五六日"[now.weekday()]
+    time_of_day = (
+        "凌晨" if now.hour < 6 else
+        "早上" if now.hour < 12 else
+        "下午" if now.hour < 18 else "晚上"
+    )
+
+    parts.append("\n## 当下情境")
+    parts.append(f"- 现在: 周{weekday_cn} {time_of_day} {now.strftime('%H:%M')} (Asia/Shanghai)")
+    parts.append(f"- 用户最近 24h 主动发起 agent runs: {user_actions_24h} 次")
+    parts.append(f"- 近 6h cron_wake 已跑: {wakes_last_6h} 次")
+    if interviews_within_7d > 0:
+        parts.append(f"- ⚠ 未来 7 天内有 {interviews_within_7d} 个面试已排期")
+
+    parts.append("\n## 系统观察 (事实)")
+    parts.append(f"- jobs 中 raw_text < 200 字: {thin_jds} 个")
+    parts.append(f"- interview_experiences 未分类: {unclassified} 个")
+    if silent_apps_14d > 0:
+        parts.append(f"- 申请超 14 天未推进: {silent_apps_14d} 个 (非常旧, 多半已挂)")
+    if silent_apps_7d > silent_apps_14d:
+        parts.append(f"- 申请 7-14 天未推进: {silent_apps_7d - silent_apps_14d} 个")
+    parts.append(f"- 过去 24h 新入库 jobs: {today_discoveries} 个")
+    parts.append(f"- 过去 24h SKILL 调用: {recent_runs_24h} 次")
+
+    if len(parts) == 1:
+        parts.append("\n(数据库空 — 没有 jobs / applications / SKILL 运行 / facts)")
+
+    return "\n".join(parts)
+
+
+# ───────────────────────── data classes ─────────────────────────
+
+
+@dataclass
+class AgentEvent:
+    """One step in the agent's trajectory.
+
+    Persisted into agent_runs.trajectory_json as a JSON list. UI streams
+    these via SSE so user sees the agent think + act in real time.
+    """
+    kind: str
+    """One of: 'state_snapshot' | 'thinking' | 'tool_call' | 'tool_result'
+       | 'critique' | 'final' | 'error'"""
+
+    at: str
+    """ISO-8601 UTC timestamp."""
+
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AgentRunResult:
+    run_id: int | None
+    goal: str
+    trigger_kind: str
+    final_answer: str
+    events: list[AgentEvent]
+    iterations: int
+    cost_usd: float
+    latency_ms: int
+    critic_score: float | None = None
+    critic_notes: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "goal": self.goal,
+            "trigger_kind": self.trigger_kind,
+            "final_answer": self.final_answer,
+            "iterations": self.iterations,
+            "cost_usd": self.cost_usd,
+            "latency_ms": self.latency_ms,
+            "critic_score": self.critic_score,
+            "critic_notes": self.critic_notes,
+            "error": self.error,
+            "events": [asdict(e) for e in self.events],
+        }
+
+
+# ───────────────────────── the loop itself ─────────────────────────
+
+
+class AgentLoop:
+    """Central agent loop — model decides which SKILL to call, when to stop.
+
+    Stateless across runs; all persistence is via the injected ``store``.
+    """
+
+    def __init__(
+        self,
+        *,
+        llm: LLMClient,
+        runtime: SkillRuntime,
+        store: Store,
+        skills: Iterable[SkillSpec],
+        master_resume_text: str | None = None,
+        max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        critic_enabled: bool = True,
+        critic_model: str | None = None,
+    ) -> None:
+        self._llm = llm
+        self._runtime = runtime
+        self._store = store
+        self._skills: dict[str, SkillSpec] = {s.name: s for s in skills}
+        # Order: lookups first (cheap reads), then actions (write helpers like
+        # evolve_skill), then maintenance (W13.2: spider/classifier/etc), then
+        # SKILLs. Gentle bias: read before write, plan before invoke expensive
+        # SKILLs.
+        self._tool_schemas = (
+            LOOKUP_TOOL_SCHEMAS
+            + ACTION_TOOL_SCHEMAS
+            + MAINTENANCE_TOOL_SCHEMAS
+            + build_tool_schemas(self._skills.values())
+        )
+        self._master_resume_text = master_resume_text or ""
+        self._max_iter = max(1, int(max_iterations))
+        self._critic_enabled = bool(critic_enabled)
+        self._critic_model = critic_model
+
+    # -------- public API --------
+
+    def run(
+        self,
+        *,
+        goal: str,
+        trigger_kind: str = "manual",
+        on_event: EventCallback | None = None,
+    ) -> AgentRunResult:
+        """Execute one agent loop. Persists trajectory + result to agent_runs.
+
+        ``goal`` is the natural-language objective the model is given.
+        ``trigger_kind`` records who woke the agent (cron / user_button / ...).
+        ``on_event`` fires for every event — used by SSE streaming UI.
+        """
+        events: list[AgentEvent] = []
+        t0 = time.monotonic()
+        run_id = self._record_start(goal=goal, trigger_kind=trigger_kind)
+        # Track which SKILL invocations happened during this trajectory, so
+        # the critique step can write evolution_signals attributing the
+        # critic_score to the SKILLs that ran. Keyed by tool_call.id.
+        skill_invocations: dict[str, dict] = {}
+
+        def emit(kind: str, **payload: Any) -> AgentEvent:
+            ev = AgentEvent(
+                kind=kind,
+                at=datetime.now(timezone.utc).isoformat(),
+                payload=payload,
+            )
+            events.append(ev)
+            if on_event:
+                try:
+                    on_event({"kind": kind, "at": ev.at, **payload})
+                except Exception as e:  # never let the UI break the loop
+                    log.debug("on_event callback raised: %s", e)
+            return ev
+
+        # 1. State snapshot
+        try:
+            snapshot = snapshot_state(self._store)
+        except Exception as e:
+            emit("error", message=f"state snapshot failed: {e}")
+            return self._finalize(
+                run_id=run_id, goal=goal, trigger_kind=trigger_kind,
+                events=events, t0=t0, final_answer="(状态读取失败)",
+                error=str(e),
+            )
+        emit("state_snapshot", snapshot=snapshot)
+
+        # 2. Build initial messages
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": (
+                f"# 当前任务 (goal)\n{goal}\n\n"
+                f"{snapshot}\n\n"
+                f"开始决策。"
+            )},
+        ]
+
+        # 3. Iteration loop
+        final_answer = ""
+        final_iteration = 0
+        for iteration in range(self._max_iter):
+            final_iteration = iteration + 1
+            try:
+                resp = self._llm.chat_with_tools(
+                    messages=messages,
+                    tools=self._tool_schemas,
+                    temperature=0.4,
+                )
+            except LLMError as e:
+                emit("error", message=f"LLM call failed at iter {iteration}: {e}")
+                return self._finalize(
+                    run_id=run_id, goal=goal, trigger_kind=trigger_kind,
+                    events=events, t0=t0, iterations=final_iteration,
+                    final_answer=f"(LLM 调用失败: {e})", error=str(e),
+                )
+
+            # Always emit thinking even if empty — UI knows model spoke
+            emit(
+                "thinking",
+                text=resp.content or "",
+                iteration=iteration,
+                finish_reason=resp.finish_reason,
+                will_call_tools=bool(resp.tool_calls),
+                tool_call_names=[tc.name for tc in resp.tool_calls],
+            )
+
+            if not resp.tool_calls:
+                # Model decided: no more tools, this is the final answer
+                final_answer = resp.content or "(model returned empty content)"
+                emit("final", text=final_answer, iteration=iteration)
+                break
+
+            # Append the assistant message that announced the tool calls.
+            # Critical: re-serialize arguments from the parsed dict, NOT echo
+            # the raw string back. ccvibe's Claude proxy emits malformed
+            # concat-JSON like ``"{}{\"job_id\":1}"``; if we echo that back
+            # in the next request, the proxy sees its own bug and the
+            # multi-turn tool conversation breaks (model loops re-calling
+            # the same lookup tools because it can't see prior results).
+            # See W13 dogfood #4 root-cause investigation.
+            messages.append({
+                "role": "assistant",
+                "content": resp.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(
+                                tc.arguments, ensure_ascii=False,
+                            ),
+                        },
+                    }
+                    for tc in resp.tool_calls
+                ],
+            })
+
+            # Execute each tool sequentially
+            for tc in resp.tool_calls:
+                emit(
+                    "tool_call",
+                    call_id=tc.id,
+                    name=tc.name,
+                    arguments=tc.arguments,
+                    iteration=iteration,
+                )
+                tool_text = self._execute_tool(
+                    tc, skill_invocations=skill_invocations,
+                )
+                emit(
+                    "tool_result",
+                    call_id=tc.id,
+                    name=tc.name,
+                    result_preview=tool_text[:TOOL_RESULT_UI_PREVIEW_CAP],
+                    result_full_len=len(tool_text),
+                    iteration=iteration,
+                )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": tool_text[:TOOL_RESULT_CONTEXT_CAP],
+                })
+            # Loop back — let the model decide what to do next
+        else:
+            # Hit max_iter without a final answer
+            final_answer = (
+                f"(达到最大迭代数 {self._max_iter} 还未收敛 — agent 可能"
+                "在反复调工具或卡住, 看 trajectory 排查)"
+            )
+            emit("error", message=f"max_iter ({self._max_iter}) reached")
+
+        # 4. Self-critique
+        critic_score: float | None = None
+        critic_notes: str | None = None
+        if self._critic_enabled and final_answer:
+            try:
+                critic_score, critic_notes = self._self_critique(
+                    goal=goal,
+                    final_answer=final_answer,
+                    events=events,
+                )
+                emit("critique", score=critic_score, notes=critic_notes)
+            except Exception as e:
+                log.info("critic pass failed (non-fatal): %s", e)
+                emit("critique", score=None, notes=f"(critic failed: {e})")
+
+        # 4b. Write evolution_signals — attribute the critic score to every
+        # SKILL that ran during this trajectory. The whole-trajectory score
+        # is a coarse attribution (a 5-tool run all gets the same score)
+        # but it's the best signal we have for now. fitness.compute_fitness
+        # will weight + aggregate across many runs to wash out noise.
+        if critic_score is not None and skill_invocations:
+            self._write_critic_signals(
+                run_id=run_id,
+                critic_score=critic_score,
+                critic_notes=critic_notes,
+                skill_invocations=skill_invocations,
+            )
+
+        # 5. Persist + return
+        return self._finalize(
+            run_id=run_id, goal=goal, trigger_kind=trigger_kind,
+            events=events, t0=t0, iterations=final_iteration,
+            final_answer=final_answer,
+            critic_score=critic_score, critic_notes=critic_notes,
+        )
+
+    # -------- internals --------
+
+    def _execute_tool(
+        self, tc: ToolCall, *, skill_invocations: dict[str, dict] | None = None,
+    ) -> str:
+        """Run a tool (lookup or SKILL) by name. Returns the raw text result.
+
+        Errors are returned as a string starting with ``ERROR:`` rather than
+        raised — the model needs to see what happened so it can decide
+        whether to retry, switch tools, or stop.
+
+        ``skill_invocations`` (when provided): the loop tracks which
+        skill_runs happened during the trajectory by call_id, so the
+        post-critique step can write evolution_signals for each.
+        """
+        # Lookup tools — system-side, free, just DB reads
+        if tc.name in LOOKUP_TOOL_NAMES:
+            return self._execute_lookup_tool(tc)
+
+        # Action tools — system-side write operations (evolve_skill etc.)
+        if tc.name in ACTION_TOOL_NAMES:
+            return self._execute_action_tool(tc)
+
+        # Maintenance tools (W13.2) — daemon jobs the agent can drive
+        if tc.name in MAINTENANCE_TOOL_NAMES:
+            return self._execute_maintenance_tool(tc)
+
+        # SKILL tools
+        spec = self._skills.get(tc.name)
+        if spec is None:
+            available = (
+                sorted(SYSTEM_TOOL_NAMES) + sorted(self._skills.keys())
+            )
+            return f"ERROR: tool '{tc.name}' is not registered. Available: {available}"
+        try:
+            result = self._runtime.invoke(
+                spec, tc.arguments,
+                strict_inputs=False,  # model may pass extra context fields
+                inject_long_term_memory=True,
+            )
+            # Track which skill_runs were created during the trajectory
+            # so the post-critique signal-writer can attribute scores correctly
+            if skill_invocations is not None:
+                skill_invocations[tc.id] = {
+                    "skill_name": spec.name,
+                    "skill_version": spec.version,
+                    "skill_run_id": result.skill_run_id,
+                }
+            return result.raw_text or "(SKILL returned empty content)"
+        except ValueError as e:
+            # Missing-required-input or similar — let the model see the fix
+            return f"ERROR: invalid inputs for {tc.name}: {e}"
+        except Exception as e:
+            log.exception("tool execution crashed: %s(%s)", tc.name, tc.arguments)
+            return f"ERROR: tool '{tc.name}' raised {type(e).__name__}: {e}"
+
+    def _execute_maintenance_tool(self, tc: ToolCall) -> str:
+        """Run a W13.2 maintenance tool (spider, classifier, silence-check, etc).
+
+        Builds a MaintenanceCtx from the loop's resources and dispatches via
+        ``maintenance.execute_maintenance_tool``. Failures return an ERROR
+        string so the model sees what went wrong and can decide next step.
+        """
+        from .maintenance import MaintenanceCtx, execute_maintenance_tool
+        ctx = MaintenanceCtx(
+            store=self._store,
+            llm=self._llm,
+            runtime=self._runtime,
+            skills=list(self._skills.values()),
+            user_profile_text=self._master_resume_text or None,
+        )
+        return execute_maintenance_tool(tc.name, tc.arguments, ctx)
+
+    def _execute_action_tool(self, tc: ToolCall) -> str:
+        """Execute a write-side action tool (evolve_skill, detect_evolution_candidates).
+
+        These are NOT SKILLs (no SKILL.md, no critic, no skill_runs row).
+        They're meta-cognitive operations the agent can drive: 'check what
+        needs evolving', 'evolve this SKILL'. Result text is returned to the
+        agent so it can decide next action.
+        """
+        if tc.name == "detect_evolution_candidates":
+            try:
+                from ..evolution.fitness import detect_evolution_candidates as _detect
+                triggers = _detect(self._store)
+            except Exception as e:
+                return f"ERROR: detect_evolution_candidates failed: {e}"
+            if not triggers:
+                return (
+                    "暂无符合进化条件的 SKILL "
+                    "(条件: signals >= 10 + fitness < 0.55 + 距上次进化 > 7 天)。"
+                )
+            lines = ["该进化的 SKILL (按 fitness 升序):"]
+            for t in triggers[:10]:
+                lines.append(
+                    f"  - {t.skill_name} v{t.current_version}: "
+                    f"fitness={t.fitness:.2f}, samples={t.sample_count}, {t.reason}"
+                )
+            return "\n".join(lines)
+
+        if tc.name == "evolve_skill":
+            skill_name = (tc.arguments.get("skill_name") or "").strip()
+            if not skill_name:
+                return "ERROR: evolve_skill requires skill_name (string)"
+            try:
+                num_variants = int(tc.arguments.get("num_variants") or 3)
+            except (TypeError, ValueError):
+                num_variants = 3
+            num_variants = max(1, min(num_variants, 5))
+            try:
+                from ..evolution.evolve import evolve_skill as _evolve
+                result = _evolve(
+                    store=self._store, llm=self._llm,
+                    skill_name=skill_name, num_variants=num_variants,
+                )
+            except Exception as e:
+                log.exception("evolve_skill action crashed")
+                return f"ERROR: evolve_skill raised {type(e).__name__}: {e}"
+            return (
+                f"# evolve_skill('{skill_name}') 完成\n"
+                f"父版本: {result.parent_version}\n"
+                f"生成候选: {result.candidates_generated}\n"
+                f"持久化 shadow: {result.candidates_persisted}\n"
+                f"shadow 版本号: {', '.join(result.variant_versions) or '(无)'}\n"
+                f"备注: {result.notes}"
+            )
+
+        if tc.name == "run_gray_release":
+            dry_run = bool(tc.arguments.get("dry_run", False))
+            try:
+                from ..evolution.release import run_release_cycle
+                cycle = run_release_cycle(self._store, dry_run=dry_run)
+            except Exception as e:
+                log.exception("run_gray_release crashed")
+                return f"ERROR: run_gray_release raised {type(e).__name__}: {e}"
+            mode = "[DRY RUN] " if dry_run else ""
+            return f"# run_gray_release {mode}\n\n{cycle.render_summary()}"
+
+        return f"ERROR: action tool '{tc.name}' is declared but not implemented"
+
+    def _execute_lookup_tool(self, tc: ToolCall) -> str:
+        """Execute one of the system-side lookup tools (read_job / read_user_resume)."""
+        if tc.name == "read_job":
+            try:
+                job_id = int(tc.arguments.get("job_id"))
+            except (TypeError, ValueError):
+                return (
+                    "ERROR: read_job requires job_id as integer, "
+                    f"got {tc.arguments!r}"
+                )
+            try:
+                with self._store.connect() as conn:
+                    row = conn.execute(
+                        "SELECT company, title, location, source, raw_text "
+                        "FROM jobs WHERE id = ?", (job_id,),
+                    ).fetchone()
+            except Exception as e:
+                return f"ERROR: read_job DB error: {e}"
+            if row is None:
+                return f"ERROR: job#{job_id} not found"
+            company, title, loc, source, raw_text = row
+            return (
+                f"# job#{job_id}\n"
+                f"company: {company or '?'}\n"
+                f"title: {title or '?'}\n"
+                f"location: {loc or '?'}\n"
+                f"source: {source}\n\n"
+                f"## raw_text (字数 {len(raw_text or '')})\n{raw_text or '(空)'}"
+            )
+
+        if tc.name == "read_user_resume":
+            if not self._master_resume_text:
+                return (
+                    "ERROR: master_resume_text 没传给 AgentLoop "
+                    "(create_app 里 profile=None, 或者构造时 master_resume_text='')"
+                )
+            return f"# 用户 master 简历\n\n{self._master_resume_text}"
+
+        # Schema-listed but not implemented — programming error
+        return f"ERROR: lookup tool '{tc.name}' is declared but not implemented"
+
+    def _self_critique(
+        self, *, goal: str, final_answer: str, events: list[AgentEvent],
+    ) -> tuple[float | None, str | None]:
+        """Run a critic LLM that scores the trajectory.
+
+        Returns (score, notes). Score is None if the critic call or parse
+        fails — non-fatal, just no signal for this run.
+        """
+        # Render trajectory compactly for the critic
+        traj_lines: list[str] = []
+        for ev in events:
+            if ev.kind == "tool_call":
+                traj_lines.append(
+                    f"[tool_call] {ev.payload.get('name')}({ev.payload.get('arguments')})"
+                )
+            elif ev.kind == "tool_result":
+                preview = (ev.payload.get("result_preview") or "")[:200]
+                traj_lines.append(
+                    f"[tool_result#{ev.payload.get('name')}] {preview}"
+                )
+            elif ev.kind == "thinking" and ev.payload.get("text"):
+                traj_lines.append(f"[thinking] {ev.payload['text'][:200]}")
+            elif ev.kind == "error":
+                traj_lines.append(f"[error] {ev.payload.get('message')}")
+        trajectory_render = "\n".join(traj_lines) or "(empty trajectory)"
+
+        user_msg = (
+            f"## goal\n{goal}\n\n"
+            f"## trajectory\n{trajectory_render}\n\n"
+            f"## final_answer\n{final_answer[:2000]}\n\n"
+            f"评估上面这次 agent run, 严格输出 JSON。"
+        )
+        resp = self._llm.chat(
+            messages=[
+                {"role": "system", "content": CRITIC_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            model=self._critic_model,
+            temperature=0.0,
+            json_mode=True,
+        )
+        # Use the robust parser — ccvibe sometimes emits concatenated JSON
+        # objects in regular chat responses too (W13 dogfood #5). json.loads
+        # would raise; _parse_tool_arguments handles it gracefully.
+        data = _parse_tool_arguments(resp.content)
+        if not data:
+            # If the parser returned empty, try one more bare json.loads in
+            # case it was a valid singleton object the parser missed
+            try:
+                fallback = json.loads(resp.content.strip())
+                if isinstance(fallback, dict) and fallback:
+                    data = fallback
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        if not data:
+            return None, f"(critic returned non-parseable JSON: {resp.content[:400]})"
+        if not isinstance(data, dict):
+            return None, f"(critic returned non-object JSON: {type(data).__name__})"
+        try:
+            score = float(data.get("overall"))
+        except (TypeError, ValueError):
+            score = None
+        notes = str(data.get("notes") or "")[:500]
+        return score, notes
+
+    def _write_critic_signals(
+        self,
+        *,
+        run_id: int | None,
+        critic_score: float,
+        critic_notes: str | None,
+        skill_invocations: dict[str, dict],
+    ) -> None:
+        """Fan the critic_score out to every SKILL that ran during the trajectory.
+
+        Each unique (skill_name, version, run_id) tuple gets one row in
+        evolution_signals. Lookup tools (read_job/read_user_resume) don't
+        appear in skill_invocations so they don't get signals — they're
+        cheap and stateless, no point evolving their prompts.
+        """
+        from ..evolution import signals as _signals  # local import: keeps loop.py loadable when evolution/ is mid-refactor
+
+        notes = (critic_notes or "")[:300]
+        seen_runs: set[int] = set()
+        for inv in skill_invocations.values():
+            srid = inv.get("skill_run_id")
+            if srid in seen_runs:
+                continue
+            if srid is not None:
+                seen_runs.add(srid)
+            try:
+                _signals.record_critic_signal(
+                    self._store,
+                    skill_name=inv["skill_name"],
+                    skill_version=inv["skill_version"],
+                    skill_run_id=srid,
+                    score=critic_score,
+                    notes=f"agent_run#{run_id}: {notes}" if run_id else notes,
+                )
+            except Exception as e:
+                log.debug("evolution_signals fan-out failed for %s: %s",
+                          inv.get("skill_name"), e)
+
+    def _record_start(self, *, goal: str, trigger_kind: str) -> int | None:
+        """Insert a 'running' row into agent_runs and return its id."""
+        try:
+            with self._store.connect() as conn:
+                cur = conn.execute(
+                    "INSERT INTO agent_runs(trigger_kind, goal, status) "
+                    "VALUES (?, ?, 'running')",
+                    (trigger_kind, goal),
+                )
+                return int(cur.lastrowid or 0)
+        except Exception as e:
+            log.warning("agent_runs INSERT failed (non-fatal): %s", e)
+            return None
+
+    def _finalize(
+        self,
+        *,
+        run_id: int | None,
+        goal: str,
+        trigger_kind: str,
+        events: list[AgentEvent],
+        t0: float,
+        final_answer: str,
+        iterations: int = 0,
+        critic_score: float | None = None,
+        critic_notes: str | None = None,
+        error: str | None = None,
+    ) -> AgentRunResult:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        status = "error" if error else "ok"
+        if run_id is not None:
+            try:
+                with self._store.connect() as conn:
+                    conn.execute(
+                        "UPDATE agent_runs SET ended_at = julianday('now'), "
+                        "  status = ?, iterations = ?, final_answer = ?, "
+                        "  trajectory_json = ?, critic_score = ?, critic_notes = ?, "
+                        "  latency_ms = ?, error_text = ? "
+                        "WHERE id = ?",
+                        (
+                            status, iterations, final_answer,
+                            json.dumps(
+                                [asdict(e) for e in events],
+                                ensure_ascii=False,
+                                default=str,
+                            ),
+                            critic_score, critic_notes,
+                            latency_ms, error,
+                            run_id,
+                        ),
+                    )
+            except Exception as e:
+                log.warning("agent_runs UPDATE failed (non-fatal): %s", e)
+        return AgentRunResult(
+            run_id=run_id,
+            goal=goal,
+            trigger_kind=trigger_kind,
+            final_answer=final_answer,
+            events=events,
+            iterations=iterations,
+            cost_usd=0.0,  # TODO wire ccvibe pricing later
+            latency_ms=latency_ms,
+            critic_score=critic_score,
+            critic_notes=critic_notes,
+            error=error,
+        )

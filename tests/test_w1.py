@@ -18,7 +18,7 @@ SKILLS_ROOT = REPO_ROOT / "src/offerguide/skills"
 SAMPLE_RESUME = Path(
     "/Users/huy/Library/Containers/com.tencent.xinWeChat/Data/Documents/"
     "xwechat_files/wxid_5fq3lbda9swi22_c4de/msg/file/2026-04/"
-    "胡阳-上海财经大学-应用统计专硕(4).pdf"
+    "TestUser-某高校-应用统计专硕(4).pdf"
 )
 
 
@@ -158,22 +158,15 @@ def test_load_real_resume_extracts_text() -> None:
 # ---- agent ----------------------------------------------------------------
 
 
-def test_graph_builds_and_routes_to_summarize_when_no_action() -> None:
-    """W4: with no `requested_action` and no runtime, graph still composes a summary."""
-    skills = discover_skills(SKILLS_ROOT)
-    graph = offerguide.build_graph(skills=skills, runtime=None)
-    # No `requested_action` → defaults to score_and_gaps but runtime=None → error path
-    # → summarize still runs and produces a final_response
-    result = graph.invoke({"requested_action": None})
-    assert result.get("final_response") is not None
+# ---- agent (W13.1: build_graph removed; AgentLoop is the new entry) -------
 
 
-def test_graph_runs_with_empty_skills() -> None:
-    """build_graph must accept an empty skills iterable for topology-only tests."""
-    graph = offerguide.build_graph(skills=[], runtime=None)
-    # With empty skills, score_node would raise — but with no action it routes straight to summarize
-    result = graph.invoke({"requested_action": None})
-    assert "final_response" in result
+def test_agent_loop_is_top_level_export() -> None:
+    """AgentLoop replaces build_graph as the canonical agent entry point."""
+    assert hasattr(offerguide, "AgentLoop")
+    # Smoke-construct: AgentLoop requires llm/runtime/store/skills, but we can
+    # at least verify the symbol resolves and is callable
+    assert callable(offerguide.AgentLoop)
 
 
 # ---- public API -----------------------------------------------------------
@@ -182,12 +175,11 @@ def test_graph_runs_with_empty_skills() -> None:
 def test_public_api_surface() -> None:
     """Lock down what offerguide exports at the top level — refactors must update __all__."""
     expected = {
-        "AgentState",
+        "AgentLoop",
         "SkillSpec",
         "Store",
         "UserProfile",
         "__version__",
-        "build_graph",
         "discover_skills",
         "load_resume_pdf",
         "load_skill",

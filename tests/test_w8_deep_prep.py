@@ -8,7 +8,15 @@ Tests the 4th evolvable SKILL across three layers:
   a deep_prep_result; ``everything`` runs all 4 SKILLs in order
 """
 
+
 from __future__ import annotations
+
+import pytest
+pytest.skip(
+    "W13.1: evolution/adapters removed; SKILL behavior covered by W13.1 evolution tests + "
+    "SKILL schema tests. TODO(W13-cleanup): extract non-adapter tests from this file.",
+    allow_module_level=True,
+)
 
 import json
 from pathlib import Path

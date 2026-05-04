@@ -1,14 +1,20 @@
-"""CLI for the autonomous daemon.
+"""CLI for the autonomous daemon (W13.2 redesign).
 
 Subcommands::
 
-    python -m offerguide.autonomous run          # block forever, run cron triggers
-    python -m offerguide.autonomous run-once <job>   # fire one job immediately, exit
-    python -m offerguide.autonomous list           # show registered jobs
+    python -m offerguide.autonomous run          # block forever; cron wakes the agent
+    python -m offerguide.autonomous run-once     # wake the agent once, exit
+    python -m offerguide.autonomous list         # show what jobs are registered
+
+In W13.2 the scheduler registers a single job ``wake_agent`` (default cron:
+every 4 hours from 08:00 to 22:00 Asia/Shanghai). Each fire wakes the
+central AgentLoop with a "巡检" goal — the agent reads the current system
+state and decides which maintenance tools (discover/enrich/classify/etc)
+are worth running this tick.
 
 Designed to run under launchd (macOS) / systemd (Linux) / a tmux session
-on a small VPS. APScheduler's misfire_grace_time (300s) means a sleeping
-laptop catches up on missed triggers when it wakes.
+on a small VPS. APScheduler's misfire_grace_time means a sleeping laptop
+catches up on missed wakes when it next wakes.
 """
 
 from __future__ import annotations
@@ -22,25 +28,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="offerguide.autonomous")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("run", help="Block and run all scheduled jobs on cron triggers")
-
-    p_once = sub.add_parser(
-        "run-once", help="Fire one job immediately and exit (good for cron-driven setups)"
+    sub.add_parser("run", help="Block forever; the cron wakes the agent on schedule")
+    sub.add_parser(
+        "run-once", help="Wake the agent loop once immediately and exit",
     )
-    p_once.add_argument(
-        "job",
-        choices=(
-            "extract_facts",
-            "discover_jobs",
-            "jd_enrich",
-            "corpus_classify",
-            "silence_check",
-            "corpus_refresh",
-            "brief_update",
-        ),
-        help="Which job to run",
-    )
-
     sub.add_parser("list", help="Print registered jobs and exit")
 
     args = parser.parse_args(argv)
@@ -50,9 +41,9 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    from .scheduler import build_default_scheduler
+    from .scheduler import build_agent_wake_scheduler
 
-    sched = build_default_scheduler()
+    sched = build_agent_wake_scheduler()
 
     if args.cmd == "list":
         for name in sched.list_jobs():
@@ -60,8 +51,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "run-once":
-        result = sched.trigger_once(args.job)
-        print(f"\n✦ {args.job} → {result}")
+        result = sched.trigger_once("wake_agent")
+        print(f"\n✦ wake_agent → {result}")
         return 0
 
     if args.cmd == "run":

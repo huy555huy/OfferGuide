@@ -10,6 +10,13 @@ Verifies that:
 
 from __future__ import annotations
 
+import pytest
+pytest.skip(
+    "W13.1: /chat + /quick-eval + /pipeline + /dashboard routes removed; superseded by /agent. "
+    "TODO(W13-cleanup): rebuild equivalent tests against agent loop endpoints.",
+    allow_module_level=True,
+)
+
 import json
 from pathlib import Path
 
@@ -98,7 +105,7 @@ class _FakeRuntime:
 def app_setup(tmp_path: Path):
     store = offerguide.Store(tmp_path / "ui.db")
     store.init_schema()
-    profile = UserProfile(raw_resume_text="胡阳，统计学专硕")
+    profile = UserProfile(raw_resume_text="TestUser，统计学专硕")
     skills = discover_skills(SKILLS_ROOT)
     runtime = _FakeRuntime()
     app = create_app(

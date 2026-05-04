@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — 进化{% endblock %}
+{% block content %}
+
+<style>
+    .evo-grid { display: grid; gap: 1rem; }
+    .skill-card {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 1rem 1.25rem;
+    }
+    .skill-card .head {
+        display: flex; align-items: baseline; gap: 0.75rem;
+        margin-bottom: 0.5rem;
+    }
+    .skill-card .name {
+        font-family: var(--font-serif);
+        font-size: 1.1rem; font-weight: 600;
+    }
+    .skill-card .ver {
+        font-family: var(--font-mono); font-size: 0.78rem;
+        color: var(--text-muted);
+    }
+    .skill-card .desc { font-size: 0.825rem; color: var(--text-muted); margin-bottom: 0.625rem; }
+
+    .fitness-bar {
+        height: 6px; background: var(--bg-subtle); border-radius: 999px;
+        overflow: hidden; margin: 0.25rem 0 0.5rem;
+    }
+    .fitness-fill {
+        height: 100%; border-radius: 999px;
+        background: linear-gradient(90deg, var(--danger), var(--warning), var(--success));
+    }
+
+    .variant-row {
+        display: grid;
+        grid-template-columns: 80px 1fr 100px 80px auto;
+        gap: 0.625rem; align-items: center;
+        padding: 0.5rem 0.625rem;
+        font-size: 0.825rem;
+        border-bottom: 1px solid var(--border-soft);
+    }
+    .variant-row:last-child { border-bottom: none; }
+    .variant-row .pill { font-size: 0.65rem; }
+    .variant-row .ver-cell { font-family: var(--font-mono); font-size: 0.75rem; }
+
+    .pill.shadow  { background: #f3f4f6; color: #374151; }
+    .pill.canary  { background: var(--warning-soft); color: var(--warning); }
+    .pill.live    { background: var(--success-soft); color: var(--success); font-weight: 600; }
+    .pill.retired { background: var(--bg-subtle); color: var(--text-dim); }
+    .pill.failed  { background: var(--danger-soft); color: var(--danger); }
+
+    .trigger-card {
+        background: var(--warning-soft);
+        border: 1px solid var(--warning);
+        border-radius: var(--radius);
+        padding: 0.75rem 1rem;
+        margin-bottom: 0.75rem;
+        font-size: 0.875rem;
+    }
+    .trigger-card .label {
+        color: var(--warning); font-weight: 600;
+        text-transform: uppercase; font-size: 0.7rem;
+        letter-spacing: 0.05em;
+    }
+
+    .signal-breakdown {
+        display: flex; gap: 0.5rem; flex-wrap: wrap;
+        font-size: 0.72rem;
+    }
+    .signal-breakdown .chip {
+        background: var(--bg-subtle); padding: 0.15rem 0.5rem;
+        border-radius: 999px; color: var(--text-muted);
+    }
+</style>
+
+<div class="page-title">
+    <div>
+        <h1>SKILL 进化</h1>
+        <p>
+            模型在主位 → critic 评分 → 信号闭环 → 自动生成 prompt 变种 → 灰度 A/B → 决定 promote 或 rollback。
+            进化触发条件: signals ≥ <strong>{{ min_signals }}</strong> + fitness < <strong>{{ "%.2f"|format(evolution_threshold) }}</strong> + 距上次 > <strong>{{ "%.0f"|format(cooldown_days) }} 天</strong>。
+        </p>
+    </div>
+    <button class="btn secondary" onclick="runReleaseCycle()">▶ 运行灰度发布周期</button>
+</div>
+
+{% if triggers %}
+<div class="trigger-card">
+    <div class="label">⚡ 待进化 ({{ triggers|length }} 个 SKILL 满足条件)</div>
+    {% for t in triggers %}
+    <div style="margin-top: 0.5rem;">
+        <strong>{{ t.skill_name }}</strong> v{{ t.current_version }} —
+        fitness {{ "%.2f"|format(t.fitness) }} / {{ t.sample_count }} 个 signals.
+        <button class="btn ghost" onclick="evolveSkill('{{ t.skill_name }}')">▶ 进化</button>
+        <span class="muted small">{{ t.reason }}</span>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<div class="evo-grid">
+    {% for sv in skill_views %}
+    <div class="skill-card">
+        <div class="head">
+            <span class="name">{{ sv.name }}</span>
+            <span class="ver">seed v{{ sv.seed_version }} → 当前 v{{ sv.current_version }}</span>
+            <span style="margin-left: auto;">
+                <button class="btn ghost" onclick="evolveSkill('{{ sv.name }}')">🧬 进化</button>
+            </span>
+        </div>
+        <div class="desc">{{ sv.description }}</div>
+
+        {# Fitness bar #}
+        <div class="metric-row">
+            <span class="name">fitness</span>
+            <div class="bar">
+                {% if sv.fitness is not none %}
+                <div style="width: {{ (sv.fitness * 100)|round(0) }}%;"></div>
+                {% endif %}
+            </div>
+            <span class="val">
+                {% if sv.fitness is not none %}{{ "%.2f"|format(sv.fitness) }}{% else %}—{% endif %}
+            </span>
+        </div>
+        <div class="signal-breakdown">
+            <span class="chip">signals: {{ sv.sample_count }}</span>
+            {% for kind, (avg, n) in sv.by_kind.items() %}
+            <span class="chip">{{ kind }} {{ "%.2f"|format(avg) }} ({{ n }})</span>
+            {% endfor %}
+        </div>
+
+        {# Variants tree #}
+        {% if sv.variants %}
+        <div class="section-title" style="margin-top: 1rem;">变种历史 ({{ sv.variants|length }})</div>
+        <div>
+            {% for v in sv.variants %}
+            <div class="variant-row">
+                <span class="ver-cell">{{ v.version }}</span>
+                <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
+                      title="{{ v.notes }}">
+                    {% if v.parent_version %}
+                    <span class="muted small">← {{ v.parent_version }}</span>
+                    {% endif %}
+                    {{ (v.notes or '(no notes)')|truncate(80) }}
+                </span>
+                <span>
+                    {% if v.fitness_score is not none %}
+                    fit {{ "%.2f"|format(v.fitness_score) }}
+                    {% endif %}
+                    {% if v.status == 'canary' %}
+                    <span class="muted small">{{ "%.0f"|format(v.canary_traffic_pct * 100) }}%</span>
+                    {% endif %}
+                </span>
+                <span><span class="pill {{ v.status }}">{{ v.status }}</span></span>
+                <span style="text-align: right;">
+                    {% if v.status in ['shadow', 'canary'] %}
+                    <button class="btn ghost" title="promote"
+                            onclick="promoteVariant('{{ sv.name }}', '{{ v.version }}')">↑</button>
+                    <button class="btn ghost" title="fail"
+                            onclick="failVariant('{{ sv.name }}', '{{ v.version }}')">×</button>
+                    {% endif %}
+                </span>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+
+<script>
+async function evolveSkill(name) {
+    if (!confirm(`生成 ${name} 的 3 个新 prompt 变种？需要调用 LLM (~10-30s, 几分钱)。`)) return;
+    const r = await fetch(`/api/evolution/evolve/${name}?num_variants=3`, {method: 'POST'});
+    const data = await r.json();
+    alert(`${name} 进化完成:\n生成 ${data.candidates_generated}, 持久化 ${data.candidates_persisted}\n备注: ${data.notes}`);
+    location.reload();
+}
+async function promoteVariant(name, version) {
+    if (!confirm(`promote ${name} v${version}？\nshadow → canary (20%) 或 canary → live`)) return;
+    const r = await fetch(`/api/evolution/promote/${name}/${version}`, {method: 'POST'});
+    const data = await r.json();
+    alert(`${data.action}: ${data.ok ? 'OK' : 'failed (variant 状态可能已变)'}`);
+    location.reload();
+}
+async function failVariant(name, version) {
+    if (!confirm(`fail ${name} v${version}？这个变种会被永久标记 failed。`)) return;
+    const r = await fetch(`/api/evolution/fail/${name}/${version}`, {method: 'POST'});
+    location.reload();
+}
+async function runReleaseCycle() {
+    const r = await fetch('/api/evolution/release_cycle', {method: 'POST'});
+    const data = await r.json();
+    alert('灰度发布周期完成:\n\n' + data.summary);
+    location.reload();
+}
+</script>
+
+{% endblock %}

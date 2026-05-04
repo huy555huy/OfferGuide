@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -33,6 +34,8 @@ from typing import Any
 from ..llm import LLMClient
 from ..memory import Store
 from ._spec import SkillSpec
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -70,6 +73,7 @@ class SkillRuntime:
         model: str | None = None,
         strict_inputs: bool = True,
         inject_long_term_memory: bool = True,
+        consult_variant_registry: bool = True,
     ) -> SkillResult:
         """Render the SKILL with `inputs`, call the LLM, store the run, return SkillResult.
 
@@ -87,10 +91,38 @@ class SkillRuntime:
         invocation hashes the same regardless of evolving memory state, so
         GEPA trainset deduplication stays correct. Set to False for SKILLs
         that explicitly don't want memory (rare).
+
+        `consult_variant_registry=True` (default) checks ``skill_variants``
+        for an evolved version (live or canary) to use INSTEAD of ``spec.body``.
+        Set to False only when meta_evolve_skill is testing a candidate
+        variant against a fixed body. The version we actually used is
+        recorded in skill_runs.skill_version so feedback signals attribute
+        correctly. This is the W13.1 evolution-routing layer.
         """
         canonical = _canonicalize_inputs(spec, inputs, strict=strict_inputs)
 
-        system_msg = spec.body
+        # ── W13.1 variant routing ──────────────────────────────────────────
+        # Override spec.body / spec.version when an evolved variant is live.
+        # Disk SKILL.md is the audit-trail seed; DB variants are how we ship
+        # evolutions without filesystem mutation.
+        effective_body = spec.body
+        effective_version = spec.version
+        variant_selection_reason = "seed (no routing)"
+        if consult_variant_registry:
+            try:
+                from ..evolution import registry as _reg
+                selection = _reg.select_variant_for_invoke(
+                    self._store, skill_name=spec.name,
+                )
+                if not selection.use_disk_seed and selection.selected_variant:
+                    effective_body = selection.selected_variant.body_md
+                    effective_version = selection.selected_variant.version
+                variant_selection_reason = selection.selection_reason
+            except Exception as e:
+                # If variant routing fails, fall back to seed — never break invoke
+                log.debug("variant routing failed (using seed): %s", e)
+
+        system_msg = effective_body
         # ── Long-term memory injection (W12 fix: close the loop) ───────────
         # user_facts retrieve runs against a query built from the canonical
         # inputs (entities + key text), prepended to system_msg. Failure is
@@ -132,6 +164,8 @@ class SkillRuntime:
 
         run_id = self._record(
             spec=spec,
+            effective_version=effective_version,
+            variant_selection_reason=variant_selection_reason,
             input_hash=input_hash,
             inputs=canonical,
             output_text=resp.content,
@@ -143,7 +177,7 @@ class SkillRuntime:
             raw_text=resp.content,
             parsed=parsed,
             skill_name=spec.name,
-            skill_version=spec.version,
+            skill_version=effective_version,  # W13.1: report the version that ACTUALLY ran
             skill_run_id=run_id,
             input_hash=input_hash,
             cost_usd=0.0,
@@ -154,19 +188,27 @@ class SkillRuntime:
         self,
         *,
         spec: SkillSpec,
+        effective_version: str,
+        variant_selection_reason: str,  # noqa: ARG002 — audit-only, derivable from skill_version
         input_hash: str,
         inputs: dict[str, Any],
         output_text: str,
         cost_usd: float,
         latency_ms: int,
     ) -> int:
+        # input_json keeps the bare inputs shape (consumers like
+        # pipeline_view.py json_extract '$.job_id'). The variant routing
+        # decision is audit-only — it's already encoded in skill_version
+        # (which is now ``effective_version``, not the spec's seed version).
+        # If a debugger needs "why did we pick canary X?" they compute it
+        # on-demand from skill_variants table state.
         with self._store.connect() as conn:
             cur = conn.execute(
                 "INSERT INTO skill_runs(skill_name, skill_version, input_hash, "
                 "input_json, output_json, cost_usd, latency_ms) VALUES (?,?,?,?,?,?,?)",
                 (
                     spec.name,
-                    spec.version,
+                    effective_version,  # the version that actually ran
                     input_hash,
                     json.dumps(inputs, ensure_ascii=False, default=str),
                     output_text,
