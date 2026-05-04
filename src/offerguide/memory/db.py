@@ -292,6 +292,64 @@ CREATE INDEX IF NOT EXISTS idx_evo_signals_skill   ON evolution_signals(skill_na
 CREATE INDEX IF NOT EXISTS idx_evo_signals_kind    ON evolution_signals(signal_kind, created_at);
 CREATE INDEX IF NOT EXISTS idx_evo_signals_run     ON evolution_signals(skill_run_id);
 
+-- ─────────────────────── W13.6 long-horizon goals ────────────────────
+-- A real agent has a north star, not just per-tick reactive tasks. This
+-- table holds the user's actual job-search goals (target offer date,
+-- target companies, minimum offer count). The agent reads them on every
+-- wake and reasons EXPLICITLY against them: "with X days left + Y apps
+-- in flight + Z fitness on the offer-rate funnel, am I on track?"
+--
+-- Status: 'active' (currently pursuing) | 'paused' (user stopped) |
+--         'achieved' (hit it) | 'abandoned' (gave up)
+CREATE TABLE IF NOT EXISTS user_goals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    title           TEXT NOT NULL,
+        -- e.g. "拿到 1 个 AI Agent 暑期实习 offer"
+    description     TEXT,
+        -- Free-form context the agent reads (target companies, deal-breakers,
+        -- nice-to-haves, what success looks like to user)
+    target_date     TEXT,
+        -- ISO 8601 date string (e.g. "2026-07-15"); null for open-ended goals
+    target_metric   TEXT,
+        -- Free-form: "1 offer" / "5 interviews" / "10 quality applications"
+    status          TEXT NOT NULL DEFAULT 'active',
+        -- 'active' | 'paused' | 'achieved' | 'abandoned'
+    created_at      REAL DEFAULT (julianday('now')),
+    updated_at      REAL DEFAULT (julianday('now')),
+    achieved_at     REAL,
+    notes           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_user_goals_status ON user_goals(status);
+
+-- ──────────── W13.6 agent self-observations ──────────────────────────
+-- meta_reflect tool writes here when the agent looks back at its own
+-- run history + user thumbs and notices a pattern about its own behavior
+-- ("I keep suggesting follow_up but user dismisses 80% of them"). Future
+-- agent runs read these as part of the snapshot — gentle pressure to
+-- avoid repeating mistakes.
+--
+-- This is meta-cognition: the agent learning ABOUT itself, not just
+-- about the user. user_facts is "what I know about the user";
+-- agent_self_observations is "what I've noticed about my own pattern".
+CREATE TABLE IF NOT EXISTS agent_self_observations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    observation     TEXT NOT NULL,
+        -- One sentence the agent wrote about itself
+    pattern_kind    TEXT NOT NULL,
+        -- 'overreach' | 'underreach' | 'tone' | 'wrong_priority' | 'repeated_mistake' | 'success_pattern'
+    evidence_json   TEXT NOT NULL DEFAULT '{}',
+        -- {sample_runs: [N, M, ...], thumbs_count: ..., notes: ...}
+    valid_until     REAL,
+        -- Some observations expire (e.g. "user is busy this week"); after
+        -- this julianday, exclude from snapshot. Null = always valid.
+    created_at      REAL DEFAULT (julianday('now')),
+    superseded_by   INTEGER REFERENCES agent_self_observations(id)
+        -- When the agent later notices a contradicting pattern, it links
+        -- the new observation here so we can see the chain of self-correction
+);
+CREATE INDEX IF NOT EXISTS idx_agent_self_obs_validity
+    ON agent_self_observations(valid_until, created_at);
+
 -- ``skill_variants`` is the version registry for any SKILL that's been evolved.
 -- The original SKILL.md on disk is always implicitly version 0 (the seed).
 -- meta_evolve_skill writes new rows here as 'shadow'; the gray-release loop

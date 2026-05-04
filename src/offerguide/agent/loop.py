@@ -120,8 +120,27 @@ SYSTEM_PROMPT = """你是用户的求职 copilot。
 
 每次唤醒, 先想 (不用说出来):
 1. **此刻用户最该 focus 啥？** 看时间 + 用户活跃度 + user_facts 里最近变化
-2. **系统里有"再不处理就过期"的事吗？** silent 14 天 / 面试日逼近 / 评分高但没 tailor
+2. **当下行动是不是朝 north star 走？** snapshot 顶部 🎯 是用户的 active goals,
+   每件事先问"这能让用户离 target_date 近一步吗" — 不能就别做
 3. **我能给用户留下什么有价值的痕迹？** 一份 tailored 简历 / 一个准确的判断, 而不是"调了 3 个工具"
+
+# 北极星 (north star) 优先
+
+snapshot 的 `## 🎯 North Star` 段是用户的目标 + 当前 funnel 进度 (投了几个 / 面试几个 / offer 几个)。
+**这是你的真上下文** —— 系统观察 / maintenance hints 都是次级。
+
+行为模式:
+- progress 显示 "已过期 N 天" → 用户可能需要调整目标范围或加速, 你**主动**提醒
+- progress.is_on_track=False → 优先做能提高 funnel 的事 (找新 jobs / tailor 简历 / 写投递包)
+- 没 active goal → 提醒用户去 /goals 设一个; 没 goal 的 agent 是个无目标的执行器
+
+# 元认知 (meta-cognition)
+
+snapshot 的 `## 📓 Agent 自我观察` 段是你**之前给自己写的笔记** —— "我反复犯过这个错"。
+这些是你应该敬畏的——别再犯。
+
+如果你这次又看到自己重复一种 pattern (例如 "snapshot 显示我连续 5 次唤醒都建议 X 但 user 都拒了"),
+调 **meta_reflect** 工具把这个观察写进去。这是 agent 学习 ABOUT 自己, 不只是关于用户。
 
 # 你能用的工具
 
@@ -130,10 +149,11 @@ SYSTEM_PROMPT = """你是用户的求职 copilot。
 - `read_user_resume()`: 返回 master 简历全文
 
 **Action（元认知 + 跟用户沟通）**
-- `detect_evolution_candidates()`, `evolve_skill(name, n)`, `run_gray_release()`
-- `write_suggestion(title, body, ...)`: 把建议写到 inbox 让用户决定。
-  这是你跟用户的**主要沟通通道**——用户不在线时, 看到值得让他知道的事就写一张。
-  用户后续 approve/reject 是**最高权重的反馈信号** (会进 evolution_signals 影响 SKILL fitness)。
+- `detect_evolution_candidates()`, `evolve_skill(name, n)`, `run_gray_release()` — SKILL 进化
+- `meta_reflect(observation, pattern_kind, ...)`: **agent 学习关于 agent 自己的事**。
+  当你看到自己反复某种 pattern (好的或坏的), 写进去。下次唤醒会读到。
+- `write_suggestion(title, body, ...)`: 跟用户的**主要沟通通道**。用户 approve/reject 是
+  evolution 里**最高权重的反馈信号**。
 
 **Maintenance（系统巡检, 由你判断要不要做）**
 - `discover_new_jobs`, `enrich_thin_jds`, `classify_corpus`,
@@ -327,6 +347,45 @@ ACTION_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "meta_reflect",
+            "description": (
+                "看你自己最近的 N 次 agent_runs + 用户 thumbs 反馈, 思考你自己的行为 pattern, "
+                "把发现写进 agent_self_observations 表。"
+                "\n\n这是**元认知**操作——agent 学习关于 agent 自己的事 (跟 user_facts 学习关于用户的不同)。"
+                "\n\n何时该用: (a) snapshot 显示你最近 5+ 次 cron_wake 都建议同类事但用户都拒了 → "
+                "你应该意识到 'overreach' pattern; (b) 你看到自己反复跑 maintenance 但每次都被 critic 评低 → "
+                "可能是 'wrong_priority' pattern; (c) 用户长时间没用某条建议链 → 可能 'tone' / 风格不对。"
+                "\n\n何时**别**用: 你只跑过 1-2 次 agent run, 数据不够 (N < 5)。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation": {
+                        "type": "string",
+                        "description": "你对自己行为的一句话观察 (中文, ≤ 100 字)",
+                    },
+                    "pattern_kind": {
+                        "type": "string",
+                        "enum": ["overreach", "underreach", "tone", "wrong_priority", "repeated_mistake", "success_pattern"],
+                        "description": (
+                            "overreach=你做太多用户嫌烦; underreach=你该做没做; "
+                            "tone=语气/风格不对; wrong_priority=优先级错; "
+                            "repeated_mistake=同样错误反复犯; success_pattern=做得好的事可继续"
+                        ),
+                    },
+                    "valid_for_days": {
+                        "type": "integer",
+                        "description": "(可选) 多少天后这条观察过期 (例如 'tone' 类 30 天, 'success_pattern' 通常没期限)",
+                    },
+                },
+                "required": ["observation", "pattern_kind"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_suggestion",
             "description": (
                 "写一张推荐卡片到 inbox, 让用户决定批准/拒绝/忽略。这是你跟用户沟通的"
@@ -472,6 +531,39 @@ def snapshot_state(
     Empty sections are omitted so the prompt scales down on a fresh DB.
     """
     parts: list[str] = ["# 当前系统状态 (Snapshot)"]
+
+    # ---- North star: active goals + progress (W13.6) ----
+    # 一个真 agent 有 north star, 不是只看眼前数字。每次唤醒先想:
+    # "我们朝什么目标走? 距离目标多近多远? 当下行动该怎么对齐?"
+    try:
+        from .. import goals as _goals
+        active_goals = _goals.list_active_goals(store)
+        if active_goals:
+            parts.append("\n## 🎯 North Star (用户当前目标)")
+            for g in active_goals[:3]:
+                progress = _goals.compute_progress(store, g)
+                parts.append(progress.render_for_prompt())
+                if not progress.is_on_track:
+                    parts.append(
+                        "  ⚠ 启发式判断: 当前进度可能跟不上 target_date "
+                        "(应主动想想: 是不是该多投 / 改简历 / 调整目标范围)"
+                    )
+    except Exception as e:
+        log.warning("snapshot_state: goals read failed: %s", e)
+
+    # ---- Agent's own learned behavior patterns (W13.6 meta-cognition) ----
+    # 这是 agent 看自己之前的行为, 记下"我做错了什么 / 该改什么"——
+    # 比 user_facts (关于用户) 更高一层: 关于 agent 自己。
+    try:
+        from .. import goals as _goals
+        self_obs = _goals.list_active_self_observations(store, limit=6)
+        if self_obs:
+            parts.append("\n## 📓 Agent 自我观察 (你之前注意到的关于自己的事)")
+            for obs in self_obs:
+                parts.append(f"- [{obs.pattern_kind}] {obs.observation}")
+            parts.append("  ↑ 别违反这些。如果你发现新的 pattern, 调 meta_reflect 写进来。")
+    except Exception as e:
+        log.warning("snapshot_state: self_obs read failed: %s", e)
 
     # ---- jobs (top N most recent with raw_text >= 200) ----
     try:
@@ -1102,7 +1194,59 @@ class AgentLoop:
         if tc.name == "write_suggestion":
             return self._execute_write_suggestion(tc)
 
+        if tc.name == "meta_reflect":
+            return self._execute_meta_reflect(tc)
+
         return f"ERROR: action tool '{tc.name}' is declared but not implemented"
+
+    def _execute_meta_reflect(self, tc: ToolCall) -> str:
+        """Agent records an observation about its OWN behavior pattern (W13.6).
+
+        This is the meta-cognition primitive — the thing that makes
+        ``agent_self_observations`` populated, which then flows back into
+        future snapshots and changes future agent behavior.
+        """
+        observation = (tc.arguments.get("observation") or "").strip()
+        pattern_kind = (tc.arguments.get("pattern_kind") or "").strip()
+        if not observation or pattern_kind not in (
+            "overreach", "underreach", "tone",
+            "wrong_priority", "repeated_mistake", "success_pattern",
+        ):
+            return (
+                "ERROR: meta_reflect requires observation (string) + "
+                "pattern_kind (overreach/underreach/tone/wrong_priority/"
+                "repeated_mistake/success_pattern)"
+            )
+        valid_for_days_raw = tc.arguments.get("valid_for_days")
+        valid_for_days: int | None = None
+        if valid_for_days_raw is not None:
+            try:
+                valid_for_days = int(valid_for_days_raw)
+                if valid_for_days <= 0:
+                    valid_for_days = None
+            except (TypeError, ValueError):
+                valid_for_days = None
+        try:
+            from .. import goals as _goals
+            obs_id = _goals.write_self_observation(
+                self._store,
+                observation=observation,
+                pattern_kind=pattern_kind,  # type: ignore[arg-type]
+                evidence={
+                    "from_agent_run": self._current_run_id,
+                    "trajectory_skill_count": len(self._current_skill_invocations),
+                },
+                valid_for_days=valid_for_days,
+            )
+            valid_str = f", valid {valid_for_days}d" if valid_for_days else ", no expiry"
+            return (
+                f"OK: 写入 self_observation #{obs_id} [{pattern_kind}{valid_str}]\n"
+                f"  '{observation}'\n"
+                f"将来 cron_wake 看 snapshot 时会读到, 影响行为。"
+            )
+        except Exception as e:
+            log.exception("meta_reflect crashed")
+            return f"ERROR: meta_reflect raised {type(e).__name__}: {e}"
 
     def _execute_write_suggestion(self, tc: ToolCall) -> str:
         """Write an agent_suggestion inbox item (W13.3).

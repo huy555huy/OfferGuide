@@ -901,6 +901,72 @@ def create_app(
             },
         )
 
+    # ─────────── W13.6 long-horizon goals (north star) ────────────────
+
+    @app.get("/goals", response_class=HTMLResponse)
+    def goals_view(request: Request) -> Any:
+        from .. import goals as _goals
+        active = _goals.list_active_goals(store)
+        progress_list = [(g, _goals.compute_progress(store, g)) for g in active]
+        with store.connect() as conn:
+            history_rows = conn.execute(
+                "SELECT id, title, status, target_date, achieved_at "
+                "FROM user_goals WHERE status != 'active' "
+                "ORDER BY updated_at DESC LIMIT 10"
+            ).fetchall()
+        history = [
+            {"id": r[0], "title": r[1], "status": r[2],
+             "target_date": r[3], "achieved_at": r[4]}
+            for r in history_rows
+        ]
+        # Self-observations the agent has accumulated
+        self_obs = _goals.list_active_self_observations(store, limit=15)
+        return templates.TemplateResponse(
+            request, "goals.html",
+            _ctx(
+                request,
+                active=active, progress_list=progress_list,
+                history=history, self_obs=self_obs,
+                active_tab="goals",
+            ),
+        )
+
+    @app.post("/api/goals/add", response_class=JSONResponse)
+    def goals_add(
+        title: str = Form(...),
+        description: str = Form(""),
+        target_date: str = Form(""),
+        target_metric: str = Form(""),
+    ) -> dict:
+        from .. import goals as _goals
+        if not title.strip():
+            raise HTTPException(400, "title required")
+        td = target_date.strip() or None
+        if td:
+            try:
+                # Validate ISO
+                from datetime import date as _date
+                _date.fromisoformat(td)
+            except ValueError:
+                raise HTTPException(400, f"target_date must be YYYY-MM-DD, got {td!r}") from None
+        g = _goals.add_goal(
+            store, title=title.strip(),
+            description=description.strip() or None,
+            target_date=td,
+            target_metric=target_metric.strip() or None,
+        )
+        return {"id": g.id, "title": g.title, "status": g.status}
+
+    @app.post("/api/goals/{goal_id}/status", response_class=JSONResponse)
+    def goals_set_status(goal_id: int, status: str = Form(...)) -> dict:
+        from .. import goals as _goals
+        if status not in ("active", "paused", "achieved", "abandoned"):
+            raise HTTPException(400, f"unknown status {status!r}")
+        ok = _goals.update_goal_status(store, goal_id, status=status)  # type: ignore[arg-type]
+        if not ok:
+            raise HTTPException(404, f"goal#{goal_id} not found")
+        return {"id": goal_id, "status": status}
+
     @app.get("/evolution", response_class=HTMLResponse)
     def evolution_page(request: Request) -> Any:
         """W13.1 evolution observatory.

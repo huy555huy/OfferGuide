@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Goals (north star){% endblock %}
+{% block content %}
+
+<style>
+    .goal-card {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-left: 4px solid var(--primary);
+        border-radius: var(--radius);
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 1rem;
+    }
+    .goal-card.off-track { border-left-color: var(--warning); }
+    .goal-card.on-track  { border-left-color: var(--success); }
+    .goal-card .gtitle {
+        font-family: var(--font-serif);
+        font-size: 1.1rem; font-weight: 600;
+        margin-bottom: 0.25rem;
+    }
+    .goal-card .gmeta {
+        color: var(--text-muted); font-size: 0.78rem;
+        display: flex; gap: 0.625rem; margin-bottom: 0.5rem;
+    }
+    .funnel-row {
+        display: flex; gap: 0.5rem;
+        margin-top: 0.625rem; flex-wrap: wrap;
+    }
+    .funnel-cell {
+        flex: 1; min-width: 80px; text-align: center;
+        padding: 0.5rem; background: var(--bg-subtle);
+        border-radius: var(--radius-sm);
+    }
+    .funnel-cell .num { font-family: var(--font-serif); font-size: 1.4rem; font-weight: 600; }
+    .funnel-cell .lbl { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; }
+    .add-form {
+        background: var(--bg-elev); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 1rem 1.25rem; margin-bottom: 1rem;
+    }
+    .add-form .row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .add-form .row > * { flex: 1; }
+    .self-obs-card {
+        background: var(--bg-warm);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 0.75rem 1rem; margin-bottom: 0.5rem;
+        font-size: 0.875rem;
+    }
+    .self-obs-card .pkind {
+        font-size: 0.7rem; padding: 0.1rem 0.4rem;
+        background: var(--bg-elev); border-radius: 999px;
+        color: var(--text-muted); margin-right: 0.375rem;
+    }
+</style>
+
+<div class="page-title">
+    <div>
+        <h1>🎯 North Star</h1>
+        <p>
+            真 agent 跟 cron 的差: <strong>cron 看待办</strong>, <strong>agent 看目标</strong>。
+            在这里设你正在追的目标——agent 每次唤醒会读到, 让所有 maintenance / suggestion 对齐这条线。
+        </p>
+    </div>
+</div>
+
+{# ─────────── Add new goal ─────────── #}
+
+<div class="add-form">
+    <h3 style="margin-top: 0;">设一个新目标</h3>
+    <form id="goal-form" onsubmit="addGoal(event)">
+        <label class="field">
+            <span class="label-text">标题 (一句话, 必填)</span>
+            <input type="text" name="title" required
+                   placeholder="拿到 1 个 AI Agent 暑期实习 offer">
+        </label>
+        <div class="row" style="margin-top: 0.5rem;">
+            <label class="field">
+                <span class="label-text">截止日期 (YYYY-MM-DD)</span>
+                <input type="date" name="target_date">
+            </label>
+            <label class="field">
+                <span class="label-text">指标 (一句话)</span>
+                <input type="text" name="target_metric"
+                       placeholder="1 offer / 5 interview">
+            </label>
+        </div>
+        <label class="field" style="margin-top: 0.5rem;">
+            <span class="label-text">说明 (目标公司 / deal-breaker / 价值观, 给 agent 看的上下文)</span>
+            <textarea name="description" rows="3"
+                      placeholder="字节/腾讯/小红书优先; 不投纯算法 OD; 期望地点北京或上海"></textarea>
+        </label>
+        <div class="actions" style="margin-top: 0.75rem;">
+            <button type="submit">+ 加 goal</button>
+        </div>
+    </form>
+</div>
+
+{# ─────────── Active goals + progress ─────────── #}
+
+<div class="card">
+    <div class="card-header">
+        <h2>当前 active goals</h2>
+        <span class="meta">{{ active|length }} 个</span>
+    </div>
+
+    {% if not progress_list %}
+    <div class="empty">
+        <div style="font-size: 1.6rem;">🎯</div>
+        <div>还没设任何 goal</div>
+        <div class="small muted">没目标的 agent = 无目标的工具集合。设一个让 agent 知道你想去哪。</div>
+    </div>
+    {% endif %}
+
+    {% for g, p in progress_list %}
+    <div class="goal-card {{ 'on-track' if p.is_on_track else 'off-track' }}">
+        <div class="gtitle">{{ g.title }}</div>
+        <div class="gmeta">
+            {% if g.target_date %}
+                {% if p.days_left is not none and p.days_left < 0 %}
+                <span class="pill high">已过期 {{ -p.days_left }} 天</span>
+                {% elif p.days_left is not none %}
+                <span class="pill {% if p.days_left < 14 %}medium{% else %}low{% endif %}">
+                    剩 {{ p.days_left }} 天
+                </span>
+                {% endif %}
+                <span>target: {{ g.target_date }}</span>
+            {% endif %}
+            {% if g.target_metric %}<span>· 指标: {{ g.target_metric }}</span>{% endif %}
+            <span style="margin-left: auto;">
+                {% if p.is_on_track %}
+                <span class="pill low">on track</span>
+                {% else %}
+                <span class="pill medium">⚠ 节奏偏慢</span>
+                {% endif %}
+            </span>
+        </div>
+        {% if g.description %}
+        <div class="small muted" style="margin-bottom: 0.5rem;">{{ g.description }}</div>
+        {% endif %}
+
+        <div class="funnel-row">
+            <div class="funnel-cell"><div class="num">{{ p.apps_total }}</div><div class="lbl">投递</div></div>
+            <div class="funnel-cell"><div class="num">{{ p.apps_active }}</div><div class="lbl">进行中</div></div>
+            <div class="funnel-cell"><div class="num">{{ p.interviews_scheduled }}</div><div class="lbl">面试排期</div></div>
+            <div class="funnel-cell"><div class="num">{{ p.interviews_done }}</div><div class="lbl">面试结束</div></div>
+            <div class="funnel-cell"><div class="num" style="color: var(--success)">{{ p.offers }}</div><div class="lbl">offer</div></div>
+            <div class="funnel-cell"><div class="num" style="color: var(--danger)">{{ p.rejects }}</div><div class="lbl">拒绝</div></div>
+        </div>
+
+        {% if p.apps_silent_14d > 0 %}
+        <div class="small" style="color: var(--danger); margin-top: 0.5rem;">
+            ⚠ {{ p.apps_silent_14d }} 个申请 14+ 天没回 — 大概率挂了, 该清理或最后再 follow up 一次
+        </div>
+        {% endif %}
+
+        <div class="actions" style="margin-top: 0.75rem;">
+            <button class="ghost" onclick="setStatus({{ g.id }}, 'paused')">⏸ 暂停</button>
+            <button class="ghost" onclick="setStatus({{ g.id }}, 'achieved')">✓ 已达成</button>
+            <button class="ghost" onclick="setStatus({{ g.id }}, 'abandoned')">⊘ 放弃</button>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{# ─────────── Agent self-observations ─────────── #}
+
+<div class="card">
+    <div class="card-header">
+        <h2>📓 Agent 自我观察</h2>
+        <span class="meta">{{ self_obs|length }} 条 active · agent 自己写的, 它会记住</span>
+    </div>
+    {% if self_obs %}
+    {% for obs in self_obs %}
+    <div class="self-obs-card">
+        <span class="pkind">{{ obs.pattern_kind }}</span>
+        <strong>{{ obs.observation }}</strong>
+        {% if obs.valid_until %}
+        <span class="small muted" style="float: right;">expires julianday {{ "%.1f"|format(obs.valid_until) }}</span>
+        {% endif %}
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="empty">
+        <div>agent 还没写过自我观察</div>
+        <div class="small muted">跑几次 agent 后, 它会调 meta_reflect 把发现的 pattern 写到这里</div>
+    </div>
+    {% endif %}
+</div>
+
+{# ─────────── History ─────────── #}
+
+{% if history %}
+<div class="card">
+    <div class="card-header">
+        <h2>历史 goals</h2>
+    </div>
+    <table style="width: 100%;">
+        <thead>
+            <tr><th>ID</th><th>Title</th><th>状态</th><th>target_date</th></tr>
+        </thead>
+        <tbody>
+        {% for h in history %}
+        <tr><td>#{{ h.id }}</td><td>{{ h.title }}</td><td>{{ h.status }}</td><td>{{ h.target_date or '—' }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<script>
+async function addGoal(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const r = await fetch('/api/goals/add', {method: 'POST', body: fd});
+    if (r.ok) location.reload();
+    else alert('加 goal 失败: ' + await r.text());
+}
+async function setStatus(id, status) {
+    if (status !== 'achieved' && !confirm(`真的要把 goal#${id} 设为 ${status}?`)) return;
+    const fd = new FormData(); fd.append('status', status);
+    const r = await fetch(`/api/goals/${id}/status`, {method: 'POST', body: fd});
+    if (r.ok) location.reload();
+}
+</script>
+
+{% endblock %}
