@@ -377,18 +377,19 @@ class TestAgentLoopE2E:
         assert "ERROR" in tool_result_event.payload["result_preview"]
 
     def test_loop_respects_max_iterations(self, empty_store):
-        """Infinite tool-calling should hit the cap and emit error event."""
+        """Non-repeating tool calls should hit max_iter cap (not the
+        circuit breaker — that fires only on REPEAT pattern)."""
         skills = discover_skills(SKILLS_ROOT)
         class _SkillStubLLM:
             def chat(self, messages, **kw):
                 return LLMResponse(content="{}", model="stub")
         runtime = SkillRuntime(llm=_SkillStubLLM(), store=empty_store)
 
-        # Always return the same tool call — never finalize
+        # Each iter calls a DIFFERENT args (so circuit breaker doesn't fire)
         infinite_tool_calls = [
             _stub_resp_with_tool("score_match",
-                                  {"job_text": "x" * 250, "user_profile": "y"})
-            for _ in range(10)
+                                  {"job_text": f"unique_{i}" * 50, "user_profile": "y"})
+            for i in range(10)
         ]
         agent_stub = _StubLLMWithTools(tool_responses=infinite_tool_calls)
         loop = AgentLoop(
@@ -400,6 +401,66 @@ class TestAgentLoopE2E:
         kinds = [e.kind for e in result.events]
         assert "error" in kinds
         assert any("max_iter" in str(e.payload) for e in result.events if e.kind == "error")
+
+    def test_circuit_breaker_aborts_on_repeated_tool_calls(self, empty_store):
+        """W13.7: same (tool, args) 3 times in a row → abort, force final."""
+        skills = discover_skills(SKILLS_ROOT)
+        class _SkillStubLLM:
+            def chat(self, messages, **kw):
+                return LLMResponse(content="{}", model="stub")
+        runtime = SkillRuntime(llm=_SkillStubLLM(), store=empty_store)
+
+        # Same tool call IDENTICAL args 5 times — circuit breaker should fire on 3rd
+        repeat_calls = [
+            _stub_resp_with_tool("score_match",
+                                  {"job_text": "same" * 100, "user_profile": "same"})
+            for _ in range(5)
+        ]
+        agent_stub = _StubLLMWithTools(tool_responses=repeat_calls)
+        loop = AgentLoop(
+            llm=agent_stub, runtime=runtime, store=empty_store,
+            skills=skills, max_iterations=10,  # high max so we can prove breaker fired first
+        )
+        result = loop.run(goal="repeat test", trigger_kind="test")
+        # Breaker fired on iter 3 (1-based: 1st, 2nd, 3rd identical → abort)
+        assert result.iterations <= 3
+        # An 'error' event with circuit_breaker mention should appear
+        assert any(
+            "circuit_breaker" in str(e.payload)
+            for e in result.events if e.kind == "error"
+        )
+        # And a final event should follow (forced final)
+        assert any(e.kind == "final" for e in result.events)
+        # Final answer should mention the circuit breaker
+        final = next(e for e in result.events if e.kind == "final")
+        assert "circuit_breaker" in str(final.payload)
+
+    def test_circuit_breaker_doesnt_fire_on_distinct_calls(self, empty_store):
+        """Different args each iter should not trip the breaker."""
+        skills = discover_skills(SKILLS_ROOT)
+        class _SkillStubLLM:
+            def chat(self, messages, **kw):
+                return LLMResponse(content="{}", model="stub")
+        runtime = SkillRuntime(llm=_SkillStubLLM(), store=empty_store)
+
+        # 5 calls with different args, then a final
+        diverse_calls = [
+            _stub_resp_with_tool("score_match",
+                                  {"job_text": f"diff_{i}" * 100, "user_profile": "y"})
+            for i in range(5)
+        ] + [_stub_resp_final("done")]
+        agent_stub = _StubLLMWithTools(tool_responses=diverse_calls)
+        loop = AgentLoop(
+            llm=agent_stub, runtime=runtime, store=empty_store,
+            skills=skills, max_iterations=10,
+        )
+        result = loop.run(goal="diverse calls", trigger_kind="test")
+        assert "done" in result.final_answer
+        # No circuit_breaker error
+        assert not any(
+            "circuit_breaker" in str(e.payload)
+            for e in result.events if e.kind == "error"
+        )
 
     def test_event_callback_streams_in_real_time(self, empty_store):
         """on_event callback must fire for each event, in order."""

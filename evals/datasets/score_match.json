@@ -1,0 +1,54 @@
+[
+  {
+    "name": "high_match_ai_agent_intern",
+    "inputs": {
+      "job_text": "字节跳动 AI Lab · LLM Agent 工程师实习生\n岗位职责: 参与 AI Agent 平台核心模块开发, 设计 LLM agent runtime (tool registry / 长期记忆 / RAG)。\n要求: 熟练 Python; 有 LangGraph 或类似 agent 框架经验; 熟悉 LLM 应用开发 (prompt engineering / RAG / tool calling); 数学/统计基础, 能阅读论文实现; 在校生硕士/博士。",
+      "user_profile": "应届统计学硕士, 在某 AI 创业公司做过 Deep Research Agent (双层 LangGraph state machine, 自主决策可闭环验证), 用过 DSPy + Constitutional AI 思路做 RL reward shaping。熟悉 RAG / tool calling / Pydantic v2。"
+    },
+    "expected": {
+      "json_valid": true,
+      "must_contain_keys": ["probability", "reasoning", "dimensions", "deal_breakers"],
+      "score_range": {"probability": [0.55, 0.95]}
+    },
+    "notes": "Backgrounds align tightly with JD — should score solidly positive, not low"
+  },
+  {
+    "name": "low_match_finance_quant",
+    "inputs": {
+      "job_text": "高盛 量化交易策略组 · 全职量化研究员\n要求: 5+ 年金融/量化经验; 精通 C++ + Python; 熟悉 Black-Scholes / 蒙特卡洛 / 高频策略; 能在 sub-microsecond 延迟下做交易策略落地。CFA 优先。",
+      "user_profile": "应届统计学硕士, 主要做 LLM agent 项目 (LangGraph / RAG)。没有量化金融经验, 没碰过 C++, 没有 CFA。"
+    },
+    "expected": {
+      "json_valid": true,
+      "must_contain_keys": ["probability", "reasoning", "deal_breakers"],
+      "score_range": {"probability": [0.0, 0.30]}
+    },
+    "notes": "Background completely doesn't match (5 yr exp + C++ + CFA all deal-breakers for fresh grad)"
+  },
+  {
+    "name": "deal_breaker_5_year_exp",
+    "inputs": {
+      "job_text": "腾讯 高级研发工程师 · 后端 (T8)\n要求: 5+ 年生产 Java 后端经验; 主导过千万 DAU 系统重构; 字节/阿里/腾讯/美团 P7 级别背景优先。",
+      "user_profile": "应届统计学硕士, 0 年工作经验。Python/PyTorch 为主, Java 只在课程里碰过。"
+    },
+    "expected": {
+      "json_valid": true,
+      "must_contain_keys": ["deal_breakers"],
+      "score_range": {"probability": [0.0, 0.20]}
+    },
+    "notes": "5-year exp requirement is a hard deal-breaker; probability MUST be capped low"
+  },
+  {
+    "name": "moderate_match_data_engineer",
+    "inputs": {
+      "job_text": "美团 数据平台 · 数据工程师实习\n要求: 熟悉 Python / SQL; 做过 ETL pipeline; 有 Spark / Flink 加分; 在校生本/硕。",
+      "user_profile": "应届统计学硕士, 课程做过 Spark, 实习过数据分析岗 (做 ETL 和报表), 主项目是 LLM agent (跟数据工程沾点边但不主业)。"
+    },
+    "expected": {
+      "json_valid": true,
+      "must_contain_keys": ["probability", "reasoning"],
+      "score_range": {"probability": [0.30, 0.65]}
+    },
+    "notes": "Partial match — sql/python/spark covered, but main project is agent not DE"
+  }
+]

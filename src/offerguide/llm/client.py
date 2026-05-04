@@ -27,6 +27,8 @@ from typing import Any, Literal
 
 import httpx
 
+from .pricing import estimate_cost_usd as _estimate_cost  # noqa: E402
+
 DEFAULT_DEEPSEEK_BASE = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 
@@ -271,11 +273,15 @@ class LLMClient:
             content = _strip_md_codefence(content)
 
         usage = payload.get("usage", {})
+        prompt_tokens = int(usage.get("prompt_tokens", 0))
+        completion_tokens = int(usage.get("completion_tokens", 0))
+        actual_model = payload.get("model", body["model"])
         return LLMResponse(
             content=content,
-            model=payload.get("model", body["model"]),
-            prompt_tokens=int(usage.get("prompt_tokens", 0)),
-            completion_tokens=int(usage.get("completion_tokens", 0)),
+            model=actual_model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=_estimate_cost(model=actual_model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens),
             latency_ms=latency_ms,
             raw=payload,
         )
@@ -377,11 +383,15 @@ class LLMClient:
             ))
 
         usage = payload.get("usage", {})
+        prompt_tokens = int(usage.get("prompt_tokens", 0))
+        completion_tokens = int(usage.get("completion_tokens", 0))
+        actual_model = payload.get("model", body["model"])
         return LLMResponse(
             content=content,
-            model=payload.get("model", body["model"]),
-            prompt_tokens=int(usage.get("prompt_tokens", 0)),
-            completion_tokens=int(usage.get("completion_tokens", 0)),
+            model=actual_model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=_estimate_cost(model=actual_model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens),
             latency_ms=latency_ms,
             raw=payload,
             tool_calls=tool_calls,

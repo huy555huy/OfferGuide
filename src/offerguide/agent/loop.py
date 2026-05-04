@@ -98,6 +98,13 @@ TOOL_RESULT_CONTEXT_CAP = 6000
 # stored verbatim in trajectory_json so nothing is lost).
 TOOL_RESULT_UI_PREVIEW_CAP = 800
 
+# W13.7 — circuit breaker: if the model repeats the SAME tool with the SAME
+# arguments this many times in a row, abort the loop. Catches the runaway
+# pattern that ate 80s of dogfood time pre-W13.0 (read_job(1) → result →
+# read_job(1) → result → ...). Anthropic explicitly calls this out as the
+# #1 production agent failure mode.
+CIRCUIT_BREAKER_REPEAT_THRESHOLD = 3
+
 
 SYSTEM_PROMPT = """你是用户的求职 copilot。
 关于用户的具体信息（姓名、学校、专业、目标方向、过往项目细节、偏好）都在 user_facts 里——
@@ -875,11 +882,18 @@ class AgentLoop:
         # the critique step can write evolution_signals attributing the
         # critic_score to the SKILLs that ran. Keyed by tool_call.id.
         skill_invocations: dict[str, dict] = {}
+        # W13.7 circuit breaker — track recent (tool_name, args_signature) so
+        # we can detect "model is stuck repeating itself" pattern.
+        recent_tool_signatures: list[str] = []
         # Expose to action tools (write_suggestion needs run_id + last skill
         # for attribution). Cleared at end of run() so subsequent invocations
         # of run() get a clean slate.
         self._current_run_id = run_id
         self._current_skill_invocations = skill_invocations
+        # W13.7 — accumulate token + $ cost across all LLM calls in this run
+        self._current_total_cost_usd: float = 0.0
+        self._current_total_prompt_tokens: int = 0
+        self._current_total_completion_tokens: int = 0
 
         def emit(kind: str, **payload: Any) -> AgentEvent:
             ev = AgentEvent(
@@ -928,6 +942,10 @@ class AgentLoop:
                     tools=self._tool_schemas,
                     temperature=0.4,
                 )
+                # Accumulate cost for this iteration's LLM call
+                self._current_total_cost_usd += float(getattr(resp, "cost_usd", 0.0) or 0.0)
+                self._current_total_prompt_tokens += int(getattr(resp, "prompt_tokens", 0) or 0)
+                self._current_total_completion_tokens += int(getattr(resp, "completion_tokens", 0) or 0)
             except LLMError as e:
                 emit("error", message=f"LLM call failed at iter {iteration}: {e}")
                 return self._finalize(
@@ -977,6 +995,53 @@ class AgentLoop:
                     for tc in resp.tool_calls
                 ],
             })
+
+            # ── W13.7 circuit breaker: detect repeat-loop ──
+            # Compute a signature for each tool call this iteration. If
+            # ALL of this iteration's calls have appeared identically in
+            # the last CIRCUIT_BREAKER_REPEAT_THRESHOLD iterations, stop.
+            this_iter_signatures = [
+                f"{tc.name}({json.dumps(tc.arguments, ensure_ascii=False, sort_keys=True)})"
+                for tc in resp.tool_calls
+            ]
+            recent_window = recent_tool_signatures[
+                -CIRCUIT_BREAKER_REPEAT_THRESHOLD * len(this_iter_signatures):
+            ] if this_iter_signatures else []
+            # Count how many times the exact set has appeared
+            same_pattern_count = 0
+            window_size = len(this_iter_signatures)
+            if window_size > 0:
+                # Walk backward through recent_tool_signatures in chunks of window_size
+                for chunk_start in range(
+                    len(recent_window) - window_size,
+                    -1,
+                    -window_size,
+                ):
+                    chunk = recent_window[chunk_start:chunk_start + window_size]
+                    if chunk == this_iter_signatures:
+                        same_pattern_count += 1
+                    else:
+                        break
+            if same_pattern_count >= CIRCUIT_BREAKER_REPEAT_THRESHOLD - 1:
+                # Already happened N-1 times before this iter — this iter
+                # would make N. Trip the breaker, abort, force final.
+                emit(
+                    "error",
+                    message=(
+                        f"circuit_breaker: same tool pattern repeated "
+                        f"{same_pattern_count + 1} times in a row "
+                        f"({this_iter_signatures}); aborting to prevent runaway"
+                    ),
+                )
+                final_answer = (
+                    f"(circuit_breaker fired — agent stuck repeating "
+                    f"{this_iter_signatures} {same_pattern_count + 1} times. "
+                    f"Trajectory shows the loop; check skill output to fix root cause.)"
+                )
+                emit("final", text=final_answer, iteration=iteration)
+                break
+            # Append this iter's signatures to history before executing
+            recent_tool_signatures.extend(this_iter_signatures)
 
             # Execute each tool sequentially
             for tc in resp.tool_calls:
@@ -1047,11 +1112,15 @@ class AgentLoop:
                 events=events, t0=t0, iterations=final_iteration,
                 final_answer=final_answer,
                 critic_score=critic_score, critic_notes=critic_notes,
+                total_cost_usd=self._current_total_cost_usd,
             )
         finally:
             # Clear per-run state so subsequent run() calls don't leak attribution
             self._current_run_id = None
             self._current_skill_invocations = {}
+            self._current_total_cost_usd = 0.0
+            self._current_total_prompt_tokens = 0
+            self._current_total_completion_tokens = 0
 
     # -------- internals --------
 
@@ -1480,6 +1549,7 @@ class AgentLoop:
         iterations: int = 0,
         critic_score: float | None = None,
         critic_notes: str | None = None,
+        total_cost_usd: float = 0.0,
         error: str | None = None,
     ) -> AgentRunResult:
         latency_ms = int((time.monotonic() - t0) * 1000)
@@ -1491,7 +1561,7 @@ class AgentLoop:
                         "UPDATE agent_runs SET ended_at = julianday('now'), "
                         "  status = ?, iterations = ?, final_answer = ?, "
                         "  trajectory_json = ?, critic_score = ?, critic_notes = ?, "
-                        "  latency_ms = ?, error_text = ? "
+                        "  latency_ms = ?, cost_usd = ?, error_text = ? "
                         "WHERE id = ?",
                         (
                             status, iterations, final_answer,
@@ -1501,7 +1571,7 @@ class AgentLoop:
                                 default=str,
                             ),
                             critic_score, critic_notes,
-                            latency_ms, error,
+                            latency_ms, float(total_cost_usd), error,
                             run_id,
                         ),
                     )
@@ -1514,7 +1584,7 @@ class AgentLoop:
             final_answer=final_answer,
             events=events,
             iterations=iterations,
-            cost_usd=0.0,  # TODO wire ccvibe pricing later
+            cost_usd=float(total_cost_usd),
             latency_ms=latency_ms,
             critic_score=critic_score,
             critic_notes=critic_notes,

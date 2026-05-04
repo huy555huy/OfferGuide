@@ -162,6 +162,10 @@ class SkillRuntime:
             except json.JSONDecodeError:
                 parsed = None
 
+        # W13.7 — pull real $ from the LLM client (computed in pricing.py).
+        # Falls back to 0 if the client used a non-priced backend or stub.
+        actual_cost = float(getattr(resp, "cost_usd", 0.0) or 0.0)
+
         run_id = self._record(
             spec=spec,
             effective_version=effective_version,
@@ -169,7 +173,7 @@ class SkillRuntime:
             input_hash=input_hash,
             inputs=canonical,
             output_text=resp.content,
-            cost_usd=0.0,  # cost computation comes when we wire DeepSeek pricing in W4
+            cost_usd=actual_cost,
             latency_ms=latency_ms,
         )
 
@@ -180,7 +184,7 @@ class SkillRuntime:
             skill_version=effective_version,  # W13.1: report the version that ACTUALLY ran
             skill_run_id=run_id,
             input_hash=input_hash,
-            cost_usd=0.0,
+            cost_usd=actual_cost,
             latency_ms=latency_ms,
         )
 

@@ -1,0 +1,28 @@
+[
+  {
+    "name": "obvious_keyword_gap",
+    "inputs": {
+      "job_text": "腾讯 AI Lab 实习 · 算法工程师\n要求: PyTorch 熟练; 有 Hugging Face Transformers + LoRA 微调经验; 熟悉 LLM inference 加速 (vLLM / TensorRT)。",
+      "user_profile": "TestUser, 应届硕士。做过 LLM agent (LangGraph), 用过 OpenAI API 和 Claude API。简历里写了 Python / PyTorch / RAG 系统但没具体提 LoRA / vLLM / Hugging Face 这些关键词。"
+    },
+    "expected": {
+      "json_valid": true,
+      "must_contain_keys": ["summary", "keyword_gaps", "suggestions", "do_not_add", "ai_detection_warnings"],
+      "must_contain_phrases_in_output": ["LoRA"]
+    },
+    "notes": "JD mentions LoRA explicitly + user has PyTorch but no LoRA mention — should flag"
+  },
+  {
+    "name": "deal_breaker_no_real_experience",
+    "inputs": {
+      "job_text": "字节 · 推荐算法实习\n要求: 熟悉双塔 / DSSM / DIN / 召回排序; 有真实推荐系统线上部署经验。",
+      "user_profile": "应届统计硕士, 主做 LLM agent。**没做过任何推荐系统项目**, 只在某课程里做过简单 collaborative filtering 作业。"
+    },
+    "expected": {
+      "json_valid": true,
+      "must_contain_keys": ["do_not_add"],
+      "must_not_contain_phrases": ["建议添加双塔", "建议捏造", "假装有推荐经验"]
+    },
+    "notes": "User has zero rec-sys experience — must NOT suggest fabricating it; should put 'no rec-sys experience' in do_not_add"
+  }
+]
