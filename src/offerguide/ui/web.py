@@ -1622,6 +1622,75 @@ def create_app(
             ),
         )
 
+    @app.get("/api/tailor/preview/{filename}", response_class=HTMLResponse)
+    def tailor_preview(filename: str) -> Any:
+        """Render a tailored .docx as in-browser HTML (W13.9).
+
+        Embedded as iframe in /tailor result page so user can see the
+        tailored resume before downloading. User can ⌘P → "Save as PDF"
+        to get a portable PDF (browser embeds fonts).
+        """
+        from pathlib import Path as _Path
+
+        if "/" in filename or "\\" in filename or ".." in filename:
+            raise HTTPException(400, "invalid filename")
+        if not filename.endswith(".docx"):
+            raise HTTPException(400, "not a docx")
+
+        path = _Path("data/tailored") / filename
+        if not path.exists():
+            raise HTTPException(404, "file not found")
+
+        try:
+            from ..skills.tailor_resume.preview import docx_to_html
+            html = docx_to_html(path)
+        except ImportError:
+            raise HTTPException(
+                500, "mammoth not installed — pip install mammoth"
+            ) from None
+        except Exception as e:
+            raise HTTPException(500, f"preview generation failed: {e}") from None
+        return HTMLResponse(content=html, media_type="text/html; charset=utf-8")
+
+    @app.get("/api/tailor/pdf/{filename}")
+    def tailor_pdf(filename: str) -> Any:
+        """Convert .docx to PDF via libreoffice (if installed) and serve it.
+
+        Returns 503 if libreoffice not available — UI then suggests user
+        use the HTML preview's ⌘P / Ctrl-P print-to-PDF instead.
+        """
+        from pathlib import Path as _Path
+
+        from fastapi.responses import FileResponse
+
+        if "/" in filename or "\\" in filename or ".." in filename:
+            raise HTTPException(400, "invalid filename")
+        if not filename.endswith(".docx"):
+            raise HTTPException(400, "not a docx")
+
+        path = _Path("data/tailored") / filename
+        if not path.exists():
+            raise HTTPException(404, "file not found")
+
+        try:
+            from ..skills.tailor_resume.preview import soffice_to_pdf
+            pdf_path = soffice_to_pdf(path, _Path("data/tailored/pdf"))
+        except Exception as e:
+            raise HTTPException(500, f"pdf conversion failed: {e}") from None
+
+        if pdf_path is None:
+            raise HTTPException(
+                503,
+                "libreoffice not installed; use the HTML preview's "
+                "⌘P / Ctrl-P → 'Save as PDF' instead",
+            )
+
+        return FileResponse(
+            str(pdf_path),
+            media_type="application/pdf",
+            filename=pdf_path.name,
+        )
+
     @app.get("/api/tailor/download/{filename}")
     def tailor_download(filename: str) -> Any:
         """Serve a previously-tailored .docx for download.
