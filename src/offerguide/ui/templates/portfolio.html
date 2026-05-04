@@ -68,6 +68,20 @@
 
 {# ─────────── Hero stats ─────────── #}
 
+{% if n_agent_runs == 0 %}
+<div class="empty" style="margin-bottom: 1rem;">
+    <div class="empty-icon">📦</div>
+    <div class="empty-title">数据还很少, 这页主要展示骨架</div>
+    <div class="empty-hint">
+        agent run 一次, 调过几个 SKILL, 各类指标就会真出现在这里。<br>
+        <strong>2-4 周日常使用后</strong>, 这页是最适合放在简历上的 OfferGuide 演示链接。
+    </div>
+    <div class="empty-action">
+        <a href="/agent" class="btn">▶ 跑一次 agent 让数据动起来</a>
+    </div>
+</div>
+{% endif %}
+
 <div class="hero-stats">
     <div class="hero-stat">
         <div class="lbl">Agent runs</div>

@@ -104,6 +104,24 @@
             font-weight: 600;
         }
 
+        /* W14.5 — nav badge counts */
+        .nav-badge {
+            display: inline-flex; align-items: center;
+            margin-left: 0.25rem;
+            padding: 0.05rem 0.4rem;
+            font-size: 0.65rem;
+            font-weight: 700;
+            border-radius: 999px;
+            background: var(--bg-subtle);
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+            line-height: 1.4;
+        }
+        .nav-badge.low    { background: var(--success-soft); color: var(--success); }
+        .nav-badge.middle { background: var(--warning-soft); color: var(--warning); }
+        .nav-badge.high   { background: var(--danger-soft);  color: var(--danger); }
+        .nav-badge.medium { background: var(--primary-soft); color: var(--primary); }
+
         /* 「更多」折叠下拉菜单 */
         .nav-more {
             position: relative;
@@ -462,9 +480,96 @@
             border: 1px dashed var(--border);
             border-radius: var(--radius);
         }
+        .empty .empty-icon {
+            font-size: 2rem; margin-bottom: 0.5rem; opacity: 0.6;
+        }
+        .empty .empty-title {
+            font-size: 0.95rem; color: var(--text); font-weight: 500;
+            margin-bottom: 0.375rem;
+        }
+        .empty .empty-hint {
+            font-size: 0.8rem; color: var(--text-muted); margin: 0.25rem 0;
+        }
+        .empty .empty-action { margin-top: 0.875rem; }
+
         .htmx-indicator { opacity: 0; transition: opacity 0.2s; }
         .htmx-request .htmx-indicator { opacity: 1; }
         .htmx-request.htmx-indicator { opacity: 1; }
+
+        /* W14.5 — loading spinner (inline + button) */
+        .spinner {
+            display: inline-block;
+            width: 12px; height: 12px;
+            border: 2px solid var(--border);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        button.is-loading .spinner { margin-right: 0.25rem; }
+        button.is-loading { opacity: 0.7; cursor: wait; }
+
+        /* W14.5 — status row left-borders (for inbox/applications/runs lists) */
+        .row-status-ok    { border-left: 3px solid var(--success); }
+        .row-status-warn  { border-left: 3px solid var(--warning); }
+        .row-status-bad   { border-left: 3px solid var(--danger); }
+        .row-status-info  { border-left: 3px solid var(--primary); }
+        .row-status-dim   { border-left: 3px solid var(--text-dim); }
+
+        /* W14.5 — collapsible section helper */
+        details.collapsible {
+            background: var(--bg-elev);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            margin-bottom: 0.5rem;
+        }
+        details.collapsible > summary {
+            cursor: pointer;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            list-style: none;
+            display: flex; align-items: center; gap: 0.5rem;
+        }
+        details.collapsible > summary::-webkit-details-marker { display: none; }
+        details.collapsible > summary::before {
+            content: "▸"; transition: transform 0.15s;
+            font-size: 0.7rem; color: var(--text-dim);
+        }
+        details.collapsible[open] > summary::before { transform: rotate(90deg); }
+        details.collapsible > summary:hover { background: var(--bg-subtle); }
+        details.collapsible > .content {
+            padding: 0 0.75rem 0.625rem;
+            border-top: 1px solid var(--border-soft);
+        }
+
+        /* W14.5 — toast notifications (used by JS shared toast()) */
+        .toast-container {
+            position: fixed; bottom: 20px; left: 50%;
+            transform: translateX(-50%);
+            z-index: 9999; pointer-events: none;
+        }
+        .toast {
+            background: var(--bg-elev);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--primary);
+            border-radius: var(--radius-sm);
+            padding: 0.625rem 1rem;
+            margin-top: 0.5rem;
+            box-shadow: var(--shadow-md);
+            font-size: 0.875rem;
+            min-width: 200px; max-width: 400px;
+            animation: toast-in 0.2s ease-out;
+            pointer-events: auto;
+        }
+        .toast.error { border-left-color: var(--danger); color: var(--danger); }
+        .toast.warn  { border-left-color: var(--warning); color: var(--warning); }
+        .toast.success { border-left-color: var(--success); color: var(--success); }
+        @keyframes toast-in {
+            from { opacity: 0; transform: translateY(10px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
 
         section + section { margin-top: 0.75rem; }
         .section-title {
@@ -505,8 +610,18 @@
         <div class="brand"><span class="dot"></span> OfferGuide</div>
         <nav>
             <a href="/"             class="{% if active_tab == 'home' %}active{% endif %}">今日</a>
-            <a href="/agent"        class="{% if active_tab == 'agent' %}active{% endif %}">🤖 Agent</a>
-            <a href="/goals"        class="{% if active_tab == 'goals' %}active{% endif %}">🎯 Goals</a>
+            <a href="/agent"        class="{% if active_tab == 'agent' %}active{% endif %}">
+                🤖 Agent
+                {% if nav and nav.last_critic is not none %}
+                <span class="nav-badge {% if nav.last_critic >= 0.7 %}low{% elif nav.last_critic >= 0.4 %}middle{% else %}high{% endif %}">{{ "%.2f"|format(nav.last_critic) }}</span>
+                {% endif %}
+            </a>
+            <a href="/goals"        class="{% if active_tab == 'goals' %}active{% endif %}">
+                🎯 Goals
+                {% if nav and nav.goals_off_track > 0 %}
+                <span class="nav-badge high" title="{{ nav.goals_off_track }} 个 goal off-track">⚠ {{ nav.goals_off_track }}</span>
+                {% endif %}
+            </a>
             <a href="/pipeline"     class="{% if active_tab == 'pipeline' %}active{% endif %}">投递看板</a>
             <a href="/applications" class="{% if active_tab == 'applications' %}active{% endif %}">投递记录</a>
             <details class="nav-more">
@@ -518,7 +633,12 @@
                     <a href="/interviews" class="{% if active_tab == 'interviews' %}active{% endif %}">面经库</a>
                     <a href="/stories"    class="{% if active_tab == 'stories' %}active{% endif %}">故事库</a>
                     <a href="/reflect"    class="{% if active_tab == 'reflect' %}active{% endif %}">面试复盘</a>
-                    <a href="/inbox"      class="{% if active_tab == 'inbox' %}active{% endif %}">待办收件箱</a>
+                    <a href="/inbox"      class="{% if active_tab == 'inbox' %}active{% endif %}">
+                        待办收件箱
+                        {% if nav and nav.inbox_pending > 0 %}
+                        <span class="nav-badge medium">{{ nav.inbox_pending }}</span>
+                        {% endif %}
+                    </a>
                     <a href="/funnel"     class="{% if active_tab == 'funnel' %}active{% endif %}">📊 漏斗</a>
                     <a href="/evolution"  class="{% if active_tab == 'evolution' %}active{% endif %}">🧬 进化</a>
                     <a href="/portfolio"  class="{% if active_tab == 'portfolio' %}active{% endif %}">📦 Portfolio</a>
@@ -539,5 +659,40 @@
     <main>
         {% block content %}{% endblock %}
     </main>
+    <div class="toast-container" id="og-toast-container"></div>
+    <script>
+        // W14.5 — global toast helper used by all pages for ephemeral feedback.
+        // Usage: toast("message"), toast("oops", "error"), toast("done", "success", 4000)
+        window.toast = function(msg, kind, durationMs) {
+            kind = kind || 'info';
+            durationMs = durationMs || 3000;
+            const c = document.getElementById('og-toast-container');
+            if (!c) return;
+            const div = document.createElement('div');
+            div.className = 'toast ' + (kind === 'info' ? '' : kind);
+            div.textContent = msg;
+            c.appendChild(div);
+            setTimeout(function() {
+                div.style.transition = 'opacity 0.2s';
+                div.style.opacity = '0';
+                setTimeout(function() { div.remove(); }, 220);
+            }, durationMs);
+        };
+        // Helper: wrap a fetch button into a loading-state pattern.
+        // Usage: btnLoading(button); ... btnReset(button);
+        window.btnLoading = function(btn) {
+            if (!btn) return;
+            btn.dataset.originalText = btn.innerHTML;
+            btn.classList.add('is-loading');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span>' + (btn.dataset.loadingText || '处理中...');
+        };
+        window.btnReset = function(btn) {
+            if (!btn) return;
+            btn.classList.remove('is-loading');
+            btn.disabled = false;
+            if (btn.dataset.originalText) btn.innerHTML = btn.dataset.originalText;
+        };
+    </script>
 </body>
 </html>

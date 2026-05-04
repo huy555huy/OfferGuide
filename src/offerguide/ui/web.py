@@ -64,10 +64,40 @@ def create_app(
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
     def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
+        # W14.5 — compute nav badges so every page shows live counts:
+        #   inbox: pending items
+        #   goals: off-track goals
+        #   agent: last critic score (color-coded in template)
+        # Single SQL pass each — fast, doesn't dominate page render.
+        nav = {"inbox_pending": 0, "goals_off_track": 0, "last_critic": None}
+        try:
+            with store.connect() as conn:
+                nav["inbox_pending"] = conn.execute(
+                    "SELECT COUNT(*) FROM inbox_items WHERE status='pending'"
+                ).fetchone()[0]
+                row = conn.execute(
+                    "SELECT critic_score FROM agent_runs "
+                    "WHERE critic_score IS NOT NULL AND status='ok' "
+                    "ORDER BY started_at DESC LIMIT 1"
+                ).fetchone()
+                nav["last_critic"] = row[0] if row else None
+            # Off-track goal count needs goals module (avoid circular)
+            try:
+                from .. import goals as _gmod
+                for g in _gmod.list_active_goals(store):
+                    p = _gmod.compute_progress(store, g)
+                    if not p.is_on_track:
+                        nav["goals_off_track"] += 1
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         base = {
             "request": request,
             "profile_loaded": profile is not None,
             "profile_chars": len(profile.raw_resume_text) if profile else 0,
+            "nav": nav,
         }
         base.update(extra)
         return base

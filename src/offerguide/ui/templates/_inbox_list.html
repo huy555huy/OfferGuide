@@ -1,7 +1,8 @@
 {% if items %}
 <div class="inbox-list">
     {% for it in items %}
-    <div class="inbox-row" id="inbox-row-{{ it.id }}"
+    <div class="inbox-row {% if it.status == 'approved' %}row-status-ok{% elif it.status == 'rejected' %}row-status-bad{% elif it.status == 'dismissed' %}row-status-dim{% elif it.status == 'pending' %}row-status-info{% endif %}"
+         id="inbox-row-{{ it.id }}"
          {% if it.kind == 'agent_suggestion' %}style="grid-template-columns: 50px 1fr auto auto; padding: 0.875rem 0;"{% endif %}>
 
         <span class="id-col">#{{ it.id }}</span>
@@ -56,8 +57,15 @@
 </div>
 {% else %}
 <div class="empty">
-    <div style="font-size: 1.5rem; margin-bottom: 0.25rem;">📥</div>
-    <div>暂无 inbox 项</div>
-    <div class="small muted">agent 看到值得让你知道的事会写到这里</div>
+    <div class="empty-icon">📥</div>
+    <div class="empty-title">暂无 inbox 项</div>
+    <div class="empty-hint">
+        agent 看到值得让你知道的事会主动写到这里——例如:<br>
+        <em>"建议给字节 AI Agent tailor 简历 (score 0.85)"</em><br>
+        <em>"你那个腾讯申请已 silent 14 天, 建议最后 follow up 一次"</em>
+    </div>
+    <div class="empty-action">
+        <a href="/agent" class="btn">▶ 跑一次 agent 让它看现状</a>
+    </div>
 </div>
 {% endif %}

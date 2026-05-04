@@ -69,28 +69,30 @@
     <h3 style="margin-top: 0;">设一个新目标</h3>
     <form id="goal-form" onsubmit="addGoal(event)">
         <label class="field">
-            <span class="label-text">标题 (一句话, 必填)</span>
-            <input type="text" name="title" required
-                   placeholder="拿到 1 个 AI Agent 暑期实习 offer">
+            <span class="label-text">标题 (一句话, 必填) <span id="title-err" style="color:var(--danger); font-size:0.78rem;"></span></span>
+            <input type="text" name="title" id="title-input" required
+                   placeholder="拿到 1 个 AI Agent 暑期实习 offer"
+                   minlength="4" maxlength="80">
         </label>
         <div class="row" style="margin-top: 0.5rem;">
             <label class="field">
-                <span class="label-text">截止日期 (YYYY-MM-DD)</span>
+                <span class="label-text">截止日期 (留空 = 没硬 deadline)</span>
                 <input type="date" name="target_date">
             </label>
             <label class="field">
-                <span class="label-text">指标 (一句话)</span>
+                <span class="label-text">指标 (一句话, 可选)</span>
                 <input type="text" name="target_metric"
-                       placeholder="1 offer / 5 interview">
+                       placeholder="1 offer · 5 interview · 10 quality apps">
             </label>
         </div>
         <label class="field" style="margin-top: 0.5rem;">
-            <span class="label-text">说明 (目标公司 / deal-breaker / 价值观, 给 agent 看的上下文)</span>
+            <span class="label-text">说明 (目标公司 / deal-breaker / 价值观, agent 会看)</span>
             <textarea name="description" rows="3"
-                      placeholder="字节/腾讯/小红书优先; 不投纯算法 OD; 期望地点北京或上海"></textarea>
+                      placeholder="例如: 字节/腾讯/小红书优先; 不投纯算法 OD; 期望地点北京或上海"></textarea>
         </label>
         <div class="actions" style="margin-top: 0.75rem;">
-            <button type="submit">+ 加 goal</button>
+            <button type="submit" id="goal-submit-btn" data-loading-text="保存中...">+ 加 goal</button>
+            <span class="muted small">ℹ︎ 设了 goal 之后, agent 每次唤醒会读到, 让所有行动对齐</span>
         </div>
     </form>
 </div>
@@ -105,9 +107,15 @@
 
     {% if not progress_list %}
     <div class="empty">
-        <div style="font-size: 1.6rem;">🎯</div>
-        <div>还没设任何 goal</div>
-        <div class="small muted">没目标的 agent = 无目标的工具集合。设一个让 agent 知道你想去哪。</div>
+        <div class="empty-icon">🎯</div>
+        <div class="empty-title">还没设任何 goal</div>
+        <div class="empty-hint">
+            没目标的 agent = 无目标的工具集合。设一个让 agent 知道你想去哪、做事时朝哪走。<br>
+            <span style="opacity: 0.8;">例: <em>"2026 暑期拿到 1 个 AI Agent 实习 offer"</em>, target_date 6/15</span>
+        </div>
+        <div class="empty-action">
+            <button onclick="document.querySelector('input[name=title]').focus()">↑ 在上方表单设</button>
+        </div>
     </div>
     {% endif %}
 
@@ -175,14 +183,18 @@
         <span class="pkind">{{ obs.pattern_kind }}</span>
         <strong>{{ obs.observation }}</strong>
         {% if obs.valid_until %}
-        <span class="small muted" style="float: right;">expires julianday {{ "%.1f"|format(obs.valid_until) }}</span>
+        <span class="small muted" style="float: right;">⏳ 有期</span>
         {% endif %}
     </div>
     {% endfor %}
     {% else %}
     <div class="empty">
-        <div>agent 还没写过自我观察</div>
-        <div class="small muted">跑几次 agent 后, 它会调 meta_reflect 把发现的 pattern 写到这里</div>
+        <div class="empty-icon">📓</div>
+        <div class="empty-title">agent 还没写过自我观察</div>
+        <div class="empty-hint">
+            agent 跑 5+ 次后, 它会调 <code>meta_reflect</code> 把"我发现自己反复 X" 写到这里。<br>
+            是 agent 学习 ABOUT agent 自己的笔记 — 跟 user_facts (关于你) 不同。
+        </div>
     </div>
     {% endif %}
 </div>
@@ -210,16 +222,47 @@
 <script>
 async function addGoal(e) {
     e.preventDefault();
+    const titleEl = document.getElementById('title-input');
+    const errEl = document.getElementById('title-err');
+    errEl.textContent = '';
+    const title = titleEl.value.trim();
+    if (title.length < 4) {
+        errEl.textContent = '· 至少 4 字';
+        titleEl.focus();
+        return;
+    }
+    const btn = document.getElementById('goal-submit-btn');
+    window.btnLoading(btn);
     const fd = new FormData(e.target);
-    const r = await fetch('/api/goals/add', {method: 'POST', body: fd});
-    if (r.ok) location.reload();
-    else alert('加 goal 失败: ' + await r.text());
+    try {
+        const r = await fetch('/api/goals/add', {method: 'POST', body: fd});
+        if (r.ok) {
+            window.toast('goal 加好了', 'success', 1500);
+            setTimeout(() => location.reload(), 600);
+        } else {
+            const txt = await r.text();
+            errEl.textContent = '· ' + txt.slice(0, 100);
+            window.btnReset(btn);
+        }
+    } catch (err) {
+        window.toast('网络错误: ' + err, 'error');
+        window.btnReset(btn);
+    }
 }
 async function setStatus(id, status) {
     if (status !== 'achieved' && !confirm(`真的要把 goal#${id} 设为 ${status}?`)) return;
     const fd = new FormData(); fd.append('status', status);
-    const r = await fetch(`/api/goals/${id}/status`, {method: 'POST', body: fd});
-    if (r.ok) location.reload();
+    try {
+        const r = await fetch(`/api/goals/${id}/status`, {method: 'POST', body: fd});
+        if (r.ok) {
+            window.toast(`已设为 ${status}`, 'success', 1500);
+            setTimeout(() => location.reload(), 600);
+        } else {
+            window.toast('失败: ' + await r.text(), 'error');
+        }
+    } catch (e) {
+        window.toast('网络错误: ' + e, 'error');
+    }
 }
 </script>
 

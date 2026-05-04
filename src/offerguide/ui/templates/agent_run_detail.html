@@ -130,7 +130,10 @@
         </div>
         <div class="body">
             {% if ev.kind == 'state_snapshot' %}
-                <pre>{{ ev.payload.snapshot }}</pre>
+                <details>
+                    <summary style="cursor:pointer; color:var(--text-muted); font-size:0.78rem;">▸ 展开 snapshot ({{ (ev.payload.snapshot or '')|length }} 字)</summary>
+                    <pre style="margin-top:0.5rem;">{{ ev.payload.snapshot }}</pre>
+                </details>
             {% elif ev.kind == 'thinking' %}
                 {{ ev.payload.text or '(no preamble)' }}
                 {% if ev.payload.will_call_tools %}
@@ -141,15 +144,24 @@
             {% elif ev.kind == 'tool_call' %}
                 <code>{{ ev.payload.name }}</code>(<span style="color:var(--text-muted);">{{ ev.payload.arguments }}</span>)
             {% elif ev.kind == 'tool_result' %}
-                <pre>{{ ev.payload.result_preview }}</pre>
-                <div style="font-size:0.72rem;color:var(--text-muted);">完整 {{ ev.payload.result_full_len }} 字</div>
+                {% set preview = ev.payload.result_preview or '' %}
+                {% if preview|length > 280 %}
+                <details>
+                    <summary style="cursor:pointer; color:var(--text-muted); font-size:0.78rem;">▸ 展开 ({{ ev.payload.result_full_len or preview|length }} 字)</summary>
+                    <pre style="margin-top:0.5rem;">{{ preview }}</pre>
+                </details>
+                {% else %}
+                <pre>{{ preview }}</pre>
+                <div style="font-size:0.72rem;color:var(--text-muted);">{{ ev.payload.result_full_len or preview|length }} 字</div>
+                {% endif %}
             {% elif ev.kind == 'critique' %}
-                <strong>score:</strong> {{ ev.payload.score }}<br>
+                <strong>score:</strong>
+                <span style="color: {% if ev.payload.score and ev.payload.score >= 0.7 %}var(--success){% elif ev.payload.score and ev.payload.score >= 0.4 %}var(--warning){% else %}var(--danger){% endif %};">{{ "%.2f"|format(ev.payload.score) if ev.payload.score is not none else "—" }}</span><br>
                 {{ ev.payload.notes or '' }}
             {% elif ev.kind == 'final' %}
-                {{ ev.payload.text }}
+                <div style="white-space: pre-wrap;">{{ ev.payload.text }}</div>
             {% elif ev.kind == 'error' %}
-                ⚠ {{ ev.payload.message }}
+                <span style="color:var(--danger);">⚠</span> {{ ev.payload.message }}
             {% else %}
                 <pre>{{ ev.payload }}</pre>
             {% endif %}

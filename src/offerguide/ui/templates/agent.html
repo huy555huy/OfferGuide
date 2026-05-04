@@ -175,13 +175,21 @@
                             {% else %}<span class="pill pending">{{ r.status }}</span>{% endif %}
                         </td>
                         <td>{{ r.iterations }}</td>
-                        <td>{{ "%.2f"|format(r.critic_score) if r.critic_score is not none else '—' }}</td>
+                        <td>
+                            {% if r.critic_score is not none %}
+                                <span style="color: {% if r.critic_score >= 0.7 %}var(--success){% elif r.critic_score >= 0.4 %}var(--warning){% else %}var(--danger){% endif %}; font-weight: 600;">{{ "%.2f"|format(r.critic_score) }}</span>
+                            {% else %}—{% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
             {% else %}
-            <div class="empty">还没有 agent run — 点上面 ▶ 跑一次试试</div>
+            <div class="empty">
+                <div class="empty-icon">🤖</div>
+                <div class="empty-title">还没有 agent run</div>
+                <div class="empty-hint">用左侧的预设按钮选一个 goal, 或自己写一条让 agent 试试</div>
+            </div>
             {% endif %}
         </div>
     </div>

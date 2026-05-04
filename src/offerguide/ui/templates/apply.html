@@ -71,6 +71,23 @@
     .lifecycle-btn.active {
         background: var(--success); color: white; border-color: var(--success);
     }
+    .lifecycle-group {
+        margin-bottom: 0.5rem;
+    }
+    .lifecycle-group .group-title {
+        font-size: 0.7rem; color: var(--text-muted);
+        text-transform: uppercase; letter-spacing: 0.05em;
+        margin-bottom: 0.25rem;
+    }
+    .lifecycle-current {
+        background: var(--primary-soft);
+        border: 1px solid var(--primary);
+        border-radius: var(--radius-sm);
+        padding: 0.5rem 0.75rem;
+        margin-bottom: 0.75rem;
+        font-size: 0.875rem;
+    }
+    .lifecycle-current strong { color: var(--primary); }
 
     .skip-warning {
         background: var(--warning-soft);
@@ -116,8 +133,13 @@
         {% include "_apply_package.html" %}
     {% elif runtime_ready and profile_loaded %}
     <div class="empty">
-        <div style="font-size: 2rem;">📦</div>
-        <div>还没生成投递包 — 点上面 🤖 按钮 (~10-30s + 几分钱 LLM)</div>
+        <div class="empty-icon">📦</div>
+        <div class="empty-title">还没生成 {{ job.company }} 投递包</div>
+        <div class="empty-hint">
+            点上面 <strong>🤖 生成投递包</strong> 按钮, agent 会读 JD + 你的简历,
+            产出: Boss直聊第一句话 / 6 个 Q&A 模板 / 投递时间策略 / pre-submit checklist。<br>
+            10-30 秒 LLM 调用, 成本几分钱。
+        </div>
     </div>
     {% endif %}
 </div>
@@ -129,59 +151,80 @@
     </div>
 
     {% if applications %}
-    <div style="margin-bottom: 1rem;">
-        <strong>当前 application:</strong>
+    <div class="lifecycle-current">
+        <strong>当前状态:</strong>
         {% for a in applications %}
-        <span class="pill">app#{{ a.id }} · {{ a.status }}</span>
+        <span class="pill {% if a.status == 'offer' %}low{% elif a.status == 'rejected' or a.status == 'withdrawn' %}high{% elif a.status == 'interview' or a.status == 'replied' %}medium{% else %}primary{% endif %}">app#{{ a.id }} · {{ a.status }}</span>
         {% endfor %}
+        <span class="muted small" style="margin-left: 0.5rem;">点下方按钮推进到下一阶</span>
     </div>
     {% else %}
-    <div class="muted small" style="margin-bottom: 1rem;">还没投, 也还没建 application 记录</div>
+    <div class="empty" style="margin-bottom: 1rem; padding: 1rem;">
+        <div class="empty-title">还没标过状态</div>
+        <div class="empty-hint">投完之后, 点下面 <strong>📤 已提交</strong> 开始追踪</div>
+    </div>
     {% endif %}
 
-    <div class="actions">
-        <button class="lifecycle-btn" onclick="markStatus('submitted')">📤 已提交</button>
-        <button class="lifecycle-btn" onclick="markStatus('hr_viewed')">👀 HR 已看</button>
-        <button class="lifecycle-btn success" onclick="markStatus('replied')">💬 HR 回复</button>
-        <button class="lifecycle-btn success" onclick="markStatus('interview')">🎤 进入面试</button>
-        <button class="lifecycle-btn success" onclick="markStatus('offer')">🎉 拿 offer</button>
-        <button class="lifecycle-btn danger" onclick="markStatus('rejected')">✗ 被拒</button>
-        <button class="lifecycle-btn ghost" onclick="markStatus('withdrawn')">⊘ 撤回</button>
+    <div class="lifecycle-group">
+        <div class="group-title">第一阶 — 投递动作</div>
+        <button class="lifecycle-btn" onclick="markStatus('submitted', this)" data-loading-text="标记中...">📤 已提交</button>
+        <button class="lifecycle-btn" onclick="markStatus('hr_viewed', this)" data-loading-text="标记中...">👀 HR 已看</button>
+    </div>
+    <div class="lifecycle-group">
+        <div class="group-title">第二阶 — 推进信号</div>
+        <button class="lifecycle-btn" style="background:var(--warning); border-color:var(--warning);" onclick="markStatus('replied', this)" data-loading-text="标记中...">💬 HR 回复</button>
+        <button class="lifecycle-btn success" onclick="markStatus('interview', this)" data-loading-text="标记中...">🎤 进入面试</button>
+    </div>
+    <div class="lifecycle-group">
+        <div class="group-title">终结 — 已定结果</div>
+        <button class="lifecycle-btn success" onclick="markStatus('offer', this)" data-loading-text="标记中...">🎉 拿 offer</button>
+        <button class="lifecycle-btn danger" onclick="markStatus('rejected', this)" data-loading-text="标记中...">✗ 被拒</button>
+        <button class="lifecycle-btn ghost" onclick="markStatus('withdrawn', this)" data-loading-text="标记中...">⊘ 撤回</button>
     </div>
 </div>
 
 <script>
 async function generatePackage() {
     const container = document.getElementById('package-container');
-    container.innerHTML = '<div class="empty">⏳ 生成中... 10-30 秒, 别关页面</div>';
+    container.innerHTML = '<div class="empty"><div class="empty-icon"><span class="spinner" style="width:24px;height:24px;"></span></div><div class="empty-title">apply_assistant 生成中</div><div class="empty-hint">~10-30 秒, 调用 LLM 几分钱成本, 别关页面</div></div>';
 
     try {
         const r = await fetch(`/api/apply/{{ job.id }}/generate`, {method: 'POST'});
         if (!r.ok) {
             const err = await r.text();
-            container.innerHTML = `<div class="error">⚠ 生成失败: ${err}</div>`;
+            container.innerHTML = `<div class="error">⚠ 生成失败: ${err.slice(0, 400)}</div>`;
+            window.toast('生成失败', 'error');
             return;
         }
         const data = await r.json();
         if (data.package) {
-            // Reload page to render with the new package via Jinja
-            location.reload();
+            window.toast('投递包准备好了', 'success', 1500);
+            setTimeout(() => location.reload(), 600);
         } else {
-            container.innerHTML = `<div class="error">⚠ LLM 返回的不是 JSON. 原文: ${data.raw_text || '(空)'}</div>`;
+            container.innerHTML = `<div class="error">⚠ LLM 返回的不是 JSON. 原文: ${(data.raw_text || '').slice(0, 400)}</div>`;
         }
     } catch (e) {
         container.innerHTML = `<div class="error">⚠ ${e}</div>`;
+        window.toast('网络错误', 'error');
     }
 }
 
-async function markStatus(status) {
+async function markStatus(status, btn) {
+    if (btn) window.btnLoading(btn);
     const fd = new FormData();
     fd.append('status', status);
-    const r = await fetch(`/api/apply/{{ job.id }}/mark`, {method: 'POST', body: fd});
-    if (r.ok) {
-        location.reload();
-    } else {
-        alert(`mark ${status} 失败: ${await r.text()}`);
+    try {
+        const r = await fetch(`/api/apply/{{ job.id }}/mark`, {method: 'POST', body: fd});
+        if (r.ok) {
+            window.toast(`已标记: ${status}`, 'success', 1500);
+            setTimeout(() => location.reload(), 600);
+        } else {
+            window.toast(`标记失败: ${await r.text()}`.slice(0, 200), 'error', 4000);
+            window.btnReset(btn);
+        }
+    } catch (e) {
+        window.toast('网络错误: ' + e, 'error');
+        window.btnReset(btn);
     }
 }
 

@@ -109,7 +109,7 @@
     </div>
     <div class="answer">{{ latest_run.final_answer }}</div>
     <div class="actions">
-        <button class="btn" onclick="wakeAgent()" {% if not runtime_ready %}disabled{% endif %}>
+        <button class="btn" onclick="wakeAgent(this)" data-loading-text="agent 思考中..." {% if not runtime_ready %}disabled title="缺 OFFERGUIDE_LLM_API_KEY"{% endif %}>
             ↻ 让 agent 重新评估
         </button>
         <a class="btn secondary" href="/agent/runs/{{ latest_run.id }}">看完整 trajectory</a>
@@ -117,9 +117,14 @@
     </div>
     {% else %}
     <h2>🤖 Agent</h2>
-    <div class="muted">还没有 agent 跑过。点下面按钮让它读读现状, 给你一段评估。</div>
+    <div class="muted">
+        还没有 agent 跑过。让它读一遍现状, 给你一段它对你求职状况的判断。
+        {% if not runtime_ready %}
+        <br><strong style="color:var(--danger);">⚠ 当前不可用</strong> — 需要在 .env 里配 <code>OFFERGUIDE_LLM_API_KEY</code>。
+        {% endif %}
+    </div>
     <div class="actions">
-        <button class="btn" onclick="wakeAgent()" {% if not runtime_ready %}disabled{% endif %}>
+        <button class="btn" onclick="wakeAgent(this)" data-loading-text="agent 思考中..." {% if not runtime_ready %}disabled{% endif %}>
             ▶ 唤醒 agent (10-30s)
         </button>
     </div>
@@ -214,24 +219,24 @@
 </div>
 
 <script>
-async function wakeAgent() {
-    const btns = document.querySelectorAll('button.btn');
-    btns.forEach(b => b.disabled = true);
+async function wakeAgent(btn) {
+    if (btn) window.btnLoading(btn);
     const status = document.querySelector('.hero .meta');
-    if (status) status.innerHTML = '⏳ agent 思考中... 10-30s';
+    if (status) status.innerHTML = '<span class="spinner"></span> agent 思考中... 10-30s';
 
     try {
         const r = await fetch('/api/home/wake-agent', {method: 'POST'});
         if (r.ok) {
-            location.reload();
+            window.toast('agent 跑完了, 刷新页面', 'success');
+            setTimeout(() => location.reload(), 600);
         } else {
             const err = await r.text();
-            alert('agent 失败: ' + err);
-            btns.forEach(b => b.disabled = false);
+            window.toast('agent 失败: ' + err.slice(0, 200), 'error', 5000);
+            window.btnReset(btn);
         }
     } catch (e) {
-        alert('网络错误: ' + e);
-        btns.forEach(b => b.disabled = false);
+        window.toast('网络错误: ' + e, 'error');
+        window.btnReset(btn);
     }
 }
 </script>
