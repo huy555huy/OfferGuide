@@ -129,8 +129,11 @@ SYSTEM_PROMPT = """你是用户的求职 copilot。
 - `read_job(job_id)`: 返回完整 raw_text
 - `read_user_resume()`: 返回 master 简历全文
 
-**Action（元认知）**
+**Action（元认知 + 跟用户沟通）**
 - `detect_evolution_candidates()`, `evolve_skill(name, n)`, `run_gray_release()`
+- `write_suggestion(title, body, ...)`: 把建议写到 inbox 让用户决定。
+  这是你跟用户的**主要沟通通道**——用户不在线时, 看到值得让他知道的事就写一张。
+  用户后续 approve/reject 是**最高权重的反馈信号** (会进 evolution_signals 影响 SKILL fitness)。
 
 **Maintenance（系统巡检, 由你判断要不要做）**
 - `discover_new_jobs`, `enrich_thin_jds`, `classify_corpus`,
@@ -317,6 +320,48 @@ ACTION_TOOL_SCHEMAS: list[dict[str, Any]] = [
                     },
                 },
                 "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_suggestion",
+            "description": (
+                "写一张推荐卡片到 inbox, 让用户决定批准/拒绝/忽略。这是你跟用户沟通的"
+                "**核心通道**——用户不在线时, 你看到值得让用户知道的事就写一张。"
+                "用户后续 approve / reject 会作为 user_thumbs (权重最高) 反馈到 evolution_signals。"
+                "\n\n何时该用: (a) 你建议跑一个有副作用的 SKILL 但用户没要求 (例如 tailor_resume); "
+                "(b) 你看到一个值得用户注意的状态变化 (silent 14 天 / 新高匹配 JD); "
+                "(c) 你做完一件事想让用户审阅结果。"
+                "\n\n何时**别**用: (a) 已经在最近几小时内推过类似建议; "
+                "(b) 用户没问的鸡毛蒜皮事 (会让 inbox 变垃圾邮件)。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "卡片标题, 用户看到的第一行 (≤ 60 字, 一句话讲清楚)",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "推荐理由 + 如果用户批准你打算做啥 (中文 markdown, 几句话)",
+                    },
+                    "skill_to_call": {
+                        "type": "string",
+                        "description": (
+                            "(可选) 如果建议批准就调这个 SKILL/工具, 例如 'tailor_resume'。"
+                            "用户在 UI 上能看到这个意图。"
+                        ),
+                    },
+                    "skill_args_json": {
+                        "type": "string",
+                        "description": "(可选) skill_to_call 的参数, JSON 字符串 e.g. '{\"job_id\": 42}'",
+                    },
+                },
+                "required": ["title", "body"],
                 "additionalProperties": False,
             },
         },
@@ -710,6 +755,11 @@ class AgentLoop:
         self._max_iter = max(1, int(max_iterations))
         self._critic_enabled = bool(critic_enabled)
         self._critic_model = critic_model
+        # Per-run state (set during run(), cleared after) — exposed to action
+        # tools that need attribution context (write_suggestion needs run_id
+        # + last invoked SKILL to route user_thumbs feedback correctly).
+        self._current_run_id: int | None = None
+        self._current_skill_invocations: dict[str, dict] = {}
 
     # -------- public API --------
 
@@ -733,6 +783,11 @@ class AgentLoop:
         # the critique step can write evolution_signals attributing the
         # critic_score to the SKILLs that ran. Keyed by tool_call.id.
         skill_invocations: dict[str, dict] = {}
+        # Expose to action tools (write_suggestion needs run_id + last skill
+        # for attribution). Cleared at end of run() so subsequent invocations
+        # of run() get a clean slate.
+        self._current_run_id = run_id
+        self._current_skill_invocations = skill_invocations
 
         def emit(kind: str, **payload: Any) -> AgentEvent:
             ev = AgentEvent(
@@ -894,12 +949,17 @@ class AgentLoop:
             )
 
         # 5. Persist + return
-        return self._finalize(
-            run_id=run_id, goal=goal, trigger_kind=trigger_kind,
-            events=events, t0=t0, iterations=final_iteration,
-            final_answer=final_answer,
-            critic_score=critic_score, critic_notes=critic_notes,
-        )
+        try:
+            return self._finalize(
+                run_id=run_id, goal=goal, trigger_kind=trigger_kind,
+                events=events, t0=t0, iterations=final_iteration,
+                final_answer=final_answer,
+                critic_score=critic_score, critic_notes=critic_notes,
+            )
+        finally:
+            # Clear per-run state so subsequent run() calls don't leak attribution
+            self._current_run_id = None
+            self._current_skill_invocations = {}
 
     # -------- internals --------
 
@@ -1039,7 +1099,72 @@ class AgentLoop:
             mode = "[DRY RUN] " if dry_run else ""
             return f"# run_gray_release {mode}\n\n{cycle.render_summary()}"
 
+        if tc.name == "write_suggestion":
+            return self._execute_write_suggestion(tc)
+
         return f"ERROR: action tool '{tc.name}' is declared but not implemented"
+
+    def _execute_write_suggestion(self, tc: ToolCall) -> str:
+        """Write an agent_suggestion inbox item (W13.3).
+
+        The suggestion is attributed to the current agent_run (via
+        ``self._current_run_id``) so when the user later approves/rejects,
+        the user_thumbs signal flows back to the right agent_run for
+        attribution. Skill-level attribution comes from the most recent
+        SKILL invoked during this trajectory (heuristic: the suggestion
+        likely concerns that SKILL's output).
+        """
+        title = (tc.arguments.get("title") or "").strip()
+        body = (tc.arguments.get("body") or "").strip()
+        if not title or not body:
+            return "ERROR: write_suggestion requires title + body"
+
+        skill_to_call = (tc.arguments.get("skill_to_call") or "").strip() or None
+        skill_args_raw = tc.arguments.get("skill_args_json") or ""
+        proposed_action = None
+        if skill_to_call:
+            args = {}
+            if skill_args_raw:
+                try:
+                    args = json.loads(skill_args_raw)
+                    if not isinstance(args, dict):
+                        args = {}
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+            proposed_action = {"tool": skill_to_call, "args": args}
+
+        # Heuristic attribution: pick the most recent SKILL invocation in this
+        # trajectory (if any). Lookup tools don't count.
+        sk_name = sk_ver = None
+        sr_id = None
+        if self._current_skill_invocations:
+            most_recent = list(self._current_skill_invocations.values())[-1]
+            sk_name = most_recent.get("skill_name")
+            sk_ver = most_recent.get("skill_version")
+            sr_id = most_recent.get("skill_run_id")
+
+        try:
+            from .. import inbox as _inbox
+            item = _inbox.enqueue_agent_suggestion(
+                self._store,
+                title=title, body=body,
+                source_agent_run_id=self._current_run_id,
+                source_skill_name=sk_name,
+                source_skill_version=sk_ver,
+                source_skill_run_id=sr_id,
+                proposed_action=proposed_action,
+            )
+            attribution = (
+                f" (attributed to {sk_name} v{sk_ver}, skill_run#{sr_id})"
+                if sk_name else " (no SKILL attribution)"
+            )
+            return (
+                f"OK: 写入 inbox#{item.id} '{title}'{attribution}\n"
+                f"用户在 /inbox 决定 approve/reject 后, 会作为 user_thumbs 信号流回 evolution。"
+            )
+        except Exception as e:
+            log.exception("write_suggestion crashed")
+            return f"ERROR: write_suggestion raised {type(e).__name__}: {e}"
 
     def _execute_lookup_tool(self, tc: ToolCall) -> str:
         """Execute one of the system-side lookup tools (read_job / read_user_resume)."""

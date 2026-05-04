@@ -133,15 +133,25 @@ CREATE TABLE IF NOT EXISTS evolution_log (
 );
 
 CREATE TABLE IF NOT EXISTS inbox_items (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind           TEXT NOT NULL,    -- 'consider_jd'|'apply_decision'|'review_suggestion'|...
-    title          TEXT NOT NULL,
-    body           TEXT,
-    payload_json   TEXT NOT NULL,    -- structured refs to jobs/skill_runs/applications/...
-    status         TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|rejected|dismissed
-    created_at     REAL DEFAULT (julianday('now')),
-    decided_at     REAL,
-    decision_note  TEXT
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind                   TEXT NOT NULL,
+        -- 'agent_suggestion' (W13.3, the new canonical kind for things agent proposes)
+        -- Legacy: 'consider_jd' | 'apply_decision' | 'review_suggestion' | 'interview_scheduled' | 'ambient_alert'
+    title                  TEXT NOT NULL,
+    body                   TEXT,
+    payload_json           TEXT NOT NULL,
+    status                 TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | rejected | dismissed
+    created_at             REAL DEFAULT (julianday('now')),
+    decided_at             REAL,
+    decision_note          TEXT,
+    -- W13.3 agent-suggestion attribution: when an agent_suggestion is approved
+    -- or rejected, the user's thumbs becomes a user_thumbs signal in
+    -- evolution_signals, attributed to (skill_name, skill_version, run_id)
+    -- so GEPA can use it as the highest-weight feedback in its fitness calc.
+    source_agent_run_id    INTEGER,                          -- FK soft-link to agent_runs.id
+    source_skill_name      TEXT,
+    source_skill_version   TEXT,
+    proposed_action_json   TEXT       -- {"tool": "tailor_resume", "args": {...}} (optional)
 );
 
 -- ``interview_experiences`` is the umbrella corpus table for ANY high-signal
@@ -370,6 +380,30 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE jobs ADD COLUMN extras_json TEXT NOT NULL DEFAULT '{}'"
         )
+
+    # inbox_items agent-suggestion columns (W13.3)
+    inbox_cols = {
+        row[1] for row in conn.execute(
+            "PRAGMA table_info(inbox_items)"
+        ).fetchall()
+    }
+    if inbox_cols:  # only if the table exists
+        if "source_agent_run_id" not in inbox_cols:
+            conn.execute(
+                "ALTER TABLE inbox_items ADD COLUMN source_agent_run_id INTEGER"
+            )
+        if "source_skill_name" not in inbox_cols:
+            conn.execute(
+                "ALTER TABLE inbox_items ADD COLUMN source_skill_name TEXT"
+            )
+        if "source_skill_version" not in inbox_cols:
+            conn.execute(
+                "ALTER TABLE inbox_items ADD COLUMN source_skill_version TEXT"
+            )
+        if "proposed_action_json" not in inbox_cols:
+            conn.execute(
+                "ALTER TABLE inbox_items ADD COLUMN proposed_action_json TEXT"
+            )
 
     # interview_experiences quality + content_kind columns (W11)
     ie_cols = {

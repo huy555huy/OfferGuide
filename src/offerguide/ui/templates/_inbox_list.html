@@ -1,22 +1,51 @@
 {% if items %}
 <div class="inbox-list">
     {% for it in items %}
-    <div class="inbox-row" id="inbox-row-{{ it.id }}">
+    <div class="inbox-row" id="inbox-row-{{ it.id }}"
+         {% if it.kind == 'agent_suggestion' %}style="grid-template-columns: 50px 1fr auto auto; padding: 0.875rem 0;"{% endif %}>
+
         <span class="id-col">#{{ it.id }}</span>
+
         <div class="title-col">
-            <div>{{ it.title }}</div>
-            {% if it.body %}<div class="muted small">{{ it.body[:120] }}{% if it.body|length > 120 %}…{% endif %}</div>{% endif %}
+            {% if it.kind == 'agent_suggestion' %}
+                <div>
+                    <span style="font-size: 0.7rem; color: var(--primary); margin-right: 0.375rem;">🤖 agent</span>
+                    <strong>{{ it.title }}</strong>
+                </div>
+                {% if it.body %}
+                <div class="muted small" style="margin-top: 0.375rem; line-height: 1.5;">
+                    {% for line in it.body.split('\n')[:5] %}{{ line }}<br>{% endfor %}
+                </div>
+                {% endif %}
+                {% if it.proposed_action %}
+                <div class="small" style="margin-top: 0.5rem;">
+                    <span class="pill primary">如果批准 → 调 <code>{{ it.proposed_action.tool }}</code></span>
+                </div>
+                {% endif %}
+                {% if it.source_skill_name %}
+                <div class="small dim-text" style="margin-top: 0.375rem;">
+                    源自 {{ it.source_skill_name }} v{{ it.source_skill_version or '?' }}
+                    {% if it.source_agent_run_id %}
+                    · <a href="/agent/runs/{{ it.source_agent_run_id }}">agent run #{{ it.source_agent_run_id }}</a>
+                    {% endif %}
+                </div>
+                {% endif %}
+            {% else %}
+                <div>{{ it.title }}</div>
+                {% if it.body %}<div class="muted small">{{ it.body[:120] }}{% if it.body|length > 120 %}…{% endif %}</div>{% endif %}
+            {% endif %}
         </div>
-        <span class="pill">{{ it.kind }}</span>
+
         <span class="pill {{ it.status }}">{{ it.status }}</span>
+
         <div class="actions">
             {% if it.status == "pending" %}
             <form hx-post="/inbox/{{ it.id }}/decide"
                   hx-target="#inbox-row-{{ it.id }}" hx-swap="outerHTML"
-                  style="display:inline; gap:0.25rem;">
-                <button name="decision" value="approved" class="ghost" title="批准">✓</button>
-                <button name="decision" value="rejected" class="ghost" title="拒绝">✗</button>
-                <button name="decision" value="dismissed" class="ghost" title="忽略">—</button>
+                  style="display:inline-flex; gap:0.25rem;">
+                <button name="decision" value="approved" title="批准 (会作为 +1 thumbs 反馈到 evolution)">👍</button>
+                <button name="decision" value="rejected" class="secondary" title="拒绝 (会作为 -1 thumbs 反馈)">👎</button>
+                <button name="decision" value="dismissed" class="ghost" title="忽略 (不算反馈, 只是关掉)">—</button>
             </form>
             {% else %}
             <span class="muted small">{{ it.decision_note or '已决策' }}</span>
@@ -29,6 +58,6 @@
 <div class="empty">
     <div style="font-size: 1.5rem; margin-bottom: 0.25rem;">📥</div>
     <div>暂无 inbox 项</div>
-    <div class="small muted">代理会把"考虑投递"和"沉默警告"推到这里</div>
+    <div class="small muted">agent 看到值得让你知道的事会写到这里</div>
 </div>
 {% endif %}

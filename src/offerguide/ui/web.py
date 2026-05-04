@@ -958,6 +958,199 @@ def create_app(
         )
         return {"action": "failed", "ok": ok}
 
+    # ─────────────────────── W13.4 apply assistant ────────────────────────
+    # The actual job-search value: turn a tailored resume + scored job into a
+    # paste-ready application package (Boss直聘 self-intro + form Q/A +
+    # submission strategy). User opens /apply/<job_id> → one-click copy each
+    # piece → goes to Boss/牛客 with everything ready.
+
+    @app.get("/apply/{job_id}", response_class=HTMLResponse)
+    def apply_view(request: Request, job_id: int) -> Any:
+        """Render the apply package for one job. Generates on first visit
+        if no cached SKILL output exists; subsequent visits show the cached run.
+        """
+        with store.connect() as conn:
+            job_row = conn.execute(
+                "SELECT id, company, title, location, source, url, raw_text "
+                "FROM jobs WHERE id = ?", (job_id,),
+            ).fetchone()
+        if job_row is None:
+            raise HTTPException(404, f"job#{job_id} not found")
+
+        job = {
+            "id": job_row[0], "company": job_row[1], "title": job_row[2],
+            "location": job_row[3], "source": job_row[4], "url": job_row[5],
+            "raw_text": job_row[6],
+        }
+
+        # Find the most recent apply_assistant run for this job (cached package)
+        package_dict = None
+        package_run_id = None
+        try:
+            with store.connect() as conn:
+                row = conn.execute(
+                    "SELECT id, output_json FROM skill_runs "
+                    "WHERE skill_name='apply_assistant' "
+                    "  AND input_json LIKE ? "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (f'%"company": "{job["company"]}"%',),
+                ).fetchone()
+            if row:
+                package_run_id = row[0]
+                package_dict = json_loads(row[1])
+        except Exception:
+            pass
+
+        # Existing applications for this job (lifecycle status)
+        with store.connect() as conn:
+            apps = conn.execute(
+                "SELECT id, status, applied_at, last_status_change "
+                "FROM applications WHERE job_id = ? ORDER BY id DESC",
+                (job_id,),
+            ).fetchall()
+        applications = [
+            {"id": r[0], "status": r[1], "applied_at": r[2], "last_change": r[3]}
+            for r in apps
+        ]
+
+        return templates.TemplateResponse(
+            request, "apply.html",
+            _ctx(
+                request, job=job,
+                package=package_dict, package_run_id=package_run_id,
+                applications=applications,
+                profile_loaded=profile is not None,
+                runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
+                active_tab=None,
+            ),
+        )
+
+    @app.post("/api/apply/{job_id}/generate", response_class=JSONResponse)
+    def apply_generate(job_id: int) -> dict:
+        """Trigger apply_assistant SKILL for this job.
+
+        Synchronous (10-30s LLM). Returns the generated package as JSON for
+        the UI to render in place. Cached afterwards (subsequent /apply/N
+        page loads find this skill_run via input_json LIKE).
+        """
+        if runtime is None or profile is None:
+            raise HTTPException(
+                400,
+                "Need both runtime + profile (OFFERGUIDE_LLM_API_KEY + OFFERGUIDE_RESUME_PDF)",
+            )
+        spec = next((s for s in skills if s.name == "apply_assistant"), None)
+        if spec is None:
+            raise HTTPException(500, "apply_assistant SKILL not loaded")
+
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT company, title, raw_text FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"job#{job_id} not found")
+        company, title, raw_text = row
+
+        if not raw_text or len(raw_text) < 200:
+            raise HTTPException(
+                400,
+                f"job#{job_id} raw_text too thin ({len(raw_text or '')}字), "
+                "先 enrich 或人工补全 JD",
+            )
+
+        try:
+            result = runtime.invoke(
+                spec,
+                {
+                    "company": company or "?",
+                    "role_focus": title or "?",
+                    "job_text": raw_text,
+                    "user_profile": profile.raw_resume_text,
+                },
+            )
+        except LLMError as e:
+            raise HTTPException(502, f"LLM 调用失败: {e}") from None
+
+        return {
+            "skill_run_id": result.skill_run_id,
+            "package": result.parsed,
+            "raw_text": result.raw_text if result.parsed is None else None,
+        }
+
+    @app.post("/api/apply/{job_id}/mark", response_class=JSONResponse)
+    def apply_mark(job_id: int, status: str = Form(...)) -> dict:
+        """User marks an application status (submitted / hr_viewed / replied / rejected).
+
+        Updates applications table + writes an application_event for audit.
+        Drives the W13.x feedback loop: app_outcome signals fan to evolution.
+        """
+        VALID_STATES = {
+            "considered", "submitted", "hr_viewed", "replied",
+            "interview", "offer", "rejected", "withdrawn",
+        }
+        if status not in VALID_STATES:
+            raise HTTPException(400, f"unknown status '{status}'; valid: {sorted(VALID_STATES)}")
+
+        with store.connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM applications WHERE job_id = ? ORDER BY id DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            if existing is None:
+                cur = conn.execute(
+                    "INSERT INTO applications(job_id, status, applied_at) "
+                    "VALUES (?, ?, julianday('now'))",
+                    (job_id, status),
+                )
+                app_id = int(cur.lastrowid or 0)
+            else:
+                app_id = int(existing[0])
+                conn.execute(
+                    "UPDATE applications SET status = ?, "
+                    "  last_status_change = julianday('now') "
+                    "WHERE id = ?",
+                    (status, app_id),
+                )
+            # Event log entry
+            event_kind = {
+                "submitted": "submitted", "hr_viewed": "viewed",
+                "replied": "replied", "interview": "interview",
+                "offer": "offer", "rejected": "rejected",
+                "withdrawn": "withdrawn",
+            }.get(status, "submitted")
+            conn.execute(
+                "INSERT INTO application_events(application_id, kind, source) "
+                "VALUES (?, ?, 'manual')",
+                (app_id, event_kind),
+            )
+
+        # W13.x feedback loop: positive/negative outcomes → evolution_signals
+        # attributed to apply_assistant + most recent SKILLs that ran for this job
+        try:
+            from .. import evolution as _evo
+            outcome_map = {
+                "offer": "offer", "interview": "interview",
+                "replied": "interview",  # reply ~= positive
+                "rejected": "rejected",
+                # 'submitted' / 'hr_viewed' too early to score
+            }
+            outcome = outcome_map.get(status)
+            if outcome:
+                # Attribute to apply_assistant (most direct link)
+                _evo.record_app_outcome(
+                    store,
+                    skill_name="apply_assistant",
+                    skill_version="0.1.0",  # TODO: lookup current live version
+                    skill_run_id=None,
+                    outcome=outcome,  # type: ignore[arg-type]
+                    weight=1.0,
+                )
+        except Exception as e:
+            log_mod = __import__("logging").getLogger(__name__)
+            log_mod.debug("apply outcome signal write failed: %s", e)
+
+        return {"app_id": app_id, "status": status}
+
     @app.get("/agent/runs/{run_id}", response_class=HTMLResponse)
     def agent_run_detail(request: Request, run_id: int) -> Any:
         """Read a persisted agent_runs row + render its trajectory + critic."""

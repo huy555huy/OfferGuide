@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}投递 — {{ job.company }} {{ job.title }}{% endblock %}
+{% block content %}
+
+<style>
+    .apply-grid { display: grid; grid-template-columns: 1fr 320px; gap: 1rem; }
+    @media (max-width: 920px) { .apply-grid { grid-template-columns: 1fr; } }
+
+    .pkg-section {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 1.25rem;
+        margin-bottom: 1rem;
+    }
+    .pkg-section h3 {
+        margin: 0 0 0.625rem;
+        font-family: var(--font-serif);
+        font-size: 1.05rem; font-weight: 600;
+        display: flex; align-items: center; gap: 0.5rem;
+    }
+    .pkg-section .copyable {
+        background: var(--bg-subtle);
+        padding: 0.875rem 1rem;
+        border-radius: var(--radius-sm);
+        white-space: pre-wrap;
+        font-size: 0.9rem;
+        line-height: 1.65;
+        position: relative;
+    }
+    .pkg-section .copy-btn {
+        position: absolute; top: 0.5rem; right: 0.5rem;
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        padding: 0.25rem 0.625rem;
+        font-size: 0.72rem;
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        color: var(--text-muted);
+    }
+    .pkg-section .copy-btn:hover { background: var(--primary-soft); color: var(--primary); border-color: var(--primary); }
+    .pkg-section .copy-btn.copied { background: var(--success-soft); color: var(--success); border-color: var(--success); }
+
+    .qa-card {
+        border: 1px solid var(--border-soft);
+        border-radius: var(--radius-sm);
+        padding: 0.875rem;
+        margin-bottom: 0.625rem;
+    }
+    .qa-card .qa-q {
+        font-weight: 600; margin-bottom: 0.5rem;
+        display: flex; gap: 0.5rem; align-items: baseline;
+    }
+    .qa-card .qa-cat {
+        font-size: 0.65rem; padding: 0.1rem 0.4rem;
+        background: var(--bg-subtle); border-radius: 999px;
+        color: var(--text-muted); text-transform: uppercase;
+    }
+    .qa-card .pscore { margin-left: auto; font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
+    .qa-card .anti-pat {
+        font-size: 0.78rem; color: var(--danger); margin-top: 0.5rem;
+    }
+    .qa-card .anti-pat::before { content: "⚠ "; }
+
+    .checklist li { padding: 0.375rem 0; }
+
+    .lifecycle-btn {
+        display: inline-block; padding: 0.5rem 1rem;
+        margin: 0.25rem; font-size: 0.875rem;
+    }
+    .lifecycle-btn.active {
+        background: var(--success); color: white; border-color: var(--success);
+    }
+
+    .skip-warning {
+        background: var(--warning-soft);
+        border: 2px solid var(--warning);
+        border-radius: var(--radius);
+        padding: 1rem 1.25rem; margin-bottom: 1rem;
+    }
+    .skip-warning .skip-title {
+        color: var(--warning); font-weight: 700; margin-bottom: 0.5rem;
+        text-transform: uppercase; letter-spacing: 0.05em;
+    }
+</style>
+
+<div class="page-title">
+    <div>
+        <h1>投递 · {{ job.company }}</h1>
+        <p style="margin-top: 0.5rem;">
+            <strong>{{ job.title }}</strong>
+            {% if job.location %}· {{ job.location }}{% endif %}
+            · job#{{ job.id }} · 来源 {{ job.source }}
+            {% if job.url %}· <a href="{{ job.url }}" target="_blank">原 URL ↗</a>{% endif %}
+        </p>
+    </div>
+    <div>
+        {% if not package %}
+        <button class="btn" onclick="generatePackage()" {% if not runtime_ready or not profile_loaded %}disabled{% endif %}>
+            🤖 生成投递包
+        </button>
+        {% else %}
+        <button class="btn secondary" onclick="generatePackage()">↻ 重新生成</button>
+        {% endif %}
+    </div>
+</div>
+
+{% if not runtime_ready %}
+<div class="error">⚠ 缺 OFFERGUIDE_LLM_API_KEY, 无法生成。</div>
+{% elif not profile_loaded %}
+<div class="error">⚠ 缺 OFFERGUIDE_RESUME_PDF, 无法生成 (需要 master 简历做来源)。</div>
+{% endif %}
+
+<div id="package-container">
+    {% if package %}
+        {% include "_apply_package.html" %}
+    {% elif runtime_ready and profile_loaded %}
+    <div class="empty">
+        <div style="font-size: 2rem;">📦</div>
+        <div>还没生成投递包 — 点上面 🤖 按钮 (~10-30s + 几分钱 LLM)</div>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card" style="margin-top: 1rem;">
+    <div class="card-header">
+        <h2>投递生命周期</h2>
+        <span class="meta">点状态按钮记录, 数据流入 evolution 反馈</span>
+    </div>
+
+    {% if applications %}
+    <div style="margin-bottom: 1rem;">
+        <strong>当前 application:</strong>
+        {% for a in applications %}
+        <span class="pill">app#{{ a.id }} · {{ a.status }}</span>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="muted small" style="margin-bottom: 1rem;">还没投, 也还没建 application 记录</div>
+    {% endif %}
+
+    <div class="actions">
+        <button class="lifecycle-btn" onclick="markStatus('submitted')">📤 已提交</button>
+        <button class="lifecycle-btn" onclick="markStatus('hr_viewed')">👀 HR 已看</button>
+        <button class="lifecycle-btn success" onclick="markStatus('replied')">💬 HR 回复</button>
+        <button class="lifecycle-btn success" onclick="markStatus('interview')">🎤 进入面试</button>
+        <button class="lifecycle-btn success" onclick="markStatus('offer')">🎉 拿 offer</button>
+        <button class="lifecycle-btn danger" onclick="markStatus('rejected')">✗ 被拒</button>
+        <button class="lifecycle-btn ghost" onclick="markStatus('withdrawn')">⊘ 撤回</button>
+    </div>
+</div>
+
+<script>
+async function generatePackage() {
+    const container = document.getElementById('package-container');
+    container.innerHTML = '<div class="empty">⏳ 生成中... 10-30 秒, 别关页面</div>';
+
+    try {
+        const r = await fetch(`/api/apply/{{ job.id }}/generate`, {method: 'POST'});
+        if (!r.ok) {
+            const err = await r.text();
+            container.innerHTML = `<div class="error">⚠ 生成失败: ${err}</div>`;
+            return;
+        }
+        const data = await r.json();
+        if (data.package) {
+            // Reload page to render with the new package via Jinja
+            location.reload();
+        } else {
+            container.innerHTML = `<div class="error">⚠ LLM 返回的不是 JSON. 原文: ${data.raw_text || '(空)'}</div>`;
+        }
+    } catch (e) {
+        container.innerHTML = `<div class="error">⚠ ${e}</div>`;
+    }
+}
+
+async function markStatus(status) {
+    const fd = new FormData();
+    fd.append('status', status);
+    const r = await fetch(`/api/apply/{{ job.id }}/mark`, {method: 'POST', body: fd});
+    if (r.ok) {
+        location.reload();
+    } else {
+        alert(`mark ${status} 失败: ${await r.text()}`);
+    }
+}
+
+function copyToClipboard(text, btn) {
+    navigator.clipboard.writeText(text).then(() => {
+        const orig = btn.textContent;
+        btn.textContent = '✓ 已复制';
+        btn.classList.add('copied');
+        setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+    });
+}
+</script>
+
+{% endblock %}
