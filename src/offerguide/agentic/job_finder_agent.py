@@ -61,22 +61,16 @@ _TOOL_SCHEMAS = [
         "function": {
             "name": "web_search",
             "description": (
-                "通过 Tavily 搜索引擎搜一个 query, 返回相关网页的 URL + 标题 + 摘要。"
-                "用来找符合 north star 的岗位 / 公司 careers 入口 / 招聘列表。"
-                "示例 query: 'AI Agent 暑期实习 字节跳动 2026' / "
-                "'LLM 应用工程师 实习 北京 site:nowcoder.com' / "
-                "'智谱 AI 校招 招聘'。query 越具体, 结果越精准。"
+                "搜索引擎 (Tavily). 返一组 hit: 每个含 url + title + 摘要. "
+                "重复同 query 会被拒."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "搜索 query, 用中英文都行, 一句话",
-                    },
+                    "query": {"type": "string"},
                     "max_results": {
                         "type": "integer",
-                        "description": "返回多少条结果 (默认 6, 最多 10)",
+                        "description": "默认 6, 最多 10",
                     },
                 },
                 "required": ["query"],
@@ -88,20 +82,13 @@ _TOOL_SCHEMAS = [
         "function": {
             "name": "fetch_url",
             "description": (
-                "抓一个 URL 的网页内容 (HTML 转纯文本)。返回页面前 6000 字。"
-                "用来看 web_search 返回的某个 URL 的实际内容, 判断这是不是真 JD、"
-                "公司 careers 主页、还是无关页面。"
-                "如果返回 'fetch failed', 说明这页拿不到 (反爬 / 404), 别再试。"
-                "**别 fetch 同一个 URL 两次 — 浪费时间, 我会直接返错。**"
+                "HTTP GET 一个 URL, HTML 转纯文本, 返前 6000 字. "
+                "失败 (反爬 / 404 / 超时) 返 'ERROR: ...'. "
+                "重复 fetch 同 URL 会被拒."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "完整 URL (含 https://)",
-                    },
-                },
+                "properties": {"url": {"type": "string"}},
                 "required": ["url"],
             },
         },
@@ -111,29 +98,19 @@ _TOOL_SCHEMAS = [
         "function": {
             "name": "extract_and_ingest_jd",
             "description": (
-                "**只在你 fetch 了一个页面、确认是真 JD 后**调这个工具。"
-                "由你来从页面抽取结构化字段 + 入库到 jobs 表。"
-                "返回 job_id (or 'duplicate' if already exists)。"
-                "判断标准: 有具体工作内容 + 任职要求 + 公司, 不是 careers 主页 / 多岗位列表。"
-                "如果 jd_body 短于 200 字, 别调 — 数据没价值。"
+                "把一份 JD 入 jobs 表. 你提供抽好的字段 (url + jd_body + "
+                "company + title + location). 返 job_id 或 'duplicate'. "
+                "硬约束: jd_body 必须 ≥ 200 字; url 必须是你 fetch 过的 "
+                "(防编造). 不满足返 ERROR."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "JD 的 URL"},
-                    "jd_body": {
-                        "type": "string",
-                        "description": (
-                            "JD 正文 (≥ 200 字, 含工作内容 + 任职要求 + 地点等)。"
-                            "你从 fetch 的页面里抽干净, 去 nav/footer 等噪声。"
-                        ),
-                    },
-                    "company": {"type": "string", "description": "公司中文名"},
-                    "title": {"type": "string", "description": "岗位 title"},
-                    "location": {
-                        "type": "string",
-                        "description": "工作地点, 没明确就填 '未明确'",
-                    },
+                    "url": {"type": "string"},
+                    "jd_body": {"type": "string"},
+                    "company": {"type": "string"},
+                    "title": {"type": "string"},
+                    "location": {"type": "string"},
                 },
                 "required": ["url", "jd_body", "company", "title"],
             },
@@ -144,20 +121,11 @@ _TOOL_SCHEMAS = [
         "function": {
             "name": "done",
             "description": (
-                "**结束本轮检索**。在以下情况调:\n"
-                "1. 你已经入库 ≥ 3 个高质量 JD (够这一轮了)\n"
-                "2. 你试了 5+ 次但都没找到匹配的, 没必要继续浪费 budget\n"
-                "3. 你判断该方向网上信息匮乏 (例: small startup 找不到具体 JD)\n"
-                "**不要在没 ingest 任何 JD 时也不 search 就 done。**"
+                "结束本轮. 提供 reason (1 句话, 给后台日志看)."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "1 句话: 为什么结束 (找够了 / 找不到 / ...)",
-                    },
-                },
+                "properties": {"reason": {"type": "string"}},
                 "required": ["reason"],
             },
         },
@@ -165,48 +133,26 @@ _TOOL_SCHEMAS = [
 ]
 
 
-_SYSTEM_PROMPT = """你是 OfferGuide 的 JD 检索 agent。
-
-# 任务
-
-给用户找 **3-5 个真实在招的, 跟 north star 匹配的具体岗位 JD**, 用
-extract_and_ingest_jd 入库。
+# W14.17 — 砍光"如果 X 就 Y"的硬编码流程提示。
+# 之前 (W14.16) 我在 prompt 里替 LLM 想了 5 种 page kind + 每种该怎么办,
+# 等于 LLM 不能在我没列出的 case 里灵活反应。用户原话:
+# "你设定好了, 那你就能确定, 你设定的网页状况适合所有的? 你去查找的时候
+#  也不是这么做的吧"
+# 现在只给目标 + 工具 + budget, LLM 自己思考 (跟人查岗位的方式一样).
+_SYSTEM_PROMPT = """你是 OfferGuide 的 JD 检索助手. 给用户找跟 north star 匹配的真 JD, 入库.
 
 # 用户当前 north star
-
 「{north_star}」
 
-# 你能调的工具
-
-- web_search(query, max_results) — Tavily 搜
-- fetch_url(url) — 抓网页内容
-- extract_and_ingest_jd(url, jd_body, company, title, location) — 入库
-- done(reason) — 结束
+# Budget
+最多 25 轮工具调用, 找 3-5 个真 JD 就够; 找不到也别硬撑, done 走人即可.
 
 # 怎么干
-
-1. 想想 north star 里的关键词 (角色 / 公司 / 城市), 构造 1-2 个 search query
-2. 调 web_search, 看返回的 URL + snippet
-3. 挑最像 JD / careers 入口的 URL → fetch_url 看实际内容
-4. 看 fetched 内容判断:
-   - **是具体岗位 JD** (有工作内容 + 要求): 抽字段, 调 extract_and_ingest_jd
-   - **是 careers 主页 / 多岗位列表**: 别 ingest! 再 search 这家公司更具体的 query
-     (例 "字节跳动 AI Agent 实习 招聘 2026"), 拿到具体 JD URL 再 fetch
-   - **不相关 / 过期 / 反爬拿不到**: 跳过, 看下一个 hit
-5. 重复直到入库 ≥ 3 个, 调 done。
-
-# 重要原则
-
-- **不要 fetch 同一个 URL 两次** (我会直接返错)
-- **不要无脑调 done** (没 search 没 fetch 就 done = 偷懒)
-- **不要 ingest 你没 fetch 过的 URL** (你不知道是不是 JD)
-- **不要 ingest 公司目录页 / 招聘介绍** (raw_text 必须是具体岗位)
-- 如果 5 次 fetch 都没拿到真 JD, 调 done(reason="该方向信息匮乏")
-- budget: 最多 25 轮工具调用, 优先质量
-
-# 输出
-
-每次决策后, 调一个工具。不要只输出文字 — 必须 tool_call。
+**像你帮人找工作那样自己想.** 看到搜索结果 / 网页 / 错误, 就想 "这是啥情况, 我接下来怎么办".
+没有固定流程, 没有"5 类页面分别怎么处理"那种规矩. 你能用的就 4 个工具, 怎么组合
+完全你说了算. 唯一硬规矩:
+- 想 ingest 一个 URL → 你必须先 fetch 过它 (否则就是编造)
+- 浪费 budget 在重复 search/fetch 上, 我会拒
 """
 
 
@@ -265,8 +211,9 @@ class JobFinderAgent:
         messages: list[dict[str, Any]] = [
             {"role": "system",
              "content": _SYSTEM_PROMPT.format(north_star=north_star)},
-            {"role": "user",
-             "content": "开始检索。第一步: 想清楚要 search 什么 query, 调 web_search。"},
+            # W14.17: kicked out the "first step: search X" hand-holding.
+            # LLM should decide its own first move from goal + budget alone.
+            {"role": "user", "content": "开始."},
         ]
 
         finish_reason = "budget_exhausted"
