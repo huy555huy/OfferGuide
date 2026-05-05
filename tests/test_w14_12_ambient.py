@@ -422,13 +422,12 @@ class TestHomeAmbientHero:
                 )
 
         resp = client.get("/")
-        # Shows all 4 metrics in the hero
-        assert "本周自动" in resp.text
-        # Counts visible
-        assert ">3<" in resp.text or "3</div>" in resp.text  # 3 jobs auto-found
-        assert ">5<" in resp.text or "5</div>" in resp.text  # 5 score_match
-        assert ">4<" in resp.text or "4</div>" in resp.text  # 4 suggestions
-        assert ">2<" in resp.text or "2</div>" in resp.text  # 2 wakes
+        # W14.13: weekly stats moved from hero to a compact strip below
+        # Mission Control. Copy is "📈 近 7 天: …".
+        assert "近 7 天" in resp.text or "本周自动" in resp.text
+        # The 4 numbers should still appear somewhere on home
+        for n in ["3", "5", "4", "2"]:
+            assert n in resp.text
 
 
 class TestIntentPreviewSuggestionCards:

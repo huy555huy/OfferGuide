@@ -222,8 +222,13 @@ class TestLoadingStates:
     def test_home_wake_agent_button_has_loading_text(self, app_client):
         client, _ = app_client
         resp = client.get("/")
-        # Button has data-loading-text attribute for the spinner
-        assert 'data-loading-text="agent 思考中..."' in resp.text
+        # W14.13: home now uses Mission Control "▶ 立刻跑一次 (不等 cron)"
+        # daemon trigger buttons (one of which is wake_agent) instead of a
+        # single hero "唤醒 agent" button. Either loading-text pattern is fine.
+        assert (
+            'data-loading-text="agent 思考中..."' in resp.text
+            or 'data-loading-text="跑中… (10-60s)"' in resp.text
+        )
 
     def test_apply_mark_buttons_have_loading_text(self, app_client):
         client, store = app_client

@@ -205,6 +205,79 @@ def create_app(
             ).fetchone()
             cost_week = float(cost_week_row[0] or 0.0)
 
+            # W14.13 — Mission Control daemon status. For each cron daemon,
+            # read the most-recent daemon_runs row + count of recent runs.
+            # Lets the home show "agent is doing X right now / last did Y at
+            # T / next runs at Z" instead of a static brochure.
+            daemon_specs = [
+                {
+                    "name": "discover_jobs_via_search",
+                    "icon": "🔍",
+                    "label": "自动搜索新岗位",
+                    "what": "用 Tavily 搜符合你 north star 的 JD, LLM 抽取入库",
+                    "schedule": "每天 08:00 / 14:00 / 20:00",
+                },
+                {
+                    "name": "auto_score_new_jobs",
+                    "icon": "📊",
+                    "label": "自动评分 + 推荐",
+                    "what": "新 JD 跑 score_match, 高分预生成投递包到 inbox",
+                    "schedule": "每 30 分钟 (整点 + 半点)",
+                },
+                {
+                    "name": "wake_agent",
+                    "icon": "🤖",
+                    "label": "唤醒中央 agent",
+                    "what": "看现状 / 处理 off-track 目标 / 决定调哪些工具",
+                    "schedule": "每 4 小时 (08-22)",
+                },
+            ]
+            daemon_status = []
+            for spec in daemon_specs:
+                last_row = conn.execute(
+                    "SELECT id, started_at, ended_at, status, summary_json, error_text "
+                    "FROM daemon_runs WHERE job_name = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (spec["name"],),
+                ).fetchone()
+                runs_24h = conn.execute(
+                    "SELECT COUNT(*) FROM daemon_runs "
+                    "WHERE job_name = ? AND started_at >= julianday('now') - 1",
+                    (spec["name"],),
+                ).fetchone()[0]
+                last = None
+                if last_row:
+                    summary = {}
+                    with contextlib.suppress(Exception):
+                        summary = json.loads(last_row[4] or "{}")
+                    last = {
+                        "id": last_row[0],
+                        "started_at": last_row[1],
+                        "ended_at": last_row[2],
+                        "status": last_row[3],
+                        "summary": summary,
+                        "error_text": last_row[5],
+                    }
+                daemon_status.append({**spec, "last": last, "runs_24h": runs_24h})
+
+            # Recent daemon activity timeline (last 8 entries across all daemons)
+            timeline_rows = conn.execute(
+                "SELECT id, job_name, started_at, ended_at, status, "
+                "       summary_json, error_text "
+                "FROM daemon_runs ORDER BY id DESC LIMIT 8"
+            ).fetchall()
+            activity_timeline = []
+            for r in timeline_rows:
+                summary = {}
+                with contextlib.suppress(Exception):
+                    summary = json.loads(r[5] or "{}")
+                activity_timeline.append({
+                    "id": r[0], "job_name": r[1],
+                    "started_at": r[2], "ended_at": r[3],
+                    "status": r[4], "summary": summary,
+                    "error_text": r[6],
+                })
+
         # State-machine for the next-step card:
         #   no goal & no job  → set a goal OR paste a JD (parallel paths)
         #   goal but no job   → emphasize "add a JD now" (the actual blocker)
@@ -249,10 +322,104 @@ def create_app(
                     "agent_runs": n_agent_runs_week,
                     "cost_usd": cost_week,
                 },
+                daemon_status=daemon_status,
+                activity_timeline=activity_timeline,
                 runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
                 active_tab="home",
             ),
         )
+
+    @app.post("/api/scheduler/trigger/{job_name}", response_class=JSONResponse)
+    def manual_trigger_daemon(job_name: str) -> Any:
+        """W14.13 — let the user manually trigger a scheduler daemon now,
+        instead of waiting for the next cron tick. Used by the Mission
+        Control cards on home so "show me what discover_jobs would find
+        right now" is a single click.
+
+        Whitelist enforced — only daemons with a clear human-trigger
+        meaning. Internal/maintenance jobs aren't exposed via this route.
+        """
+        VALID = {"discover_jobs_via_search", "auto_score_new_jobs", "wake_agent"}
+        if job_name not in VALID:
+            raise HTTPException(404, f"unknown daemon: {job_name}")
+        if not settings.deepseek_api_key:
+            raise HTTPException(400, "需要先配 LLM key (.env)")
+        if runtime is None:
+            raise HTTPException(400, "SkillRuntime 没初始化 (检查 LLM 配置)")
+
+        from ..agentic.search import build_default_search
+        from ..autonomous.scheduler import (
+            JobContext,
+            _auto_score_via_daemon,
+            _discover_via_search_job,
+        )
+
+        # Build a fresh JobContext with the same resources the web app has
+        llm = LLMClient(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            default_model=settings.default_model,
+        )
+        try:
+            search = build_default_search()
+        except Exception:
+            search = None
+        ctx = JobContext(
+            settings=settings, store=store, llm=llm,
+            runtime=runtime, skills=skills,
+            user_profile_text=profile.raw_resume_text if profile else None,
+            search=search, notifier=notifier,
+        )
+
+        # Record a daemon_runs row for this manual run so it shows up in
+        # the activity timeline like a cron run would.
+        with store.connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO daemon_runs(job_name, status, summary_json) "
+                "VALUES (?, 'running', '{}') RETURNING id",
+                (job_name,),
+            )
+            run_id = int(cur.fetchone()[0])
+
+        try:
+            if job_name == "discover_jobs_via_search":
+                result = _discover_via_search_job(ctx)
+            elif job_name == "auto_score_new_jobs":
+                result = _auto_score_via_daemon(ctx)
+            else:  # wake_agent — kick off via the same route home_wake_agent uses
+                from ..agent.loop import AgentLoop
+                agent = AgentLoop(
+                    llm=llm, runtime=runtime, store=store, skills=skills,
+                    master_resume_text=profile.raw_resume_text if profile else "",
+                    max_iterations=6, critic_enabled=True, notifier=notifier,
+                )
+                agent_result = agent.run(
+                    goal="(manual trigger from Mission Control)",
+                    trigger_kind="user_button",
+                )
+                result = {
+                    "agent_run_id": agent_result.run_id,
+                    "iterations": agent_result.iterations,
+                    "critic_score": agent_result.critic_score,
+                }
+            with store.connect() as conn:
+                conn.execute(
+                    "UPDATE daemon_runs SET status='ok', "
+                    "  ended_at=julianday('now'), summary_json=? WHERE id=?",
+                    (json.dumps(result, ensure_ascii=False, default=str)[:4000], run_id),
+                )
+            return {"job": job_name, "result": result, "run_id": run_id}
+        except Exception as e:
+            with store.connect() as conn:
+                conn.execute(
+                    "UPDATE daemon_runs SET status='error', "
+                    "  ended_at=julianday('now'), error_text=? WHERE id=?",
+                    (str(e)[:500], run_id),
+                )
+            raise HTTPException(500, f"daemon failed: {e}") from None
+        finally:
+            with contextlib.suppress(Exception):
+                llm.close()
 
     @app.post("/api/home/wake-agent", response_class=JSONResponse)
     async def home_wake_agent(request: Request) -> Any:
