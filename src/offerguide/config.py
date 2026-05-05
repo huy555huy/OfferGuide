@@ -12,12 +12,69 @@ without monkey-patching the environment.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 NotifyChannel = Literal["console", "feishu", "telegram"]
+
+log = logging.getLogger(__name__)
+
+
+def _load_dotenv_if_present(path: Path = Path(".env")) -> int:
+    """Tiny zero-dep loader for a project-local ``.env`` file.
+
+    Why not python-dotenv: keeping the runtime dep tree lean is an explicit
+    project value (see pyproject.toml comments). Our `.env` is a flat
+    KEY=value file with optional comments; that's ~15 lines to parse.
+
+    Behavior:
+      - Looks for ``.env`` relative to the current working directory
+        (matches what users expect when they run ``python -m offerguide.ui.web``
+        from the project root)
+      - Does NOT override existing env vars — anything already set in the
+        shell wins, so CLI overrides like ``OFFERGUIDE_DB=... python -m ...``
+        keep working
+      - Strips matched surrounding quotes (single or double) from values
+      - Skips blank lines and ``#`` comments
+      - Skipped entirely when ``OFFERGUIDE_SKIP_DOTENV=1`` is set — used by
+        the test suite (see ``tests/conftest.py``) so unit tests never
+        read the developer's real ``.env`` and accidentally exfiltrate
+        API keys into pytest output / CI logs.
+
+    Returns the count of vars actually injected (0 when file missing,
+    skipped, or every var was already set externally). Tests use the
+    count to assert the loader ran without depending on the contents.
+    """
+    if os.environ.get("OFFERGUIDE_SKIP_DOTENV") == "1":
+        return 0
+    if not path.exists():
+        return 0
+    injected = 0
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        log.debug("could not read %s: %s", path, e)
+        return 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        # Strip a single matched pair of quotes (not an arbitrary leading
+        # or trailing quote — that would break values like sk-..."weird).
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+            injected += 1
+    return injected
 
 
 @dataclass(frozen=True)
@@ -51,6 +108,13 @@ class Settings:
     def from_env(cls) -> Settings:
         """Build a Settings from environment variables. Missing → defaults.
 
+        W14.10: a ``.env`` file in the current working directory is
+        auto-loaded before reading env vars. Previously the README told
+        users to put their LLM key in ``.env`` but nothing actually loaded
+        it, so ``python -m offerguide.ui.web`` showed "LLM 未配置" even
+        when the user had configured everything correctly. Existing shell
+        env vars still win (CLI overrides preserved).
+
         LLM credentials accept three naming schemes for compatibility:
 
         - ``DEEPSEEK_API_KEY`` / ``DEEPSEEK_BASE_URL`` — OfferGuide's
@@ -64,6 +128,11 @@ class Settings:
         are stripped (a common copy-paste hazard in Chinese keyboard
         layouts).
         """
+        # W14.10: load .env from cwd (idempotent, no-op when missing or
+        # already-set). Done at the top so every other resolution below
+        # sees the loaded values.
+        _load_dotenv_if_present()
+
         # Resolve API key + base URL — `OFFERGUIDE_LLM_*` is the canonical
         # naming (W12-fix-c). Older `TOKEN/BASE_URL/DEEPSEEK_*/OPENAI_*`
         # still work as fallbacks so existing .env files don't break.

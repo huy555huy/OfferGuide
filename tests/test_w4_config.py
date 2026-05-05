@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from offerguide.config import Settings
+from offerguide.config import Settings, _load_dotenv_if_present
 
 
 def test_defaults_when_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,3 +52,84 @@ def test_notify_channel_falls_back_on_garbage_value(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("OFFERGUIDE_NOTIFY", "skywriting")
     s = Settings.from_env()
     assert s.notify_channel == "console"
+
+
+# ────────── W14.10 dotenv autoload ──────────
+
+
+class TestDotenvAutoload:
+    """The .env file in the project root is auto-loaded by Settings.from_env()
+    so users don't need to remember to `source .env`. The README has always
+    told them to put credentials in .env; previously nothing read it."""
+
+    def test_loads_keys_from_dotenv(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OFFERGUIDE_SKIP_DOTENV", raising=False)
+        monkeypatch.delenv("MYAPP_KEY", raising=False)
+        env = tmp_path / ".env"
+        env.write_text("MYAPP_KEY=injected_value\n", encoding="utf-8")
+        n = _load_dotenv_if_present(env)
+        assert n == 1
+        import os
+        assert os.environ.get("MYAPP_KEY") == "injected_value"
+
+    def test_does_not_override_existing_env(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OFFERGUIDE_SKIP_DOTENV", raising=False)
+        monkeypatch.setenv("MYAPP_KEY", "shell_wins")
+        env = tmp_path / ".env"
+        env.write_text("MYAPP_KEY=dotenv_value\n", encoding="utf-8")
+        n = _load_dotenv_if_present(env)
+        assert n == 0  # nothing injected — pre-existing wins
+        import os
+        assert os.environ["MYAPP_KEY"] == "shell_wins"
+
+    def test_strips_matched_quotes(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OFFERGUIDE_SKIP_DOTENV", raising=False)
+        monkeypatch.delenv("Q1", raising=False)
+        monkeypatch.delenv("Q2", raising=False)
+        monkeypatch.delenv("Q3", raising=False)
+        env = tmp_path / ".env"
+        env.write_text(
+            'Q1="double quoted"\n'
+            "Q2='single quoted'\n"
+            'Q3=no quotes\n',
+            encoding="utf-8",
+        )
+        _load_dotenv_if_present(env)
+        import os
+        assert os.environ["Q1"] == "double quoted"
+        assert os.environ["Q2"] == "single quoted"
+        assert os.environ["Q3"] == "no quotes"
+
+    def test_skips_comments_and_blank_lines(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OFFERGUIDE_SKIP_DOTENV", raising=False)
+        monkeypatch.delenv("REAL_KEY", raising=False)
+        env = tmp_path / ".env"
+        env.write_text(
+            "# this is a comment\n"
+            "\n"
+            "REAL_KEY=value\n"
+            "  # indented comment\n",
+            encoding="utf-8",
+        )
+        n = _load_dotenv_if_present(env)
+        assert n == 1
+        import os
+        assert os.environ["REAL_KEY"] == "value"
+
+    def test_skip_dotenv_env_bypasses_loading(self, tmp_path, monkeypatch):
+        """Critical: tests must never accidentally read the developer's real
+        .env (would exfiltrate API keys into pytest output / CI logs).
+        OFFERGUIDE_SKIP_DOTENV=1 (set in tests/conftest.py) must short-circuit."""
+        monkeypatch.setenv("OFFERGUIDE_SKIP_DOTENV", "1")
+        monkeypatch.delenv("WOULD_BE_LOADED", raising=False)
+        env = tmp_path / ".env"
+        env.write_text("WOULD_BE_LOADED=secret\n", encoding="utf-8")
+        n = _load_dotenv_if_present(env)
+        assert n == 0
+        import os
+        assert "WOULD_BE_LOADED" not in os.environ
+
+    def test_missing_file_returns_zero(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OFFERGUIDE_SKIP_DOTENV", raising=False)
+        n = _load_dotenv_if_present(tmp_path / "nonexistent.env")
+        assert n == 0
