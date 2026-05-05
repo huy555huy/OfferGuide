@@ -123,9 +123,17 @@
 </div>
 
 {% if not runtime_ready %}
-<div class="error">⚠ 缺 OFFERGUIDE_LLM_API_KEY, 无法生成。</div>
+<div class="empty" style="margin-bottom: 1rem;">
+    <div class="empty-icon">🔌</div>
+    <div class="empty-title">还没接通 LLM, 无法生成投递包</div>
+    <div class="empty-hint">看 README「快速开始」第 2 步, 注册 deepseek 配 key (5 分钟)</div>
+</div>
 {% elif not profile_loaded %}
-<div class="error">⚠ 缺 OFFERGUIDE_RESUME_PDF, 无法生成 (需要 master 简历做来源)。</div>
+<div class="empty" style="margin-bottom: 1rem;">
+    <div class="empty-icon">📄</div>
+    <div class="empty-title">还没传简历, 无法生成投递包</div>
+    <div class="empty-hint">投递包需要 master 简历做来源 (个性化 / Q&A 引用); 看 README「快速开始」第 3 步</div>
+</div>
 {% endif %}
 
 <div id="package-container">

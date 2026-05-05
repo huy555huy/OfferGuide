@@ -993,8 +993,8 @@ class TestAgentUIRoutes:
         resp = client.get("/agent")
         assert resp.status_code == 200
         assert "模型在主位" in resp.text
-        # No runtime + no key -> agent should be disabled
-        assert "OFFERGUIDE_LLM_API_KEY" in resp.text or "Agent 不可用" in resp.text
+        # No runtime + no key -> agent should be disabled (W14.6 polish: friendlier msg)
+        assert "Agent 还没接通 LLM" in resp.text or "Agent 不可用" in resp.text
 
     def test_agent_page_includes_recent_runs_section(self, agent_app_with_runtime):
         client, store = agent_app_with_runtime

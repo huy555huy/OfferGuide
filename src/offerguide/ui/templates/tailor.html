@@ -62,9 +62,15 @@
         </form>
         {% else %}
         <div class="empty">
-            <div style="font-size: 1.5rem;">📋</div>
-            <div>没有可微调的 JD（>= 200 字 raw_text）</div>
-            <div class="small muted">先去 <a href="/quick-eval">评估</a> 粘贴一个，或等 spider 抓到</div>
+            <div class="empty-icon">📋</div>
+            <div class="empty-title">还没有可微调的 JD</div>
+            <div class="empty-hint">
+                微调需要一个 ≥200 字的 JD 原文。<br>
+                装<strong>浏览器扩展</strong>从 Boss / 牛客抓 → 自动入库后会出现在这里
+            </div>
+            <div class="empty-action">
+                <a href="/pipeline" class="btn secondary">看现有 pipeline →</a>
+            </div>
         </div>
         {% endif %}
     </div>
@@ -77,7 +83,11 @@
         {% if master_resume %}
         <div class="resume-preview">{{ master_resume }}</div>
         {% else %}
-        <div class="empty">未加载简历——设 <code>OFFERGUIDE_RESUME_PDF</code></div>
+        <div class="empty">
+            <div class="empty-icon">📄</div>
+            <div class="empty-title">还没传 master 简历</div>
+            <div class="empty-hint">看 README「快速开始」第 3 步: 把简历放到指定目录, 重启即生效</div>
+        </div>
         {% endif %}
     </div>
 </div>

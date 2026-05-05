@@ -103,8 +103,15 @@
 </div>
 
 {% if not tools_ready %}
-<div class="error" style="margin-bottom: 1rem;">
-    ⚠️ Agent 不可用 — 缺 <code>OFFERGUIDE_LLM_API_KEY</code> 或 SkillRuntime 没初始化。
+<div class="empty" style="margin-bottom: 1rem;">
+    <div class="empty-icon">🔌</div>
+    <div class="empty-title">Agent 还没接通 LLM</div>
+    <div class="empty-hint">
+        看 README「快速开始」第 2 步: 注册 deepseek 拿 API key, 填到 <code>.env</code> 里, 重启服务即可。
+    </div>
+    <div class="empty-action">
+        <a class="btn" href="https://github.com/" target="_blank">📖 配置指南</a>
+    </div>
 </div>
 {% endif %}
 

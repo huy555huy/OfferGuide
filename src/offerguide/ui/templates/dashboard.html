@@ -51,9 +51,9 @@
     {% endfor %}
     {% else %}
     <div class="empty">
-        <div style="font-size: 1.5rem; margin-bottom: 0.25rem;">📊</div>
-        <div>还没有应用事件</div>
-        <div class="small muted">投递后用 application_events.record() 标记，漏斗会跑起来</div>
+        <div class="empty-icon">📊</div>
+        <div class="empty-title">还没有应用事件</div>
+        <div class="empty-hint">投递后, 在 <a href="/apply/">投递页</a>点 lifecycle 按钮 (已投/已看/回复/面试/offer/拒), 漏斗会自动跑起来</div>
     </div>
     {% endif %}
 </div>
@@ -100,9 +100,11 @@
     </table>
     {% else %}
     <div class="empty">
-        <div style="font-size: 1.5rem; margin-bottom: 0.25rem;">🧬</div>
-        <div>还没有 SKILL 进化记录</div>
-        <div class="small muted">设 <code>DEEPSEEK_API_KEY</code>，然后跑 <code>python -m offerguide.evolution evolve score_match</code></div>
+        <div class="empty-icon">🧬</div>
+        <div class="empty-title">还没有 SKILL 进化记录</div>
+        <div class="empty-hint">
+            agent 跑 5+ 次后, evolution_signals 累积到一定量, 在 <a href="/evolution">/evolution</a> 页面手动触发 evolve, 这里会出现进化记录。
+        </div>
     </div>
     {% endif %}
 </div>

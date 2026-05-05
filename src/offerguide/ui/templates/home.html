@@ -109,7 +109,7 @@
     </div>
     <div class="answer">{{ latest_run.final_answer }}</div>
     <div class="actions">
-        <button class="btn" onclick="wakeAgent(this)" data-loading-text="agent 思考中..." {% if not runtime_ready %}disabled title="缺 OFFERGUIDE_LLM_API_KEY"{% endif %}>
+        <button class="btn" onclick="wakeAgent(this)" data-loading-text="agent 思考中..." {% if not runtime_ready %}disabled title="还没配 LLM, 看 README 第 2 步"{% endif %}>
             ↻ 让 agent 重新评估
         </button>
         <a class="btn secondary" href="/agent/runs/{{ latest_run.id }}">看完整 trajectory</a>
@@ -120,16 +120,32 @@
     <div class="muted">
         还没有 agent 跑过。让它读一遍现状, 给你一段它对你求职状况的判断。
         {% if not runtime_ready %}
-        <br><strong style="color:var(--danger);">⚠ 当前不可用</strong> — 需要在 .env 里配 <code>OFFERGUIDE_LLM_API_KEY</code>。
+        <br><strong style="color:var(--warning);">还没配 LLM</strong> — 看 README「快速开始」第 2 步, 5 分钟搞定。
         {% endif %}
     </div>
     <div class="actions">
-        <button class="btn" onclick="wakeAgent(this)" data-loading-text="agent 思考中..." {% if not runtime_ready %}disabled{% endif %}>
+        <button class="btn" onclick="wakeAgent(this)" data-loading-text="agent 思考中..." {% if not runtime_ready %}disabled title="还没配 LLM, 看 README 第 2 步"{% endif %}>
             ▶ 唤醒 agent (10-30s)
         </button>
+        {% if not runtime_ready %}
+        <a class="btn ghost" href="https://github.com/" target="_blank">📖 配置指南</a>
+        {% endif %}
     </div>
     {% endif %}
 </div>
+
+{# ─────────── 1.5 — Onboarding banner: only show when truly empty ─────────── #}
+
+{% if not latest_run and stats.jobs == 0 and stats.active_apps == 0 and not suggestions %}
+<div class="card" style="background: var(--primary-soft); border-color: var(--primary);">
+    <h2 style="margin: 0 0 0.5rem; font-family: var(--font-serif); font-size: 1rem;">👋 第一次用? 三步走</h2>
+    <ol style="margin: 0; padding-left: 1.25rem; font-size: 0.875rem; line-height: 1.8;">
+        <li>去 <a href="/goals">🎯 Goals</a> 设你的 north star (例: <em>"2026 暑期拿 1 个 AI Agent 实习 offer"</em>)</li>
+        <li>装好浏览器扩展 (<code>extension/</code> 文件夹), 在 Boss / 牛客 看到岗位时点扩展抓取</li>
+        <li>回到 <a href="/agent">🤖 Agent</a> 唤醒一次, 让 agent 读现状给建议 — 建议会出现在这里</li>
+    </ol>
+</div>
+{% endif %}
 
 {# ─────────── 2. Stats strip (just facts, no rule-based actions) ─────────── #}
 
@@ -185,35 +201,45 @@
         <h2>常用入口</h2>
     </div>
     <div class="quick-link-grid">
+        <a class="quick-link" href="/goals">
+            <div class="qicon">🎯</div>
+            <div class="qtitle">Goals</div>
+            <div class="qdesc">设 north star, agent 全程对齐</div>
+        </a>
         <a class="quick-link" href="/agent">
             <div class="qicon">🤖</div>
             <div class="qtitle">Agent</div>
-            <div class="qdesc">手动给一个 goal, 看 agent 实时执行</div>
-        </a>
-        <a class="quick-link" href="/applications">
-            <div class="qicon">📤</div>
-            <div class="qtitle">投递记录</div>
-            <div class="qdesc">所有 application + 状态时间线</div>
-        </a>
-        <a class="quick-link" href="/tailor">
-            <div class="qicon">📄</div>
-            <div class="qtitle">简历微调</div>
-            <div class="qdesc">docx 保格式 + LLM 改写</div>
-        </a>
-        <a class="quick-link" href="/mock">
-            <div class="qicon">🎤</div>
-            <div class="qtitle">模拟面试</div>
-            <div class="qdesc">turn-based, agent 当面试官</div>
-        </a>
-        <a class="quick-link" href="/evolution">
-            <div class="qicon">🧬</div>
-            <div class="qtitle">SKILL 进化</div>
-            <div class="qdesc">看每个 SKILL 的 fitness + 灰度</div>
+            <div class="qdesc">手动给 agent 一个目标看它干活</div>
         </a>
         <a class="quick-link" href="/inbox">
             <div class="qicon">📥</div>
             <div class="qtitle">Inbox</div>
-            <div class="qdesc">{{ stats.pending_inbox }} 个待决策</div>
+            <div class="qdesc">{{ stats.pending_inbox }} 个待决策 · agent 提的建议</div>
+        </a>
+        <a class="quick-link" href="/pipeline">
+            <div class="qicon">📋</div>
+            <div class="qtitle">Pipeline</div>
+            <div class="qdesc">投递看板, 5 列状态拖拉</div>
+        </a>
+        <a class="quick-link" href="/funnel">
+            <div class="qicon">📊</div>
+            <div class="qtitle">Funnel</div>
+            <div class="qdesc">投递 → 面试 → offer 转化漏斗</div>
+        </a>
+        <a class="quick-link" href="/tailor">
+            <div class="qicon">📄</div>
+            <div class="qtitle">简历微调</div>
+            <div class="qdesc">选一个 JD, 改一份针对性简历</div>
+        </a>
+        <a class="quick-link" href="/mock">
+            <div class="qicon">🎤</div>
+            <div class="qtitle">模拟面试</div>
+            <div class="qdesc">agent 当面试官, 你练答题</div>
+        </a>
+        <a class="quick-link" href="/portfolio">
+            <div class="qicon">📦</div>
+            <div class="qtitle">Portfolio</div>
+            <div class="qdesc">系统自身的 build metrics</div>
         </a>
     </div>
 </div>

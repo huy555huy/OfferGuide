@@ -185,6 +185,7 @@
             background: var(--success);
         }
         .status-dot.warn { background: var(--warning); }
+        .status-dot.dim  { background: var(--text-dim); }
 
         /* ─────── layout ─────── */
         main {
@@ -651,8 +652,11 @@
                 <span class="status-dot"></span>
                 <span>简历已加载 · {{ profile_chars }} 字</span>
             {% else %}
-                <span class="status-dot warn"></span>
-                <span>未加载简历 — 设 <code>OFFERGUIDE_RESUME_PDF</code></span>
+                <span class="status-dot dim"></span>
+                <span title="看 README「快速开始」第 3 步把 PDF 简历放到指定目录, 重启即生效">
+                    简历未配置
+                    <a href="https://github.com/" target="_blank" style="font-size:0.78rem; margin-left:0.25rem;">设置 →</a>
+                </span>
             {% endif %}
         </div>
     </header>

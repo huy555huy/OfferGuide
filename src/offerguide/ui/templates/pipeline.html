@@ -131,7 +131,7 @@
         <h1>Pipeline · 投递战况</h1>
         <p>{{ pipeline.total_active }} 个 active · {{ pipeline.counts.terminal }} 个已结束。每张卡片悬停可见操作按钮 — 一键推进状态，状态自动同步到 application_events。</p>
     </div>
-    <a href="/quick-eval" class="btn secondary">+ 评估新 JD</a>
+    <span class="muted small">JD 通过浏览器扩展从 Boss / 牛客抓取</span>
 </div>
 
 {# Always render the 5-column kanban. Empty DB → all columns empty,
@@ -139,15 +139,12 @@
    to do when truly empty, but keep the structure visible so users
    learn the lifecycle. #}
 {% if pipeline.total_active == 0 and pipeline.counts.terminal == 0 %}
-<div class="card" style="background: var(--primary-soft); border-color: var(--primary);">
-    <div style="display: flex; gap: 0.75rem; align-items: center;">
-        <span style="font-size: 1.5rem;">📋</span>
-        <div style="flex: 1;">
-            <div style="font-weight: 600;">Pipeline 还是空的</div>
-            <div class="muted small">
-                先去 <a href="/quick-eval">评估</a> 一份 JD，或用浏览器扩展从 Boss 直接抓 —— 抓进来后这里会自动出现卡片
-            </div>
-        </div>
+<div class="empty">
+    <div class="empty-icon">📋</div>
+    <div class="empty-title">Pipeline 还是空的</div>
+    <div class="empty-hint">
+        装好浏览器扩展 (<code>extension/</code> 文件夹), 在 Boss / 牛客 看到岗位时点扩展抓取——抓进来后会自动出现在这里。<br>
+        每张卡片可一键推进状态 (草稿 → 已投 → 已看 → 已回 → 面试)。
     </div>
 </div>
 {% endif %}

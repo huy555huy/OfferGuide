@@ -14,9 +14,12 @@
 
     {% if not experiences %}
     <div class="empty">
-        <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📚</div>
-        <div>还没有面经</div>
-        <div class="small muted">从 小红书 / 知乎 / 一亩三分地 找一篇粘进上面的表单</div>
+        <div class="empty-icon">📚</div>
+        <div class="empty-title">还没有面经</div>
+        <div class="empty-hint">
+            从 小红书 / 知乎 / 一亩三分地 / 牛客 看到面经, 复制原文 → 粘到上面表单。<br>
+            存进来后, agent 准备面试时会自动 retrieve 类似公司的题
+        </div>
     </div>
     {% else %}
     {% for e in experiences %}

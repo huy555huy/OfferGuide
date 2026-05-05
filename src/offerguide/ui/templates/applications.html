@@ -13,11 +13,15 @@
 {% if not applications %}
 <div class="card">
     <div class="empty">
-        <div style="font-size: 1.75rem; margin-bottom: 0.5rem;">📭</div>
-        <div>还没有投递记录</div>
-        <div class="small muted" style="margin-top: 0.5rem;">
-            从 Chat 页提交 JD → 在分析报告下方点「考虑投递 → 加 inbox」<br>
-            或在 inbox 里点「批准」就会创建一条 application。
+        <div class="empty-icon">📭</div>
+        <div class="empty-title">还没有投递记录</div>
+        <div class="empty-hint">
+            投递路径: <strong>装浏览器扩展</strong> → Boss / 牛客 抓 JD → 在 <a href="/pipeline">/pipeline</a> 看到卡片 →
+            点「标记已投递」就会在这里出现一条记录。<br>
+            投后用按钮记 HR 已看 / 已回复 / 面试 / offer / 拒, 数据会反流到 funnel + portfolio。
+        </div>
+        <div class="empty-action">
+            <a href="/pipeline" class="btn">→ 去 pipeline 看现有 JD</a>
         </div>
     </div>
 </div>

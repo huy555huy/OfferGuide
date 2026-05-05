@@ -18,9 +18,15 @@
 
     {% if not company_groups %}
     <div class="empty">
-        <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📊</div>
-        <div>DB 里还没有 ≥ 2 个 JD 的公司</div>
-        <div class="small muted">从 Chat / Boss 扩展 / 牛客 crawler 多导入几个 JD 即可</div>
+        <div class="empty-icon">📊</div>
+        <div class="empty-title">还没有 ≥ 2 个 JD 的公司</div>
+        <div class="empty-hint">
+            这页是给"同公司多职位选哪个"用的——比如字节校招最多投 2 个,要挑哪 2 个最有戏。<br>
+            装好浏览器扩展, 多抓几个同公司 JD, 这里会自动出现公司名。
+        </div>
+        <div class="empty-action">
+            <a href="/pipeline" class="btn secondary">看现有 pipeline →</a>
+        </div>
     </div>
     {% else %}
     <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
