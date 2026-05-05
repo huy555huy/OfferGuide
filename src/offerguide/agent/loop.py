@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
@@ -460,6 +461,16 @@ ACTION_TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "skill_args_json": {
                         "type": "string",
                         "description": "(可选) skill_to_call 的参数, JSON 字符串 e.g. '{\"job_id\": 42}'",
+                    },
+                    "source_skill_name": {
+                        "type": "string",
+                        "description": (
+                            "(可选, 但强烈建议) 这条 suggestion 的判断主要基于"
+                            "**哪个** SKILL 的输出 (例如 'score_match' / 'analyze_gaps')。"
+                            "用户后续 approve / reject 的反馈会归到这个 SKILL 的"
+                            "evolution_signals。不传则系统启发式归到本次 trajectory "
+                            "里最后一次调过的 SKILL — 多 SKILL 跑过时启发式可能归错。"
+                        ),
                     },
                 },
                 "required": ["title", "body"],
@@ -909,12 +920,21 @@ class AgentLoop:
         goal: str,
         trigger_kind: str = "manual",
         on_event: EventCallback | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> AgentRunResult:
         """Execute one agent loop. Persists trajectory + result to agent_runs.
 
         ``goal`` is the natural-language objective the model is given.
         ``trigger_kind`` records who woke the agent (cron / user_button / ...).
         ``on_event`` fires for every event — used by SSE streaming UI.
+        ``cancel_event`` is checked at every iteration boundary; when set,
+        the run aborts gracefully (emits a ``_cancelled`` event, persists
+        agent_runs.status='cancelled', and returns early). Used by the SSE
+        endpoint to stop the agent when the client disconnects so we don't
+        keep burning LLM credits on a connection nobody's reading. Note:
+        cancellation is **cooperative** — the LLM call already in flight
+        runs to completion (httpx timeout caps that at 180s). If you need
+        a hard cap, layer `httpx.Client(timeout=...)` instead.
         """
         events: list[AgentEvent] = []
         t0 = time.monotonic()
@@ -977,6 +997,20 @@ class AgentLoop:
         final_iteration = 0
         for iteration in range(self._max_iter):
             final_iteration = iteration + 1
+            # W14.9: cooperative cancellation. Checked at the iteration
+            # head so the in-flight LLM call (if any) is allowed to finish
+            # — interrupting an httpx call mid-flight has no clean recovery
+            # and the answer would be wasted spend anyway. Worst-case extra
+            # latency is one LLM call (~3-30s).
+            if cancel_event is not None and cancel_event.is_set():
+                emit("_cancelled", iteration=iteration,
+                     reason="cancel_event set (likely client disconnect)")
+                return self._finalize(
+                    run_id=run_id, goal=goal, trigger_kind=trigger_kind,
+                    events=events, t0=t0, iterations=final_iteration - 1,
+                    final_answer="(cancelled)",
+                    status="cancelled",
+                )
             try:
                 resp = self._llm.chat_with_tools(
                     messages=messages,
@@ -1403,9 +1437,14 @@ class AgentLoop:
         The suggestion is attributed to the current agent_run (via
         ``self._current_run_id``) so when the user later approves/rejects,
         the user_thumbs signal flows back to the right agent_run for
-        attribution. Skill-level attribution comes from the most recent
-        SKILL invoked during this trajectory (heuristic: the suggestion
-        likely concerns that SKILL's output).
+        attribution.
+
+        W14.9: SKILL-level attribution now prefers an explicit
+        ``source_skill_name`` arg from the model. Previously we used
+        "trajectory's most-recent SKILL" — which mis-attributes when the
+        model called several SKILLs and the suggestion is logically about
+        an earlier one (e.g. score_match → tailor_resume → suggestion that's
+        really *about* score_match). The heuristic remains as fallback.
         """
         title = (tc.arguments.get("title") or "").strip()
         body = (tc.arguments.get("body") or "").strip()
@@ -1426,11 +1465,32 @@ class AgentLoop:
                     args = {}
             proposed_action = {"tool": skill_to_call, "args": args}
 
-        # Heuristic attribution: pick the most recent SKILL invocation in this
-        # trajectory (if any). Lookup tools don't count.
+        # W14.9: explicit > heuristic. The model can name the SKILL whose
+        # output this suggestion is about; only fall back to "most recent in
+        # trajectory" when not given. This uses the actual recorded
+        # skill_invocations dict so version + run_id stay consistent with
+        # what runtime actually invoked.
         sk_name = sk_ver = None
         sr_id = None
-        if self._current_skill_invocations:
+        explicit_name = (tc.arguments.get("source_skill_name") or "").strip() or None
+        if explicit_name and self._current_skill_invocations:
+            # Find the most recent invocation of THIS skill (so version +
+            # skill_run_id are real, not made-up).
+            for inv in reversed(list(self._current_skill_invocations.values())):
+                if inv.get("skill_name") == explicit_name:
+                    sk_name = inv.get("skill_name")
+                    sk_ver = inv.get("skill_version")
+                    sr_id = inv.get("skill_run_id")
+                    break
+        if sk_name is None and explicit_name:
+            # Model named a SKILL we never invoked this trajectory.
+            # Honor the name (the model knows what the suggestion's about)
+            # but mark version "?" so fitness doesn't bucket it under a fake
+            # version, and skip skill_run_id (no real run to point at).
+            sk_name = explicit_name
+            sk_ver = "?"
+        if sk_name is None and self._current_skill_invocations:
+            # Fall back to old heuristic only when model didn't tell us.
             most_recent = list(self._current_skill_invocations.values())[-1]
             sk_name = most_recent.get("skill_name")
             sk_ver = most_recent.get("skill_version")
@@ -1635,9 +1695,14 @@ class AgentLoop:
         critic_notes: str | None = None,
         total_cost_usd: float = 0.0,
         error: str | None = None,
+        status: str | None = None,
     ) -> AgentRunResult:
         latency_ms = int((time.monotonic() - t0) * 1000)
-        status = "error" if error else "ok"
+        # W14.9: explicit status arg lets callers (notably the cancellation
+        # branch) record agent_runs.status='cancelled' without faking an
+        # error. Default behavior preserved: error → 'error', else 'ok'.
+        if status is None:
+            status = "error" if error else "ok"
         if run_id is not None:
             try:
                 with self._store.connect() as conn:

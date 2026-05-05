@@ -873,13 +873,49 @@ def create_app(
         )
 
         main_loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
+        # W14.9: bounded queue + dropped-event counter. An 8-iteration agent
+        # produces ~50-100 events; we cap at 500 so a slow client + full queue
+        # can never grow without bound. When full, drop the oldest event and
+        # surface the count in a synthetic _dropped event so the UI knows.
+        queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+        dropped_count = 0
+        # W14.9: real cooperative cancellation. asyncio.Task.cancel() cannot
+        # interrupt code running in a thread (asyncio.to_thread submits to a
+        # ThreadPoolExecutor and the future.cancel() only works pre-start).
+        # The agent loop checks this Event at every iteration boundary and
+        # exits gracefully when set. SSE finally block sets it on disconnect.
+        import threading as _threading
+        cancel_event = _threading.Event()
 
         def _on_event_from_thread(ev: Any) -> None:
-            # AgentLoop calls this from its worker thread — bridge to async queue
+            # AgentLoop calls this from its worker thread — bridge to async queue.
+            # call_soon_threadsafe runs the put on the main event loop so the
+            # asyncio.Queue mutation stays on its owning loop (thread-safe).
+            def _do_put(payload: dict) -> None:
+                nonlocal dropped_count
+                try:
+                    queue.put_nowait(payload)
+                except asyncio.QueueFull:
+                    # Drop oldest to make room for newest (so the user always
+                    # sees the latest activity, not stale events). Skip when
+                    # the discarded event was a `_done` sentinel — those carry
+                    # the run summary and should never silently disappear.
+                    try:
+                        old = queue.get_nowait()
+                        if isinstance(old, dict) and old.get("kind") == "_done":
+                            # Put it back; drop the new one instead.
+                            queue.put_nowait(old)
+                            dropped_count += 1
+                            return
+                    except asyncio.QueueEmpty:
+                        pass
+                    dropped_count += 1
+                    with contextlib.suppress(asyncio.QueueFull):
+                        queue.put_nowait(payload)
+
             with contextlib.suppress(RuntimeError):
                 # Event loop closed (client disconnected) — drop event
-                main_loop.call_soon_threadsafe(queue.put_nowait, dict(ev))
+                main_loop.call_soon_threadsafe(_do_put, dict(ev))
 
         def _run_blocking() -> None:
             try:
@@ -887,6 +923,7 @@ def create_app(
                     goal=goal,
                     trigger_kind=trigger_kind,
                     on_event=_on_event_from_thread,
+                    cancel_event=cancel_event,
                 )
                 _on_event_from_thread({
                     "kind": "_done",
@@ -923,11 +960,28 @@ def create_app(
                     if ev is None:
                         break
                     yield "data: " + json_dumps(ev, ensure_ascii=False, default=str) + "\n\n"
+                # W14.9: surface any events the bounded queue had to drop so
+                # the user knows the trajectory shown is incomplete.
+                if dropped_count > 0:
+                    yield (
+                        "data: " + json_dumps({
+                            "kind": "_dropped",
+                            "count": dropped_count,
+                            "note": "queue full — some intermediate events skipped",
+                        }) + "\n\n"
+                    )
             finally:
-                # Ensure the background agent task is awaited / cancelled with
-                # the stream — otherwise an early disconnect leaves it dangling.
-                if not bg_task.done():
-                    bg_task.cancel()
+                # W14.9: real cooperative cancellation. bg_task.cancel() was
+                # a no-op against asyncio.to_thread (ThreadPoolExecutor
+                # futures can't be cancelled mid-thread; previously this
+                # silently let the agent keep burning LLM credits after
+                # client disconnect). Now we set a Event the agent loop
+                # checks at every iteration boundary.
+                cancel_event.set()
+                # Wait briefly for the bg task to notice + persist its
+                # cancelled state. Cap so we never hang the response.
+                with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                    await asyncio.wait_for(asyncio.shield(bg_task), timeout=5.0)
                 with contextlib.suppress(Exception):
                     llm.close()
 

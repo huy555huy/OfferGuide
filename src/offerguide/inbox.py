@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -134,6 +135,17 @@ def enqueue_agent_suggestion(
     return fetched
 
 
+# W14.9: SELECT column list lives in one place so the order of names AND
+# the order they're consumed from sqlite3.Row stay aligned by construction.
+# Adding a column means appending here and adding the keyword to InboxItem
+# in _row_to_item — no more positional row[12] surprises.
+_INBOX_SELECT_COLS = (
+    "id, kind, title, body, payload_json, status, created_at, "
+    "decided_at, decision_note, source_agent_run_id, source_skill_name, "
+    "source_skill_version, proposed_action_json"
+)
+
+
 def list_items(
     store: Store,
     *,
@@ -144,11 +156,9 @@ def list_items(
     where = "WHERE status = ?" if status else ""
     params: tuple = (status, limit) if status else (limit,)
     with store.connect() as conn:
+        conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            f"SELECT id, kind, title, body, payload_json, status, created_at, "
-            f"decided_at, decision_note, source_agent_run_id, source_skill_name, "
-            f"source_skill_version, proposed_action_json "
-            f"FROM inbox_items {where} "
+            f"SELECT {_INBOX_SELECT_COLS} FROM inbox_items {where} "
             f"ORDER BY created_at DESC LIMIT ?",
             params,
         ).fetchall()
@@ -157,11 +167,9 @@ def list_items(
 
 def get(store: Store, item_id: int) -> InboxItem | None:
     with store.connect() as conn:
+        conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT id, kind, title, body, payload_json, status, created_at, "
-            "decided_at, decision_note, source_agent_run_id, source_skill_name, "
-            "source_skill_version, proposed_action_json "
-            "FROM inbox_items WHERE id = ?",
+            f"SELECT {_INBOX_SELECT_COLS} FROM inbox_items WHERE id = ?",
             (item_id,),
         ).fetchone()
     return _row_to_item(row) if row else None
@@ -181,26 +189,45 @@ def decide(
     attributed to the originating SKILL. Dismissed items don't generate a
     signal (user said "neither yes nor no").
     """
+    # W14.9: atomic check-and-update via UPDATE...RETURNING (SQLite 3.35+).
+    # The previous SELECT-then-check-then-UPDATE flow was vulnerable to a
+    # double-decide race: two concurrent calls (double-clicked button, two
+    # tabs) would both see status='pending', both UPDATE successfully, and
+    # both fan out a duplicate user_thumbs signal — inflating fitness for
+    # whatever SKILL the inbox item attributed to.
+    #
+    # The single UPDATE statement here is atomic: only one caller's row is
+    # actually returned; the other gets None and we raise as if the item
+    # were already decided (which it functionally is, by the winner).
     with store.connect() as conn:
+        # First check existence at all so callers can distinguish missing
+        # from already-decided. Cheap read; not part of the race window.
+        exists = conn.execute(
+            "SELECT 1 FROM inbox_items WHERE id = ?", (item_id,),
+        ).fetchone()
+        if exists is None:
+            raise KeyError(f"inbox item {item_id} not found")
+
         row = conn.execute(
-            "SELECT status, kind, source_skill_name, source_skill_version, "
-            "       source_agent_run_id, payload_json "
-            "FROM inbox_items WHERE id = ?", (item_id,)
+            "UPDATE inbox_items "
+            "SET status = ?, decided_at = julianday('now'), decision_note = ? "
+            "WHERE id = ? AND status = 'pending' "
+            "RETURNING kind, source_skill_name, source_skill_version, "
+            "          source_agent_run_id, payload_json",
+            (decision, note, item_id),
         ).fetchone()
         if row is None:
-            raise KeyError(f"inbox item {item_id} not found")
-        cur_status, kind, sk_name, sk_ver, agent_run_id, payload_json = row
-        if cur_status != "pending":
+            # Either it was decided between the existence check and the
+            # update, or another concurrent decide() got there first. Either
+            # way the contract from the caller's side is the same.
             raise ValueError(
-                f"inbox item {item_id} already decided: {cur_status}"
+                f"inbox item {item_id} already decided"
             )
-        conn.execute(
-            "UPDATE inbox_items SET status = ?, decided_at = julianday('now'), "
-            "decision_note = ? WHERE id = ?",
-            (decision, note, item_id),
-        )
+        kind, sk_name, sk_ver, agent_run_id, payload_json = row
 
     # W13.3 — fan out user's thumbs to evolution_signals
+    # Reached only when this caller actually flipped the row (RETURNING
+    # gave us a row), so the fan-out runs at most once per decision.
     if kind == "agent_suggestion" and decision in ("approved", "rejected") and sk_name:
         try:
             from .evolution.signals import record_user_thumbs
@@ -233,30 +260,33 @@ def decide(
     return fetched
 
 
-def _row_to_item(row: Any) -> InboxItem:
-    # W14.8: typed as Any (not tuple[Any, ...]) because pyright narrows the
-    # variadic tuple to a chain of fixed-length tuples after `len(row) > 12`,
-    # then complains about every row[N]. sqlite3 row arity is dynamic anyway
-    # — schema migrations may add trailing columns and we handle that with
-    # the explicit len() guards.
+def _row_to_item(row: sqlite3.Row) -> InboxItem:
+    """Map an sqlite3.Row (from a SELECT using ``_INBOX_SELECT_COLS``) into
+    a typed InboxItem. W14.9: switched from positional row[N] to keyed
+    row["name"] access so that reordering or removing a column from the
+    SELECT can no longer silently misattribute fields. The previous
+    positional layout cared deeply about column order across three SELECT
+    sites — easy to break in a refactor."""
+    proposed_action_json = row["proposed_action_json"]
     proposed_action = None
-    if len(row) > 12 and row[12]:
+    if proposed_action_json:
         try:
-            proposed_action = json.loads(row[12])
+            proposed_action = json.loads(proposed_action_json)
         except json.JSONDecodeError:
             proposed_action = None
+    payload_json = row["payload_json"]
     return InboxItem(
-        id=row[0],
-        kind=row[1],
-        title=row[2],
-        body=row[3],
-        payload=json.loads(row[4]) if row[4] else {},
-        status=row[5],
-        created_at=row[6],
-        decided_at=row[7],
-        decision_note=row[8],
-        source_agent_run_id=row[9] if len(row) > 9 else None,
-        source_skill_name=row[10] if len(row) > 10 else None,
-        source_skill_version=row[11] if len(row) > 11 else None,
+        id=row["id"],
+        kind=row["kind"],
+        title=row["title"],
+        body=row["body"],
+        payload=json.loads(payload_json) if payload_json else {},
+        status=row["status"],
+        created_at=row["created_at"],
+        decided_at=row["decided_at"],
+        decision_note=row["decision_note"],
+        source_agent_run_id=row["source_agent_run_id"],
+        source_skill_name=row["source_skill_name"],
+        source_skill_version=row["source_skill_version"],
         proposed_action=proposed_action,
     )

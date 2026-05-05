@@ -29,13 +29,25 @@ MAX_PER_RUN = 15
 this keeps the cron tick under ~8 minutes wall-clock."""
 
 
-def run(ctx: JobContext) -> dict[str, Any]:
+def run(ctx: JobContext, *, limit: int | None = None) -> dict[str, Any]:
+    """Enrich up to ``limit`` thin JDs in one tick. ``limit=None`` uses the
+    module default (``MAX_PER_RUN``); the agent maintenance tool passes an
+    explicit per-call limit so the agent can budget its tick.
+
+    W14.9: previously ``limit`` was passed via the global env var
+    ``OFFERGUIDE_JD_ENRICH_MAX``. Two issues with that:
+      1) The env var was never read here (silent dead code — the agent
+         thought it was throttling itself, but the daemon ran the default).
+      2) os.environ is process-global; concurrent agents would race on it.
+    Explicit kwarg fixes both.
+    """
     if ctx.llm is None:
         log.info("jd_enrich: LLM not configured, skipping")
         return {"skipped": "no_llm"}
 
+    actual_limit = limit if limit is not None else MAX_PER_RUN
     counters = enrich_pending(
-        ctx.store, llm=ctx.llm, limit=MAX_PER_RUN,
+        ctx.store, llm=ctx.llm, limit=actual_limit,
     )
 
     if ctx.notifier and counters.get("ok", 0) > 0:

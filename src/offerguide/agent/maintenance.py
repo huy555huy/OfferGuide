@@ -205,8 +205,7 @@ def execute_maintenance_tool(name: str, arguments: dict[str, Any], ctx: Maintena
         if name == "enrich_thin_jds":
             max_jobs = _safe_int(arguments.get("max_jobs"), default=10)
             return _run_with_job_context(
-                ctx, _import_job("jd_enrich"),
-                env_overrides={"OFFERGUIDE_JD_ENRICH_MAX": str(max_jobs)},
+                ctx, _import_job("jd_enrich"), limit=max_jobs,
             )
         if name == "classify_corpus":
             return _run_with_job_context(ctx, _import_job("corpus_classify"))
@@ -215,8 +214,7 @@ def execute_maintenance_tool(name: str, arguments: dict[str, Any], ctx: Maintena
         if name == "extract_facts_from_runs":
             max_runs = _safe_int(arguments.get("max_runs"), default=20)
             return _run_with_job_context(
-                ctx, _import_job("extract_facts"),
-                env_overrides={"OFFERGUIDE_FACTS_MAX_RUNS": str(max_runs)},
+                ctx, _import_job("extract_facts"), limit=max_runs,
             )
         if name == "refresh_company_corpus":
             company = (arguments.get("company") or "").strip()
@@ -263,28 +261,28 @@ def _build_job_ctx(ctx: MaintenanceCtx):
 def _run_with_job_context(
     ctx: MaintenanceCtx,
     run_func,
-    *,
-    env_overrides: dict[str, str] | None = None,
+    **job_kwargs: Any,
 ) -> str:
-    """Build a JobContext, set any per-call env overrides, run the job, render result."""
-    import os
+    """Build a JobContext, run the job (forwarding any per-call kwargs),
+    render the result dict as a human-readable string the agent can reason
+    about.
 
-    # Save + override env vars (some jobs read tunables from env)
-    saved: dict[str, str | None] = {}
-    if env_overrides:
-        for k, v in env_overrides.items():
-            saved[k] = os.environ.get(k)
-            os.environ[k] = str(v)
-    try:
-        job_ctx = _build_job_ctx(ctx)
-        result = run_func(job_ctx)
-    finally:
-        if env_overrides:
-            for k, old in saved.items():
-                if old is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = old
+    W14.9: previously this set os.environ vars before the call to pass
+    per-call tunables like ``OFFERGUIDE_JD_ENRICH_MAX``. Two real bugs
+    flowed from that:
+
+      1) The daemon job modules never actually read those env vars — they
+         used hardcoded module constants. So the agent's ``max_jobs=5``
+         arg was silently ignored and the job ran the default (15).
+      2) os.environ is process-global. Two concurrent agent runs (SSE +
+         scheduler tick, or two SSE clients) would race on the env var,
+         each clobbering the other's value mid-flight.
+
+    Explicit kwargs fix both: the value flows directly into the job's
+    own signature, and there's no shared global state to race on.
+    """
+    job_ctx = _build_job_ctx(ctx)
+    result = run_func(job_ctx, **job_kwargs)
 
     if isinstance(result, dict):
         # Render dict as "key=value, key=value" for readability

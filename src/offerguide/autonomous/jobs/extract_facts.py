@@ -35,13 +35,21 @@ MAX_PER_RUN = 30
 + UNIQUE on fact_text means duplicates auto-skip."""
 
 
-def run(ctx: JobContext) -> dict[str, Any]:
+def run(ctx: JobContext, *, limit: int | None = None) -> dict[str, Any]:
+    """Extract facts from up to ``limit`` recent skill_runs. ``limit=None``
+    uses ``MAX_PER_RUN`` (default 30 — used by the cron entry).
+
+    W14.9: see jd_enrich.run docstring — same env→kwarg migration applies.
+    The previous ``OFFERGUIDE_FACTS_MAX_RUNS`` env override was silently
+    ignored (env var was never read in this module).
+    """
     if ctx.llm is None:
         log.info("extract_facts: LLM not configured, skipping")
         return {"skipped": "no_llm"}
 
+    actual_limit = limit if limit is not None else MAX_PER_RUN
     counters = extract_pending_runs(
-        ctx.store, llm=ctx.llm, limit=MAX_PER_RUN,
+        ctx.store, llm=ctx.llm, limit=actual_limit,
     )
 
     if ctx.notifier and counters.get("inserted", 0) > 0:
