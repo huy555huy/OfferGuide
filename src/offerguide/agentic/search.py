@@ -51,6 +51,7 @@ class SearchBackend(Protocol):
 
     def search(self, query: str, *, max_results: int = 10) -> list[SearchHit]:
         """Run a query, return hits. Should never raise; on error return []."""
+        ...
 
 
 # ── DuckDuckGo HTML backend ────────────────────────────────────────

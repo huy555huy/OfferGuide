@@ -233,7 +233,12 @@ def decide(
     return fetched
 
 
-def _row_to_item(row: tuple) -> InboxItem:
+def _row_to_item(row: Any) -> InboxItem:
+    # W14.8: typed as Any (not tuple[Any, ...]) because pyright narrows the
+    # variadic tuple to a chain of fixed-length tuples after `len(row) > 12`,
+    # then complains about every row[N]. sqlite3 row arity is dynamic anyway
+    # — schema migrations may add trailing columns and we handle that with
+    # the explicit len() guards.
     proposed_action = None
     if len(row) > 12 and row[12]:
         try:

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Literal, TypedDict
 
 from ..memory import Store
 from .signals import SignalKind, SignalRecord, fetch_signals
@@ -242,6 +243,16 @@ def _days_since_last_evolution(store: Store, skill_name: str) -> float | None:
 # ─────────────────────────── A/B comparison ───────────────────────────
 
 
+class CompareReport(TypedDict):
+    """Result of A/B comparing two SKILL versions. W14.8: typed so callers
+    (release.py) don't lose type info on `report["a"].fitness`."""
+    a: FitnessReport
+    b: FitnessReport
+    winner: Literal["a", "b"] | None
+    delta: float | None
+    decisive: bool
+
+
 def compare_versions(
     store: Store,
     *,
@@ -249,10 +260,10 @@ def compare_versions(
     version_a: str,
     version_b: str,
     min_signals_per_side: int = 5,
-) -> dict[str, object]:
+) -> CompareReport:
     """Compare two versions of a SKILL. Used by promote/rollback decisions.
 
-    Returns dict with:
+    Returns a CompareReport TypedDict with:
         ``a``, ``b``: FitnessReport for each version
         ``winner``: 'a' | 'b' | None (None when not enough data either side)
         ``delta``: fitness_b - fitness_a (positive = b is better)
@@ -275,10 +286,7 @@ def compare_versions(
     # b - a so positive delta means "b is better"
     delta = b.fitness - a.fitness  # type: ignore[operator]
     decisive = abs(delta) > 0.05
-    if not decisive:
-        winner = None
-    else:
-        winner = "b" if delta > 0 else "a"
+    winner = None if not decisive else ("b" if delta > 0 else "a")
     return {
         "a": a, "b": b, "winner": winner,
         "delta": delta, "decisive": decisive,

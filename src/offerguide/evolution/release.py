@@ -151,7 +151,7 @@ def run_release_cycle_for_skill(
             version=shadow.version,
             reason=(
                 f"promoted shadow {shadow.version} → canary at {canary_traffic_pct:.0%} traffic"
-                if ok else f"DB UPDATE returned 0 rows (variant gone?)"
+                if ok else "DB UPDATE returned 0 rows (variant gone?)"
             ),
         )
 

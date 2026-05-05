@@ -35,7 +35,7 @@ from pathlib import Path
 from ..llm import LLMClient
 from ..memory import Store
 from ..skills import SkillSpec, discover_skills
-from . import registry, signals
+from . import registry
 from .fitness import compute_fitness
 
 log = logging.getLogger(__name__)
@@ -253,7 +253,7 @@ def _build_eval_context(
 
     if not rows:
         examples_lines.append("(无历史 skill_runs 关联到 signals)")
-    for run_id, value, notes, input_json, output_json in rows:
+    for run_id, value, _notes, input_json, output_json in rows:
         try:
             inputs = json.loads(input_json or "{}")
         except json.JSONDecodeError:
@@ -285,7 +285,7 @@ def _is_essentially_same(a: str, b: str) -> bool:
     # Length proxy: if difference is < 5%, skip
     if a_norm and b_norm and abs(len(a_norm) - len(b_norm)) / max(len(a_norm), len(b_norm)) < 0.05:
         # Could still be reordered — do a quick char-set diff
-        diff = sum(1 for x, y in zip(a_norm, b_norm) if x != y)
+        diff = sum(1 for x, y in zip(a_norm, b_norm, strict=False) if x != y)
         if diff / max(1, len(a_norm)) < 0.05:
             return True
     return False

@@ -198,7 +198,7 @@ class SkillRuntime:
         *,
         spec: SkillSpec,
         effective_version: str,
-        variant_selection_reason: str,  # noqa: ARG002 — audit-only, derivable from skill_version
+        variant_selection_reason: str,
         input_hash: str,
         inputs: dict[str, Any],
         output_text: str,
@@ -282,7 +282,9 @@ def _stringify(val: Any) -> str:
     # pydantic v2 BaseModel
     dump = getattr(val, "model_dump_json", None)
     if callable(dump):
-        return dump(indent=2)
+        # str() guard: model_dump_json returns str in practice but getattr's
+        # return type is Any → declare it explicitly so pyright is happy.
+        return str(dump(indent=2))
     if isinstance(val, dict | list):
         return json.dumps(val, ensure_ascii=False, indent=2)
     return str(val)

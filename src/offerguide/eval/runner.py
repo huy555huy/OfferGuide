@@ -136,7 +136,7 @@ def _score_case(case: EvalCase, parsed: dict[str, Any] | None, raw_text: str) ->
     must_keys = expected.get("must_contain_keys", [])
     if must_keys:
         if parsed is None:
-            failures.append(f"must_contain_keys requires JSON, got non-parsed output")
+            failures.append("must_contain_keys requires JSON, got non-parsed output")
         else:
             for k in must_keys:
                 if k not in parsed:
@@ -166,7 +166,8 @@ def _score_case(case: EvalCase, parsed: dict[str, Any] | None, raw_text: str) ->
             lo, hi = range_pair
             val = (parsed or {}).get(key)
             try:
-                fval = float(val)
+                # parsed.get returns Any|None; float(None) → TypeError caught below.
+                fval = float(val)  # type: ignore[arg-type]
             except (TypeError, ValueError):
                 failures.append(f"score_range[{key}] expected numeric, got {val!r}")
                 continue

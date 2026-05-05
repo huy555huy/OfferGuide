@@ -162,12 +162,11 @@ class GoalProgress:
     def render_for_prompt(self) -> str:
         """Render as a compact prompt block. Agent sees this and reasons against it."""
         lines = [f"### Goal #{self.goal.id}: {self.goal.title}"]
-        if self.goal.target_date:
-            if self.days_left is not None:
-                if self.days_left < 0:
-                    lines.append(f"  ⚠ 已过期 {-self.days_left} 天 (target: {self.goal.target_date})")
-                else:
-                    lines.append(f"  剩余 {self.days_left} 天 (target: {self.goal.target_date})")
+        if self.goal.target_date and self.days_left is not None:
+            if self.days_left < 0:
+                lines.append(f"  ⚠ 已过期 {-self.days_left} 天 (target: {self.goal.target_date})")
+            else:
+                lines.append(f"  剩余 {self.days_left} 天 (target: {self.goal.target_date})")
         if self.goal.target_metric:
             lines.append(f"  目标指标: {self.goal.target_metric}")
         if self.goal.description:

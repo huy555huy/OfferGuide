@@ -12,10 +12,11 @@ the SQLite ``skill_variants`` table. Centralized so that:
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import random
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import dataclass
+from typing import Literal, Protocol
 
 from ..memory import Store
 
@@ -244,11 +245,18 @@ def update_fitness_score(
 # ─────────────────────────── invocation routing ───────────────────────────
 
 
+class _RandomLike(Protocol):
+    """W14.8: structural type so callers may pass either a seeded
+    ``random.Random`` instance (for tests) or the ``random`` module itself
+    (which exposes the same ``random()`` function at top level)."""
+    def random(self) -> float: ...
+
+
 def select_variant_for_invoke(
     store: Store,
     *,
     skill_name: str,
-    rng: random.Random | None = None,
+    rng: _RandomLike | None = None,
 ) -> VariantSelection:
     """Decide which version to use for one upcoming invocation.
 
@@ -261,7 +269,7 @@ def select_variant_for_invoke(
     Shadow variants are NEVER selected for live traffic — they only get
     synthetic eval signals from meta_evolve_skill.
     """
-    rng = rng or random
+    rng_obj: _RandomLike = rng if rng is not None else random
     canaries = get_canary_variants(store, skill_name)
     live = get_live_variant(store, skill_name)
 
@@ -269,7 +277,7 @@ def select_variant_for_invoke(
     #    pick the highest-traffic-pct one and use its split)
     if canaries:
         canary = canaries[0]  # most-recently-promoted
-        if rng.random() < canary.canary_traffic_pct:
+        if rng_obj.random() < canary.canary_traffic_pct:
             return VariantSelection(
                 use_disk_seed=False,
                 selected_variant=canary,
@@ -318,9 +326,6 @@ def bump_version(parent_version: str, suffix: str = "") -> str:
 
 
 # ─────────────────────────── private helpers ───────────────────────────
-
-import json as _json
-
 
 _VARIANT_COLS = (
     "id, skill_name, version, parent_version, body_md, spec_json, status, "

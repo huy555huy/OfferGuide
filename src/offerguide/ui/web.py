@@ -19,13 +19,13 @@ runtimes, profiles, and notifiers without touching env vars.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import re
 from datetime import UTC
 from pathlib import Path
 from typing import Any, Literal
-
-import asyncio
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -216,10 +216,8 @@ def create_app(
                 trigger_kind="user_button",
             )
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 llm.close()
-            except Exception:
-                pass
 
         return {
             "run_id": result.run_id,
@@ -879,11 +877,9 @@ def create_app(
 
         def _on_event_from_thread(ev: Any) -> None:
             # AgentLoop calls this from its worker thread — bridge to async queue
-            try:
-                main_loop.call_soon_threadsafe(queue.put_nowait, dict(ev))
-            except RuntimeError:
+            with contextlib.suppress(RuntimeError):
                 # Event loop closed (client disconnected) — drop event
-                pass
+                main_loop.call_soon_threadsafe(queue.put_nowait, dict(ev))
 
         def _run_blocking() -> None:
             try:
@@ -907,8 +903,11 @@ def create_app(
                 # Sentinel so the SSE generator knows to close
                 main_loop.call_soon_threadsafe(queue.put_nowait, None)
 
-        # Kick off the agent in a background thread
-        asyncio.create_task(asyncio.to_thread(_run_blocking))
+        # Kick off the agent in a background thread.
+        # W14.8: keep a reference to the task — without it Python may GC the
+        # task and silently cancel mid-run (RUF006). The reference lives in
+        # the closure of _sse_gen, which keeps it alive for the SSE lifetime.
+        bg_task = asyncio.create_task(asyncio.to_thread(_run_blocking))
 
         async def _sse_gen():
             try:
@@ -917,7 +916,7 @@ def create_app(
                         break
                     try:
                         ev = await asyncio.wait_for(queue.get(), timeout=60.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # Heartbeat to keep the connection open through silent stretches
                         yield ": keepalive\n\n"
                         continue
@@ -925,10 +924,12 @@ def create_app(
                         break
                     yield "data: " + json_dumps(ev, ensure_ascii=False, default=str) + "\n\n"
             finally:
-                try:
+                # Ensure the background agent task is awaited / cancelled with
+                # the stream — otherwise an early disconnect leaves it dangling.
+                if not bg_task.done():
+                    bg_task.cancel()
+                with contextlib.suppress(Exception):
                     llm.close()
-                except Exception:
-                    pass
 
         return StreamingResponse(
             _sse_gen(),
@@ -1621,8 +1622,9 @@ def create_app(
         W14: 同时列出 data/tailored/ 里已有的 docx 文件 (按 mtime 排倒序),
         让用户能直接预览 / 下载 / 重做, 不必每次重新跑 LLM。
         """
-        from .. import briefs as briefs_mod  # noqa: F401 (potential import cycle guard)
         from pathlib import Path as _Path
+
+        from .. import briefs as briefs_mod  # noqa: F401 (potential import cycle guard)
 
         # List recent jobs that have raw_text >= 200 chars (real JD body, not just metadata)
         with store.connect() as conn:
@@ -1682,11 +1684,13 @@ def create_app(
 
         from ..skills.tailor_resume.docx_tailor import tailor_docx
 
-        if profile is None or not getattr(profile, "source_pdf", None):
+        if profile is None or not profile.source_pdf:
             return templates.TemplateResponse(
                 request, "_tailor_docx_result.html",
                 _ctx(request, error="没加载简历——设 OFFERGUIDE_RESUME_PDF 后重启"),
             )
+        # W14.8: direct attribute access (not getattr) so pyright narrows the
+        # `str | None` to `str` after the truthy check above.
         master_path = _Path(profile.source_pdf)
         if master_path.suffix.lower() != ".docx":
             return templates.TemplateResponse(

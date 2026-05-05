@@ -242,7 +242,7 @@ def _import_job(module_name: str):
     """Lazy-import a daemon job module's ``run`` function."""
     import importlib
     mod = importlib.import_module(f"offerguide.autonomous.jobs.{module_name}")
-    return getattr(mod, "run")
+    return mod.run
 
 
 def _build_job_ctx(ctx: MaintenanceCtx):

@@ -27,7 +27,7 @@ from typing import Any, Literal
 
 import httpx
 
-from .pricing import estimate_cost_usd as _estimate_cost  # noqa: E402
+from .pricing import estimate_cost_usd as _estimate_cost
 
 DEFAULT_DEEPSEEK_BASE = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -288,9 +288,9 @@ class LLMClient:
 
     def chat_with_tools(
         self,
-        messages: list[Mapping[str, Any]],
+        messages: list[dict[str, Any]],
         *,
-        tools: list[Mapping[str, Any]],
+        tools: list[dict[str, Any]],
         model: str | None = None,
         temperature: float = 0.4,
         tool_choice: str = "auto",

@@ -73,7 +73,7 @@ import logging
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..llm import LLMClient, LLMError, ToolCall
@@ -622,9 +622,10 @@ def snapshot_state(
         jobs = []
     if jobs:
         parts.append(f"\n## 最近 {len(jobs)} 个待处理 jobs (raw_text>=200)")
-        # Map each job_id -> (latest_score_prob, has_app)
+        # W14.8: dropped the latent score_map (declared but never read in
+        # the loop below — only app_map is consumed); the comment said
+        # "latest_score_prob" but the SELECT below only ever pulled status.
         job_ids = [j[0] for j in jobs]
-        score_map: dict[int, float | None] = {jid: None for jid in job_ids}
         app_map: dict[int, str | None] = {jid: None for jid in job_ids}
         try:
             with store.connect() as conn:
@@ -938,7 +939,7 @@ class AgentLoop:
         def emit(kind: str, **payload: Any) -> AgentEvent:
             ev = AgentEvent(
                 kind=kind,
-                at=datetime.now(timezone.utc).isoformat(),
+                at=datetime.now(UTC).isoformat(),
                 payload=payload,
             )
             events.append(ev)
@@ -1462,7 +1463,8 @@ class AgentLoop:
         """Execute one of the system-side lookup tools (read_job / read_user_resume)."""
         if tc.name == "read_job":
             try:
-                job_id = int(tc.arguments.get("job_id"))
+                # tc.arguments.get returns Any|None; int(None) → TypeError caught below.
+                job_id = int(tc.arguments.get("job_id"))  # type: ignore[arg-type]
             except (TypeError, ValueError):
                 return (
                     "ERROR: read_job requires job_id as integer, "
@@ -1558,7 +1560,8 @@ class AgentLoop:
         if not isinstance(data, dict):
             return None, f"(critic returned non-object JSON: {type(data).__name__})"
         try:
-            score = float(data.get("overall"))
+            # data.get returns Any|None; float(None) → TypeError caught below.
+            score = float(data.get("overall"))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             score = None
         notes = str(data.get("notes") or "")[:500]
@@ -1579,7 +1582,9 @@ class AgentLoop:
         appear in skill_invocations so they don't get signals — they're
         cheap and stateless, no point evolving their prompts.
         """
-        from ..evolution import signals as _signals  # local import: keeps loop.py loadable when evolution/ is mid-refactor
+        from ..evolution import (
+            signals as _signals,  # local import: keeps loop.py loadable when evolution/ is mid-refactor
+        )
 
         notes = (critic_notes or "")[:300]
         seen_runs: set[int] = set()
