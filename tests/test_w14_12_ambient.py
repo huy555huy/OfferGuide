@@ -526,17 +526,18 @@ class TestAutoScoreJobsDaemon:
 
 
 class TestSchedulerHasAmbientJobs:
-    def test_default_scheduler_has_three_jobs(self):
+    def test_default_scheduler_has_one_heartbeat(self):
+        """W14.18: collapsed 3 cron daemons into 1 (the central agent's
+        heartbeat). The agent now calls discover_new_jobs +
+        score_unscored_jobs itself as tools when it judges they're
+        needed — no more independent cron schedules for those."""
         from offerguide.autonomous.scheduler import build_agent_wake_scheduler
 
         sched = build_agent_wake_scheduler(
             settings=Settings(deepseek_api_key="", db_path=":memory:")
         )
         names = sched.list_jobs()
-        # The 3 ambient pillars
-        assert "wake_agent" in names              # central agent loop
-        assert "discover_jobs_via_search" in names  # Tavily-driven
-        assert "auto_score_new_jobs" in names      # score + Intent Preview
+        assert names == ["wake_agent"]
         sched.shutdown()
 
 

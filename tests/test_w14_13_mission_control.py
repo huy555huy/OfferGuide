@@ -57,19 +57,23 @@ def app_client(tmp_path):
 
 
 class TestMissionControlOnHome:
-    def test_all_3_daemon_cards_present(self, app_client):
+    def test_mission_control_renders_3_cards(self, app_client):
+        """W14.18: cards now reflect new architecture — wake_agent is the
+        only cron, discover/score are agent-tools also exposed for manual
+        trigger. The 3 cards stay (wake_agent + 2 manual triggers) but
+        labels changed."""
         client, _ = app_client
         resp = client.get("/")
         # Header
         assert "Mission Control" in resp.text
-        # All 3 daemons named
-        assert "discover_jobs_via_search" in resp.text
-        assert "auto_score_new_jobs" in resp.text
+        # New canonical names per W14.18 (discover_new_jobs/score_unscored_jobs)
+        assert "discover_new_jobs" in resp.text
+        assert "score_unscored_jobs" in resp.text
         assert "wake_agent" in resp.text
-        # Schedule labels (so user sees "next runs at...")
-        assert "08:00" in resp.text  # discover daemon schedule
-        assert "30 分钟" in resp.text  # auto_score schedule
-        assert "4 小时" in resp.text  # wake_agent schedule
+        # wake_agent is the only one with a real cron schedule now
+        assert "每小时" in resp.text or "心跳" in resp.text
+        # The other 2 are explicitly described as agent-driven, not crony
+        assert "中央 agent 自主决定" in resp.text or "agent 自己调" in resp.text
 
     def test_each_daemon_has_trigger_button(self, app_client):
         client, _ = app_client
@@ -77,12 +81,8 @@ class TestMissionControlOnHome:
         # The triggerDaemon JS function and the "▶ 立刻跑一次" button text
         assert "triggerDaemon" in resp.text
         assert "立刻跑一次" in resp.text
-        # All 3 daemon names appear inside triggerDaemon('NAME', this) calls
-        for name in [
-            "discover_jobs_via_search",
-            "auto_score_new_jobs",
-            "wake_agent",
-        ]:
+        # W14.18: card names migrated to new canonical names
+        for name in ["discover_new_jobs", "score_unscored_jobs", "wake_agent"]:
             assert f"triggerDaemon('{name}'" in resp.text
 
     def test_no_daemon_runs_shows_never_run(self, app_client):

@@ -66,11 +66,34 @@ MAINTENANCE_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "discover_new_jobs",
             "description": (
-                "运行所有 spider (Campus2026 + awesome_jobs 等) 抓新的 JD 入库。"
-                "通常每天调一次。返回: 抓了几条, 入库几条, 重复几条。"
-                "调用前看 snapshot: 如果今天已经 discover 过, 不要重复调。"
+                "调子 agent (JobFinderAgent) 用 Tavily + LLM 自主找 3-5 个跟 "
+                "user north star 匹配的真 JD 入库. 子 agent 自己 web_search / "
+                "fetch_url / 抽 body / ingest, 大约 25 步 + 2-5 分钟. "
+                "成本 ~$0.10-0.20. 不要在 24 小时内多次调."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "score_unscored_jobs",
+            "description": (
+                "找 jobs 表里 raw_text >= 200 但还没跑过 score_match 的, "
+                "自动跑 score_match. 高分的 (≥ 0.55) 自动预生成投递包 "
+                "(apply_assistant) + enqueue Intent Preview suggestion 到 inbox. "
+                "幂等 — 已 score 的不会重复. 调用前看 snapshot 'jobs 待 score 数'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "本次最多 score 多少个 (默认 5, 控制 LLM 成本)",
+                    },
+                },
+                "required": [],
+            },
         },
     },
     {
@@ -201,7 +224,12 @@ def execute_maintenance_tool(name: str, arguments: dict[str, Any], ctx: Maintena
     # unless the agent actually calls one of these tools.
     try:
         if name == "discover_new_jobs":
-            return _run_with_job_context(ctx, _import_job("discover_jobs"))
+            return _run_job_finder_subagent(ctx)
+        if name == "score_unscored_jobs":
+            limit = _safe_int(arguments.get("limit"), default=5)
+            return _run_with_job_context(
+                ctx, _import_score_jobs_run(), limit=limit,
+            )
         if name == "enrich_thin_jds":
             max_jobs = _safe_int(arguments.get("max_jobs"), default=10)
             return _run_with_job_context(
@@ -241,6 +269,56 @@ def _import_job(module_name: str):
     import importlib
     mod = importlib.import_module(f"offerguide.autonomous.jobs.{module_name}")
     return mod.run
+
+
+def _import_score_jobs_run():
+    """W14.18: lazy import for the auto_score_jobs daemon, exposed as
+    a maintenance tool so the central agent can call it whenever it
+    decides 'now is a good time to clean up unscored jobs'."""
+    from ..autonomous.jobs import auto_score_jobs
+    return auto_score_jobs.run
+
+
+def _run_job_finder_subagent(ctx: MaintenanceCtx) -> str:
+    """W14.18: kicks off the JobFinderAgent (LLM-driven sub-agent) to find
+    new JDs. Replaces the cron-driven discover_jobs_via_search daemon —
+    now the central agent decides when to look for jobs based on state
+    (north star progress / silent applications / etc.) instead of fixed
+    cron schedule."""
+    if ctx.llm is None:
+        return "ERROR: LLM 没配, JobFinderAgent 起不来"
+    if ctx.search is None:
+        return "ERROR: search backend 没配, 装 Tavily key 才能找新 JD"
+    try:
+        from ..agentic.job_finder_agent import JobFinderAgent
+    except Exception as e:
+        return f"ERROR: JobFinderAgent import failed: {e}"
+
+    # Pull north star — agent passes it through to the sub-agent
+    north_star = "拿 1 个 AI Agent 暑期实习 offer"
+    try:
+        from .. import goals as _gmod
+        active = _gmod.list_active_goals(ctx.store)
+        if active:
+            north_star = active[0].title
+    except Exception:
+        pass
+
+    sub = JobFinderAgent(store=ctx.store, llm=ctx.llm, search=ctx.search)
+    try:
+        result = sub.run(north_star=north_star)
+    finally:
+        sub.close()
+    parts = [
+        f"OK: JobFinderAgent done in {result.iterations} iter",
+        f"inserted={result.inserted}",
+        f"queries={len(result.search_queries)}",
+        f"urls_visited={len(result.visited_urls)}",
+        f"finish_reason={result.finish_reason[:80]}",
+    ]
+    if result.new_job_ids:
+        parts.append(f"new_job_ids={result.new_job_ids}")
+    return ", ".join(parts)
 
 
 def _build_job_ctx(ctx: MaintenanceCtx):

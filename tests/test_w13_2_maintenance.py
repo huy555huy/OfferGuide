@@ -34,8 +34,9 @@ def store(tmp_path):
 
 
 class TestMaintenanceSchemas:
-    def test_seven_maintenance_tools_declared(self):
+    def test_maintenance_tools_declared(self):
         names = MAINTENANCE_TOOL_NAMES
+        # Original W13.2 tools
         assert "discover_new_jobs" in names
         assert "enrich_thin_jds" in names
         assert "classify_corpus" in names
@@ -43,7 +44,10 @@ class TestMaintenanceSchemas:
         assert "refresh_company_corpus" in names
         assert "extract_facts_from_runs" in names
         assert "regenerate_company_brief" in names
-        assert len(names) == 7
+        # W14.18: score_unscored_jobs added so the central agent can
+        # decide when to score (instead of having a separate cron daemon).
+        assert "score_unscored_jobs" in names
+        assert len(names) >= 8
 
     def test_schemas_are_openai_compliant(self):
         for sc in MAINTENANCE_TOOL_SCHEMAS:
@@ -214,11 +218,10 @@ class TestSchedulerFactory:
             settings=Settings(deepseek_api_key="", db_path=":memory:")
         )
         names = sched.list_jobs()
-        # W14.12: scheduler now also runs discover_jobs_via_search and
-        # auto_score_new_jobs as proactive cron daemons (not just wake_agent)
-        assert "wake_agent" in names
-        assert "discover_jobs_via_search" in names
-        assert "auto_score_new_jobs" in names
+        # W14.18: collapsed back to ONE cron — the central agent's
+        # heartbeat. discover_new_jobs / score_unscored_jobs are now
+        # tools the agent calls itself, not independent cron daemons.
+        assert names == ["wake_agent"]
         sched.shutdown()
 
     def test_wake_agent_skips_when_no_llm(self, tmp_path, monkeypatch):

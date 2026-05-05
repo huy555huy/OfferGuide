@@ -209,27 +209,36 @@ def create_app(
             # read the most-recent daemon_runs row + count of recent runs.
             # Lets the home show "agent is doing X right now / last did Y at
             # T / next runs at Z" instead of a static brochure.
+            # W14.18: now only wake_agent is on a cron. discover/score
+            # are tools the agent calls itself when it judges they're
+            # needed. We still expose them as "manual trigger" cards on
+            # Mission Control so the user can force-run for impatience /
+            # debugging.
             daemon_specs = [
-                {
-                    "name": "discover_jobs_via_search",
-                    "icon": "🔍",
-                    "label": "自动搜索新岗位",
-                    "what": "用 Tavily 搜符合你 north star 的 JD, LLM 抽取入库",
-                    "schedule": "每天 08:00 / 14:00 / 20:00",
-                },
-                {
-                    "name": "auto_score_new_jobs",
-                    "icon": "📊",
-                    "label": "自动评分 + 推荐",
-                    "what": "新 JD 跑 score_match, 高分预生成投递包到 inbox",
-                    "schedule": "每 30 分钟 (整点 + 半点)",
-                },
                 {
                     "name": "wake_agent",
                     "icon": "🤖",
-                    "label": "唤醒中央 agent",
-                    "what": "看现状 / 处理 off-track 目标 / 决定调哪些工具",
-                    "schedule": "每 4 小时 (08-22)",
+                    "label": "中央 agent (心跳)",
+                    "what": "每小时唤醒, 看全局自主决定干啥 (找 JD / score / "
+                            "follow up / lay low) — 整个 OfferGuide 的大脑",
+                    "schedule": "每小时 (08-22), 心跳唯一 cron",
+                },
+                {
+                    "name": "discover_new_jobs",
+                    "icon": "🔍",
+                    "label": "找新 JD (子 agent)",
+                    "what": "JobFinderAgent 用 Tavily + LLM 自主找 3-5 个匹配 "
+                            "north star 的 JD. 平时由中央 agent 自己调; 这里 "
+                            "▶ 是手动触发, 等不及 cron 时用",
+                    "schedule": "由中央 agent 自主决定 (无独立 cron)",
+                },
+                {
+                    "name": "score_unscored_jobs",
+                    "icon": "📊",
+                    "label": "评分 + 推到 inbox",
+                    "what": "扫待评分 JD 跑 score_match, 高分预生成投递包推到 "
+                            "inbox. 由中央 agent 自己调; 这里 ▶ 是手动触发",
+                    "schedule": "由中央 agent 自主决定 (无独立 cron)",
                 },
             ]
             daemon_status = []
@@ -339,9 +348,17 @@ def create_app(
         Whitelist enforced — only daemons with a clear human-trigger
         meaning. Internal/maintenance jobs aren't exposed via this route.
         """
+        # W14.18: accept both old (cron) names and new (agent-tool) names
+        # so old links keep working + new home cards work.
+        ALIASES = {
+            "discover_new_jobs": "discover_jobs_via_search",
+            "score_unscored_jobs": "auto_score_new_jobs",
+        }
+        canonical = ALIASES.get(job_name, job_name)
         VALID = {"discover_jobs_via_search", "auto_score_new_jobs", "wake_agent"}
-        if job_name not in VALID:
+        if canonical not in VALID:
             raise HTTPException(404, f"unknown daemon: {job_name}")
+        job_name = canonical  # use canonical for downstream dispatch + recording
         if not settings.deepseek_api_key:
             raise HTTPException(400, "需要先配 LLM key (.env)")
         if runtime is None:

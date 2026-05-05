@@ -253,23 +253,44 @@ class AutonomousScheduler:
 # the agent SEES STATE before deciding. Cron sees nothing — it just runs.
 
 
-_AGENT_WAKE_GOAL = """你被定时唤醒。当下时刻不一定有事可做。
+_AGENT_WAKE_GOAL = """你是 OfferGuide 的中央 ambient agent. 你每小时被外部 cron 心跳叫醒一次,
+你看完整 state 自己决定干什么 — 找新 JD、score 待评分的、follow up silent
+application、写 inbox 推荐、还是什么都不做.
 
-先看 snapshot 想这两件事:
-- 用户此刻可能在干啥 / 在意啥? (看时间、用户活跃度、user_facts 里最近变化)
-- 系统里有没有真值得现在处理的事? (不是"数字 > 0", 是"再不处理用户会损失")
+# 你拥有的工具 (主要的)
 
-然后做你判断该做的, **包括"什么也不做"**。
+- **discover_new_jobs**: 调子 agent 用 Tavily 找 3-5 个 JD (~3 分钟, ~$0.15)
+- **score_unscored_jobs(limit=N)**: 给新 JD 跑 score_match, 高分自动推到 inbox
+- **enrich_thin_jds**: 给只抓到 metadata 的 JD 补全 body
+- **check_silent_applications**: 标 silent 7/14/30 天的 application
+- **refresh_company_corpus(company)**: 主动搜某公司面经
+- **regenerate_company_brief(company)**: 重生成公司 brief
+- **extract_facts_from_runs**: 从 skill_runs 抽 user_facts 入长期记忆
+- **classify_corpus**: 给新面经跑质量分类
+- **write_suggestion(...)**: 给用户写一条 inbox 建议 (Intent Preview)
+- + 11 个业务 SKILL (score_match / apply_assistant / tailor_resume / ...) 你
+  也能直接调
 
-如果你决定动手, 给 final 时说清楚:
-- 做了啥 + 它对用户有什么实际价值
-- 跳过了啥 + 为啥跳过 (说出你的判断, 不是"今天没必要")
+# 怎么决定干啥
 
-如果你决定 lay low, final 写一句:
-- 当前状态简评 (用户能一眼看懂)
-- 为什么现在不动 (节奏 / 优先级 / 等待信号)
+**没有固定流程**. 你看完整 state, 自己排优先级:
 
-记住: 一次"什么也不做但判断准确"的唤醒, 比一次"忙忙叨叨调 5 个工具但没价值"的唤醒, critic 评分会高得多。
+- 看 snapshot 数字: 多少 jobs 待 score? 多少 silent application? 上次 discover
+  几小时前? 北星 deadline 还多少天?
+- 看 user_facts 里最近的变化 (用户在意什么)
+- 看时间 / 工作日 / 用户活跃度 (晚上 23 点别 spam inbox)
+- 看 budget (上一轮花了多少钱, agent_runs 里有)
+
+排好优先级, 调 1-3 个工具去做最高价值的事, 然后给 final.
+
+**包括"什么都不做" 也是合理决定**. 一次"判断准确的 lay low" 比"忙忙叨叨调 5 个
+没价值的工具"critic 评分高得多.
+
+# Final 必须说清楚
+
+- 做了啥 + 实际价值 (有几个 JD 入了? silent app 有动作了?)
+- 跳过了啥 + 为啥 (不要"今天没必要", 给具体理由)
+- 你预期下次唤醒该看啥 (帮自己接力)
 """
 
 
@@ -397,50 +418,32 @@ def build_agent_wake_scheduler(
             "final": (result.final_answer or "")[:300],
         }
 
-    cron_kwargs = cron_kwargs or {"hour": "8-22/4"}  # 08:00, 12:00, 16:00, 20:00
+    # W14.18 — single ambient agent loop. Was 3 cron daemons (wake_agent +
+    # discover_jobs_via_search + auto_score_new_jobs) — that was "3 微服务
+    # + cron + DB 当总线" = 后端思想. User feedback (verbatim):
+    # > "整体流程, 我们是在造 agent, 而不是一个接入了 LLM 的小程序, 你懂吗?
+    # > 现在设计的还是老一套后端端思想"
+    #
+    # New design: 1 cron just for the heartbeat (laptop has no other way to
+    # wake the agent). At each tick, the agent reads full state and decides
+    # itself: 找新 JD? score? follow up silent app? sleep? — by calling its
+    # tool set (which now includes discover_new_jobs and score_unscored_jobs
+    # exposed via maintenance.py, replacing the dedicated daemons).
+    #
+    # Higher frequency than before (every hour vs 4h) because the agent now
+    # owns priority — it can no-op cheaply when there's nothing to do, but
+    # won't miss work for 4h after a state change.
+    cron_kwargs = cron_kwargs or {"hour": "8-22"}  # hourly 08:00-22:00
     wake_job = JobSpec(
         name="wake_agent",
         func=_wake_agent_job,
         trigger="cron",
         trigger_kwargs=cron_kwargs,
-        misfire_grace_time_s=600,  # 10 min grace if laptop was sleeping
-        max_instances=1,
-    )
-
-    # W14.12 — true "agent finds jobs for me" without waiting for agent to
-    # decide to call discover_*. Two cron daemons run independently of the
-    # wake_agent loop:
-    #
-    #  1. discover_jobs_via_search — Tavily-driven JD search using the
-    #     user's most-recent active goal as north star (3×/day default)
-    #  2. auto_score_new_jobs — every 30 min: score un-scored JDs, and
-    #     for the high-match ones, pre-generate the apply package +
-    #     enqueue an Intent Preview suggestion to inbox
-    #
-    # Result: user opens the app and sees "agent found 3 promising JDs
-    # overnight + drafted apply packages, you just review/approve" —
-    # not a blank dashboard waiting for the user to drive.
-    discover_job = JobSpec(
-        name="discover_jobs_via_search",
-        func=_discover_via_search_job,
-        trigger="cron",
-        trigger_kwargs={"hour": "8,14,20"},  # 3×/day
         misfire_grace_time_s=600,
         max_instances=1,
     )
-    auto_score_job = JobSpec(
-        name="auto_score_new_jobs",
-        func=_auto_score_via_daemon,
-        trigger="cron",
-        trigger_kwargs={"minute": "*/30"},  # every 30 min
-        misfire_grace_time_s=300,
-        max_instances=1,
-    )
-
     sched = AutonomousScheduler(ctx)
     sched.add(wake_job)
-    sched.add(discover_job)
-    sched.add(auto_score_job)
     return sched
 
 
