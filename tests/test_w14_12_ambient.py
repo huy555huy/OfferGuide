@@ -69,13 +69,13 @@ class TestJobCollector:
 
         class _StubLLM:
             def chat(self, messages, **kw):
-                # Return a positive verdict
+                # Return a positive verdict (W14.14 schema)
                 import json
                 return LLMResponse(
                     content=json.dumps({
-                        "is_real_jd": True,
-                        "is_actively_hiring": True,
-                        "matches_north_star": True,
+                        "has_jd_content": True,
+                        "is_recent": True,
+                        "relevance_score": 3,
                         "company": "字节跳动",
                         "title": "AI Agent 暑期实习",
                         "location": "北京",
@@ -124,11 +124,12 @@ class TestJobCollector:
 
         class _StubLLM:
             def chat(self, messages, **kw):
+                # W14.14 schema: low relevance + has_content false
                 import json
                 return LLMResponse(content=json.dumps({
-                    "is_real_jd": False,
-                    "is_actively_hiring": False,
-                    "matches_north_star": False,
+                    "has_jd_content": False,
+                    "is_recent": True,
+                    "relevance_score": 0,
                     "company": "",
                     "title": "",
                     "location": None,
@@ -148,6 +149,77 @@ class TestJobCollector:
             n = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
         assert n == 0
 
+    def test_relevance_2_or_above_passes(self, tmp_path):
+        """W14.14: relaxed filter — relevance>=2 (not strict 3) is enough.
+        Catches the real-walkthrough case where Tavily found related-but-
+        not-exact-match JDs and the strict filter rejected all 8."""
+        from offerguide.agentic.job_collector import JobCollector
+        from offerguide.agentic.search import SearchHit
+
+        store = offerguide.Store(tmp_path / "rel.db")
+        store.init_schema()
+        body = "LLM 应用工程师 实习 - 同领域但不是 AI Agent 完全对名" + ("." * 250)
+
+        class _StubSearch:
+            name = "stub"
+            def search(self, q, *, max_results=10):
+                return [SearchHit(title="x", url="https://nowcoder.com/abc", snippet=body)]
+
+        class _StubLLM:
+            def chat(self, messages, **kw):
+                import json
+                return LLMResponse(content=json.dumps({
+                    "has_jd_content": True,
+                    "is_recent": True,
+                    "relevance_score": 2,  # related, not exact
+                    "company": "公司A",
+                    "title": "LLM 应用工程师 实习",
+                    "location": "上海",
+                    "jd_body_clean": body,
+                    "rationale": "同领域 LLM 应用, 算 2",
+                }), model="stub")
+
+        coll = JobCollector(store=store, llm=_StubLLM(), search=_StubSearch())
+        try:
+            r = coll.collect(north_star="AI Agent 实习")
+        finally:
+            coll.close()
+        # Pre-W14.14 (strict matches_north_star=true), this would skip.
+        # Post-W14.14: relevance>=2 → ingested.
+        assert r.inserted == 1
+
+    def test_relevance_1_or_below_skipped(self, tmp_path):
+        from offerguide.agentic.job_collector import JobCollector
+        from offerguide.agentic.search import SearchHit
+
+        store = offerguide.Store(tmp_path / "rel2.db")
+        store.init_schema()
+
+        class _StubSearch:
+            name = "stub"
+            def search(self, q, *, max_results=10):
+                return [SearchHit(title="x", url="https://nowcoder.com/zzz", snippet="x" * 250)]
+
+        class _StubLLM:
+            def chat(self, messages, **kw):
+                import json
+                return LLMResponse(content=json.dumps({
+                    "has_jd_content": True,
+                    "is_recent": True,
+                    "relevance_score": 1,  # only loosely related
+                    "company": "x", "title": "x", "location": None,
+                    "jd_body_clean": "x" * 200,
+                    "rationale": "测试岗位, 不是 AI",
+                }), model="stub")
+
+        coll = JobCollector(store=store, llm=_StubLLM(), search=_StubSearch())
+        try:
+            r = coll.collect(north_star="AI Agent 实习")
+        finally:
+            coll.close()
+        assert r.inserted == 0
+        assert r.skipped_low_quality >= 1
+
     def test_dedup_via_content_hash(self, tmp_path):
         """Re-running on the same DB does NOT double-insert."""
         from offerguide.agentic.job_collector import JobCollector
@@ -165,10 +237,11 @@ class TestJobCollector:
 
         class _StubLLM:
             def chat(self, messages, **kw):
+                # W14.14 schema
                 import json
                 return LLMResponse(content=json.dumps({
-                    "is_real_jd": True, "is_actively_hiring": True,
-                    "matches_north_star": True,
+                    "has_jd_content": True, "is_recent": True,
+                    "relevance_score": 3,
                     "company": "A公司", "title": "AI 实习",
                     "location": "北京",
                     "jd_body_clean": body,

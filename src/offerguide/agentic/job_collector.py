@@ -110,28 +110,43 @@ class JobCollectionResult:
     notes: list[str] = field(default_factory=list)
 
 
-_FILTER_PROMPT = """你是 JD 抽取器。给定一段网页文本, 判断并抽取:
-
-1. 这是不是一份**具体岗位**的招聘 JD? (公司目录 / 招聘清单 / 招聘介绍页都不是)
-2. 是否还在招? (避免 2024/2025 已过期的 JD)
-3. 跟用户当前找的方向是否匹配?
-4. 抽出 JD body 干净版本 (去 nav/footer/广告)
+_FILTER_PROMPT = """你是 JD 抽取器。给定一段网页文本, 判断 + 抽取。
 
 用户当前 north star: 「{north_star}」
 
+判断标准 (W14.14 放宽):
+
+1. **has_jd_content** (宽松): 文本里**包含**有用的招聘信息就 true。可以是:
+   - 一个具体岗位 (强 — 直接 ingestible)
+   - 或 一个公司的招聘合集页 / 校招介绍 (有"招什么角色 / 工作内容 / 投递入口"的)
+   - 或 多个岗位列表 (你抽出最匹配 north star 的那个)
+   只有当文本完全无招聘信息 (404 页 / 客服页 / 不相关博客) 才 false。
+
+2. **is_recent** (宽松): 不能是明确 ≥ 2024 已结束的招聘。其他都视为 true。
+   提到 "2024/2025 已结束" → false。提到 "2026" 或没具体年份 → true。
+
+3. **relevance_score** (0-3): 跟 north star 多相关:
+   - 3 = 角色名/方向**直接对得上** ("AI Agent 实习" 对 "AI Agent 实习")
+   - 2 = 同领域 ("LLM 应用工程师" 对 "AI Agent 实习" 算 2)
+   - 1 = 相关公司但角色偏 ("字节后端实习" 对 "AI Agent 实习" 算 1)
+   - 0 = 完全不相关 (运营 / 设计 / 测试)
+   ≥ 2 就值得入库 (宁可入了再 score_match 严判, 不要前期一刀切)
+
+4. 抽出 jd_body_clean: 工作内容 + 任职要求 + 公司 + 岗位 + 地点。≥ 150 字就够。
+
 输出严格 JSON:
 {{
-  "is_real_jd": <bool, 是具体岗位 JD 不是公司目录>,
-  "is_actively_hiring": <bool, 还在招期内>,
-  "matches_north_star": <bool, 跟用户方向匹配>,
-  "company": <str, 公司中文名>,
-  "title": <str, 岗位 title 例 'AI Agent 暑期实习'>,
-  "location": <str | null, 工作地点 例 '北京' / '远程'>,
-  "jd_body_clean": <str, 干净 JD 正文 ≤ 2000 字, 含工作内容/任职要求/学历>,
-  "rationale": <str, 1 句话说明判断依据>
+  "has_jd_content": <bool>,
+  "is_recent": <bool>,
+  "relevance_score": <int 0-3>,
+  "company": <str, 公司中文名, 没明确就猜>,
+  "title": <str, 岗位 title — 多岗位列表里挑跟 north star 最近的一个>,
+  "location": <str | null>,
+  "jd_body_clean": <str, ≥ 150 字, 含具体工作内容>,
+  "rationale": <str, 1 句话: 为啥判这个 score, 抽了哪个岗位>
 }}
 
-如果三个 bool 任一为 false, jd_body_clean 可以填空字符串。
+如果 has_jd_content=false, 其他可以填默认值。
 **不要 markdown 代码块**。"""
 
 
@@ -232,24 +247,35 @@ class JobCollector:
 
             verdict = self._llm_evaluate(north_star, page_text)
             if verdict is None:
-                notes.append(f"skip {hit.url[:60]}: LLM rejected JSON")
+                notes.append(f"skip {hit.url[:60]}: LLM 返回非 JSON")
                 skipped_low_quality += 1
                 continue
 
-            if not (
-                verdict.get("is_real_jd")
-                and verdict.get("is_actively_hiring")
-                and verdict.get("matches_north_star")
-            ):
-                notes.append(
-                    f"skip {hit.url[:60]}: {verdict.get('rationale', 'low quality')}",
-                )
+            # W14.14 — relaxed: has_jd_content + is_recent + relevance >= 2
+            has_content = bool(verdict.get("has_jd_content"))
+            is_recent = bool(verdict.get("is_recent", True))  # default True if missing
+            relevance = int(verdict.get("relevance_score", 0) or 0)
+
+            if not has_content:
+                notes.append(f"skip {hit.url[:60]}: no JD content ({verdict.get('rationale', '')[:80]})")
+                skipped_low_quality += 1
+                continue
+            if not is_recent:
+                notes.append(f"skip {hit.url[:60]}: outdated ({verdict.get('rationale', '')[:80]})")
+                skipped_low_quality += 1
+                continue
+            if relevance < 2:
+                notes.append(f"skip {hit.url[:60]}: relevance={relevance} ({verdict.get('rationale', '')[:80]})")
                 skipped_low_quality += 1
                 continue
 
             jd_body = (verdict.get("jd_body_clean") or "").strip()
-            if len(jd_body) < 200:
-                notes.append(f"skip {hit.url[:60]}: jd_body too short ({len(jd_body)} 字)")
+            # W14.14: lower body threshold from 200 → 150 chars (matches the
+            # prompt's new "≥ 150 字就够" target). Below 150 the auto_score
+            # daemon won't pick it up anyway (MIN_TEXT_FOR_AUTO_EVAL=200), so
+            # we still skip. This drops borderline rows pre-ingest.
+            if len(jd_body) < 150:
+                notes.append(f"skip {hit.url[:60]}: body too short ({len(jd_body)} 字)")
                 skipped_low_quality += 1
                 continue
 

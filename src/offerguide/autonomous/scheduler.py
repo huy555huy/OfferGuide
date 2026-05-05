@@ -484,6 +484,10 @@ def _discover_via_search_job(jc: JobContext) -> dict[str, Any]:
         "skipped_dup": result.skipped_dup,
         "skipped_low_quality": result.skipped_low_quality,
         "new_job_ids": result.new_job_ids,
+        # W14.14 — surface per-hit notes so user / debugger can see WHY rows
+        # got rejected (LLM rationale, fetch fail, domain skip). Truncate so
+        # daemon_runs.summary_json stays small.
+        "notes": [n[:160] for n in result.notes[:20]],
     }
     if jc.notifier and result.inserted > 0:
         try:
