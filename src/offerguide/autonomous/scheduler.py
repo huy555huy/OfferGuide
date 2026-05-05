@@ -445,19 +445,20 @@ def build_agent_wake_scheduler(
 
 
 def _discover_via_search_job(jc: JobContext) -> dict[str, Any]:
-    """Cron-driven: Tavily search for JDs matching the user's north star.
+    """Cron-driven: drive a real ReAct agent loop to find JDs.
 
-    Uses the user's most-recent active goal as the north_star query; falls
-    back to an AI-Agent default if no goal set. Skips gracefully when LLM
-    or search backend isn't configured."""
+    W14.16: replaced JobCollector (BFS-with-LLM-as-classifier) with
+    JobFinderAgent (LLM in the driver seat, calls web_search / fetch_url
+    / extract_and_ingest_jd / done as it sees fit).
+    """
     if jc.llm is None:
         return {"skipped": "no_llm"}
     if jc.search is None:
         return {"skipped": "no_search_backend"}
     try:
-        from ..agentic.job_collector import JobCollector
+        from ..agentic.job_finder_agent import JobFinderAgent
     except Exception as e:
-        return {"skipped": f"job_collector import failed: {e}"}
+        return {"skipped": f"job_finder_agent import failed: {e}"}
 
     # Pull north star from active goals (most recent first)
     north_star = "拿 1 个 AI Agent 暑期实习 offer"
@@ -469,32 +470,31 @@ def _discover_via_search_job(jc: JobContext) -> dict[str, Any]:
     except Exception:
         pass  # use default
 
-    coll = JobCollector(store=jc.store, llm=jc.llm, search=jc.search)
+    agent = JobFinderAgent(store=jc.store, llm=jc.llm, search=jc.search)
     try:
-        result = coll.collect(north_star=north_star)
+        result = agent.run(north_star=north_star)
     finally:
-        coll.close()
+        agent.close()
 
     summary = {
         "north_star": north_star,
-        "queries": len(result.queries_run),
-        "hits_seen": result.hits_seen,
-        "hits_evaluated": result.hits_evaluated,
+        "iterations": result.iterations,
         "inserted": result.inserted,
         "skipped_dup": result.skipped_dup,
-        "skipped_low_quality": result.skipped_low_quality,
         "new_job_ids": result.new_job_ids,
-        # W14.14 — surface per-hit notes so user / debugger can see WHY rows
-        # got rejected (LLM rationale, fetch fail, domain skip). Truncate so
-        # daemon_runs.summary_json stays small.
-        "notes": [n[:160] for n in result.notes[:20]],
+        "search_queries_used": result.search_queries[:8],
+        "urls_visited": result.visited_urls[:10],
+        "finish_reason": result.finish_reason,
+        # Agent's per-step trace — surfaced in home Activity Timeline so
+        # user can audit the LLM's actual decisions, not just count outputs.
+        "notes": [n[:200] for n in result.notes[:25]],
     }
     if jc.notifier and result.inserted > 0:
         try:
             jc.notifier.notify(
-                title=f"OfferGuide: 自动抓到 {result.inserted} 个新 JD",
-                body=f"基于「{north_star}」搜了 {len(result.queries_run)} 条 query, "
-                     f"评估了 {result.hits_evaluated} 个候选, 入库 {result.inserted}。"
+                title=f"OfferGuide: agent 自己找到 {result.inserted} 个新 JD",
+                body=f"基于「{north_star}」, agent 走了 {result.iterations} 步, "
+                     f"自己 search + fetch + 抽 JD 入库 {result.inserted} 个。"
                      f"30 分钟内会自动 score + 推荐高匹配的到 inbox。",
                 level="info",
             )
