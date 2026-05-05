@@ -206,7 +206,7 @@ class TestSnapshotObservations:
 
 
 class TestSchedulerFactory:
-    def test_build_agent_wake_scheduler_registers_one_job(self):
+    def test_build_agent_wake_scheduler_registers_jobs(self):
         from offerguide.autonomous.scheduler import build_agent_wake_scheduler
         from offerguide.config import Settings
 
@@ -214,7 +214,11 @@ class TestSchedulerFactory:
             settings=Settings(deepseek_api_key="", db_path=":memory:")
         )
         names = sched.list_jobs()
-        assert names == ["wake_agent"]
+        # W14.12: scheduler now also runs discover_jobs_via_search and
+        # auto_score_new_jobs as proactive cron daemons (not just wake_agent)
+        assert "wake_agent" in names
+        assert "discover_jobs_via_search" in names
+        assert "auto_score_new_jobs" in names
         sched.shutdown()
 
     def test_wake_agent_skips_when_no_llm(self, tmp_path, monkeypatch):

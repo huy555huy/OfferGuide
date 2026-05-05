@@ -305,7 +305,7 @@ class TestRunSpiderSweep:
         """
 
         class _StubRuntime:
-            def invoke(self, spec, inputs):
+            def invoke(self, spec, inputs, **kwargs):
                 pytest.fail("Runtime should not be called for short JDs")
 
         from offerguide.skills import SkillSpec
@@ -351,7 +351,7 @@ class TestRunSpiderSweep:
             skill_run_id: int
 
         class _FakeRuntime:
-            def invoke(self, spec, inputs):
+            def invoke(self, spec, inputs, **kwargs):
                 return _FakeSkillResult(
                     parsed={"probability": 0.78, "deal_breakers": []},
                     skill_run_id=42,
@@ -401,7 +401,7 @@ class TestRunSpiderSweep:
             skill_run_id: int
 
         class _Rt:
-            def invoke(self, spec, inputs):
+            def invoke(self, spec, inputs, **kwargs):
                 return _R(parsed={"probability": 0.20, "deal_breakers": []}, skill_run_id=1)
 
         from offerguide.skills import SkillSpec

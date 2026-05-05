@@ -407,9 +407,105 @@ def build_agent_wake_scheduler(
         max_instances=1,
     )
 
+    # W14.12 — true "agent finds jobs for me" without waiting for agent to
+    # decide to call discover_*. Two cron daemons run independently of the
+    # wake_agent loop:
+    #
+    #  1. discover_jobs_via_search — Tavily-driven JD search using the
+    #     user's most-recent active goal as north star (3×/day default)
+    #  2. auto_score_new_jobs — every 30 min: score un-scored JDs, and
+    #     for the high-match ones, pre-generate the apply package +
+    #     enqueue an Intent Preview suggestion to inbox
+    #
+    # Result: user opens the app and sees "agent found 3 promising JDs
+    # overnight + drafted apply packages, you just review/approve" —
+    # not a blank dashboard waiting for the user to drive.
+    discover_job = JobSpec(
+        name="discover_jobs_via_search",
+        func=_discover_via_search_job,
+        trigger="cron",
+        trigger_kwargs={"hour": "8,14,20"},  # 3×/day
+        misfire_grace_time_s=600,
+        max_instances=1,
+    )
+    auto_score_job = JobSpec(
+        name="auto_score_new_jobs",
+        func=_auto_score_via_daemon,
+        trigger="cron",
+        trigger_kwargs={"minute": "*/30"},  # every 30 min
+        misfire_grace_time_s=300,
+        max_instances=1,
+    )
+
     sched = AutonomousScheduler(ctx)
     sched.add(wake_job)
+    sched.add(discover_job)
+    sched.add(auto_score_job)
     return sched
+
+
+def _discover_via_search_job(jc: JobContext) -> dict[str, Any]:
+    """Cron-driven: Tavily search for JDs matching the user's north star.
+
+    Uses the user's most-recent active goal as the north_star query; falls
+    back to an AI-Agent default if no goal set. Skips gracefully when LLM
+    or search backend isn't configured."""
+    if jc.llm is None:
+        return {"skipped": "no_llm"}
+    if jc.search is None:
+        return {"skipped": "no_search_backend"}
+    try:
+        from ..agentic.job_collector import JobCollector
+    except Exception as e:
+        return {"skipped": f"job_collector import failed: {e}"}
+
+    # Pull north star from active goals (most recent first)
+    north_star = "拿 1 个 AI Agent 暑期实习 offer"
+    try:
+        from .. import goals as _gmod
+        active = _gmod.list_active_goals(jc.store)
+        if active:
+            north_star = active[0].title
+    except Exception:
+        pass  # use default
+
+    coll = JobCollector(store=jc.store, llm=jc.llm, search=jc.search)
+    try:
+        result = coll.collect(north_star=north_star)
+    finally:
+        coll.close()
+
+    summary = {
+        "north_star": north_star,
+        "queries": len(result.queries_run),
+        "hits_seen": result.hits_seen,
+        "hits_evaluated": result.hits_evaluated,
+        "inserted": result.inserted,
+        "skipped_dup": result.skipped_dup,
+        "skipped_low_quality": result.skipped_low_quality,
+        "new_job_ids": result.new_job_ids,
+    }
+    if jc.notifier and result.inserted > 0:
+        try:
+            jc.notifier.notify(
+                title=f"OfferGuide: 自动抓到 {result.inserted} 个新 JD",
+                body=f"基于「{north_star}」搜了 {len(result.queries_run)} 条 query, "
+                     f"评估了 {result.hits_evaluated} 个候选, 入库 {result.inserted}。"
+                     f"30 分钟内会自动 score + 推荐高匹配的到 inbox。",
+                level="info",
+            )
+        except Exception:
+            log.warning("discover_via_search: notify failed", exc_info=True)
+    return summary
+
+
+def _auto_score_via_daemon(jc: JobContext) -> dict[str, Any]:
+    """Cron-driven: catch un-scored JDs, score, pre-gen apply pkg, inbox."""
+    try:
+        from .jobs import auto_score_jobs as _asj
+    except Exception as e:
+        return {"skipped": f"auto_score_jobs import failed: {e}"}
+    return _asj.run(jc)
 
 
 # ── Backward-compat alias (deprecated) ────────────────────────────

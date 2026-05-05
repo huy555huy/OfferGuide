@@ -93,46 +93,74 @@
     .suggestion-card .source { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.125rem; }
 </style>
 
-{# ─────────── 1. Hero: latest agent assessment ─────────── #}
+{# ─────────── 1. "Agent 本周报告" — W14.12 ambient-mode hero ─────────── #}
 
+{% set has_weekly_activity = weekly and (
+    weekly.jobs_auto_found > 0 or weekly.score_runs > 0
+    or weekly.suggestions > 0 or weekly.agent_runs > 0
+) %}
+
+{% if has_weekly_activity %}
 <div class="hero">
-    {% if latest_run %}
-    <h2>🤖 Agent 当前评估</h2>
+    <h2>🤖 Agent 本周自动做了…</h2>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin: 0.75rem 0;">
+        <div>
+            <div style="font-family: var(--font-serif); font-size: 1.85rem; font-weight: 600; color: var(--primary);">{{ weekly.jobs_auto_found }}</div>
+            <div class="muted small">个新 JD 自己搜到</div>
+        </div>
+        <div>
+            <div style="font-family: var(--font-serif); font-size: 1.85rem; font-weight: 600; color: var(--primary);">{{ weekly.score_runs }}</div>
+            <div class="muted small">次 score_match 评分</div>
+        </div>
+        <div>
+            <div style="font-family: var(--font-serif); font-size: 1.85rem; font-weight: 600; color: var(--primary);">{{ weekly.suggestions }}</div>
+            <div class="muted small">条建议推到 inbox</div>
+        </div>
+        <div>
+            <div style="font-family: var(--font-serif); font-size: 1.85rem; font-weight: 600; color: var(--primary);">{{ weekly.agent_runs }}</div>
+            <div class="muted small">次 agent wake</div>
+        </div>
+    </div>
     <div class="meta">
-        run #{{ latest_run.id }}
-        · {{ latest_run.iterations }} 次迭代
-        · {{ ((latest_run.latency_ms or 0) / 1000) | round(1) }}s
-        · trigger=<code>{{ latest_run.trigger_kind }}</code>
-        {% if latest_run.critic_score is not none %}
-        · critic <span class="pill {% if latest_run.critic_score >= 0.7 %}low{% elif latest_run.critic_score >= 0.4 %}middle{% else %}high{% endif %}">{{ "%.2f"|format(latest_run.critic_score) }}</span>
-        {% endif %}
-    </div>
-    <div class="answer">{{ latest_run.final_answer }}</div>
-    <div class="actions">
-        <button class="btn" onclick="wakeAgent(this)" data-loading-text="agent 思考中..." {% if not runtime_ready %}disabled title="还没配 LLM, 看 README 第 2 步"{% endif %}>
-            ↻ 让 agent 重新评估
-        </button>
-        <a class="btn secondary" href="/agent/runs/{{ latest_run.id }}">看完整 trajectory</a>
-        <a class="btn ghost" href="/agent">手动给 agent 一个新 goal</a>
-    </div>
-    {% else %}
-    <h2>🤖 Agent</h2>
-    <div class="muted">
-        还没有 agent 跑过。让它读一遍现状, 给你一段它对你求职状况的判断。
-        {% if not runtime_ready %}
-        <br><strong style="color:var(--warning);">还没配 LLM</strong> — 看 README「快速开始」第 2 步, 5 分钟搞定。
-        {% endif %}
+        近 7 天 · 烧了 ${{ "%.3f"|format(weekly.cost_usd) }} (LLM 累计)
+        {% if stats.pending_inbox > 0 %}· <strong style="color:var(--primary);">{{ stats.pending_inbox }} 个待你拍板 ↓</strong>{% endif %}
     </div>
     <div class="actions">
-        <button class="btn" onclick="wakeAgent(this)" data-loading-text="agent 思考中..." {% if not runtime_ready %}disabled title="还没配 LLM, 看 README 第 2 步"{% endif %}>
-            ▶ 唤醒 agent (10-30s)
+        {% if stats.pending_inbox > 0 %}
+        <a class="btn" href="#suggestions">→ 看待拍板的 {{ stats.pending_inbox }} 条</a>
+        {% endif %}
+        <button class="btn secondary" onclick="wakeAgent(this)" data-loading-text="agent 思考中..." {% if not runtime_ready %}disabled{% endif %}>
+            ↻ 立刻再唤醒一次
         </button>
-        {% if not runtime_ready %}
-        <a class="btn ghost" href="https://github.com/" target="_blank">📖 配置指南</a>
+        {% if latest_run %}
+        <a class="btn ghost" href="/agent/runs/{{ latest_run.id }}">看最近一次详情</a>
         {% endif %}
     </div>
-    {% endif %}
 </div>
+{% else %}
+{# Brand new install OR scheduler hasn't run yet — show "what agent will do for you" pitch #}
+<div class="hero">
+    <h2>🤖 Agent 准备就绪, 但还没数据</h2>
+    <div class="muted" style="line-height: 1.7;">
+        Scheduler 已经跑起来 (in-process, 后台默默工作)。它每天会:
+        <ul style="margin: 0.5rem 0 0.5rem 1.25rem;">
+            <li>3×/day 用 Tavily 主动搜符合你目标的 JD (基于你的 north star)</li>
+            <li>30 min/次 给新 JD 自动跑 score_match + 高分预生成投递包推到 inbox</li>
+            <li>每 4 小时 唤醒一次中央 agent 看局势 + 处理特殊情况</li>
+        </ul>
+        {% if not runtime_ready %}
+        <strong style="color:var(--warning);">前提</strong>: 看 README 配 LLM key + Tavily key
+        {% else %}
+        <strong>第一次报告大约在 30 分钟内</strong>。也可以现在手动唤醒看看:
+        {% endif %}
+    </div>
+    <div class="actions">
+        <button class="btn" onclick="wakeAgent(this)" data-loading-text="agent 思考中..." {% if not runtime_ready %}disabled{% endif %}>
+            ▶ 立刻唤醒 (10-30s)
+        </button>
+    </div>
+</div>
+{% endif %}
 
 {# ─────────── 1.5 — Stateful next-step card (W14.11) ─────────── #}
 
@@ -204,31 +232,53 @@
     </div>
 </div>
 
-{# ─────────── 3. Pending agent suggestions ─────────── #}
+{# ─────────── 3. Pending agent suggestions — W14.12 Intent Preview ─────────── #}
 
 {% if suggestions %}
-<div class="card">
+<div class="card" id="suggestions">
     <div class="card-header">
-        <h2>Agent 给你的待决策建议</h2>
-        <span class="meta">{{ suggestions|length }} / 显示 6 · <a href="/inbox">看全部 →</a></span>
+        <h2>📥 Agent 已为你准备好, 等你拍板 ({{ stats.pending_inbox }})</h2>
+        <span class="meta">显示前 6 · <a href="/inbox">全部 →</a></span>
     </div>
     {% for s in suggestions %}
-    <a href="/inbox" class="suggestion-card">
-        <span class="icon">💬</span>
-        <div class="body">
-            <div class="title">{{ s.title }}</div>
-            <div class="source">
-                {% if s.source_skill_name %}
-                来自 {{ s.source_skill_name }}
-                {% if s.source_agent_run_id %}· agent run #{{ s.source_agent_run_id }}{% endif %}
-                {% endif %}
-                {% if s.proposed_action %}· 批准 → 调 <code>{{ s.proposed_action.tool }}</code>{% endif %}
-            </div>
+    {% set job_id = s.payload.get('job_id') if s.payload else None %}
+    {% set prob = s.payload.get('probability') if s.payload else None %}
+    {% set apply_run_id = s.payload.get('apply_run_id') if s.payload else None %}
+    <div class="suggestion {% if prob and prob >= 0.75 %}low{% elif prob and prob >= 0.55 %}medium{% else %}high{% endif %}" style="margin-bottom: 0.625rem;">
+        <div class="head">
+            <span class="section">{{ s.title }}</span>
+            {% if prob %}
+            <span class="pill {% if prob >= 0.75 %}low{% elif prob >= 0.55 %}medium{% else %}high{% endif %}">
+                {{ "%.0f"|format(prob * 100) }}% 匹配
+            </span>
+            {% endif %}
+            {% if apply_run_id %}<span class="pill primary">投递包已备</span>{% endif %}
         </div>
-    </a>
+        <div class="body" style="margin: 0.5rem 0; font-size: 0.85rem; line-height: 1.6; max-height: 8rem; overflow: hidden; position: relative;">
+            {{ (s.body or '')[:380] }}{% if (s.body or '')|length > 380 %}…{% endif %}
+        </div>
+        <div class="actions" style="margin-top: 0.5rem;">
+            {% if job_id and apply_run_id %}
+            <a href="/apply/{{ job_id }}" class="btn">→ 看投递包 + 决定投不投</a>
+            {% elif job_id %}
+            <a href="/apply/{{ job_id }}" class="btn">→ 生成投递包</a>
+            {% else %}
+            <a href="/inbox" class="btn">→ 查看详情</a>
+            {% endif %}
+            <form method="post" action="/inbox/{{ s.id }}/decide" style="display:inline;">
+                <input type="hidden" name="decision" value="dismissed">
+                <button type="submit" class="btn ghost" onclick="return confirm('忽略这条建议?')">⊘ 不感兴趣</button>
+            </form>
+            <span class="muted small" style="margin-left: auto;">
+                {% if s.source_skill_name %}{{ s.source_skill_name }}{% endif %}
+                {% if s.source_agent_run_id %}· agent#{{ s.source_agent_run_id }}{% endif %}
+            </span>
+        </div>
+    </div>
     {% endfor %}
 </div>
-{% endif %}
+
+{% endif %}{# /if suggestions — W14.12 Intent Preview #}
 
 {# ─────────── 4. Quick links ─────────── #}
 

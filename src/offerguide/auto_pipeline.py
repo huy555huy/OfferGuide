@@ -235,6 +235,11 @@ def evaluate_new_job(
             "user_profile": user_profile_text,
             "job_id": str(job_id),  # so analytics queries can pivot by job_id
         },
+        # W14.12: job_id is bookkeeping, not a SKILL-declared input.
+        # strict=False lets us tag the run for the auto_score_jobs daemon's
+        # "find un-scored jobs" query without forcing every SKILL to declare
+        # a job_id input it doesn't actually use in the prompt.
+        strict_inputs=False,
     )
     parsed = skill_result.parsed or {}
     prob = float(parsed.get("probability", 0.0))

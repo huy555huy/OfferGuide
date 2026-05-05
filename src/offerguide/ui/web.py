@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
+import os
 import re
 from datetime import UTC
 from pathlib import Path
@@ -42,6 +44,8 @@ from ..profile import UserProfile, load_resume_pdf
 from ..skills import SkillRuntime, SkillSpec, discover_skills
 from ..workers import scout
 from .notify import Notifier, make_notifier
+
+log = logging.getLogger(__name__)
 
 # Convenience aliases used in handlers (post here so lint isort is happy).
 json_loads = json.loads
@@ -169,6 +173,38 @@ def create_app(
             ).fetchone()
             latest_job_id = latest_job_id[0] if latest_job_id else None
 
+            # W14.12 — "agent 本周报告" data: what the autonomous daemons
+            # actually accomplished in the last 7 days, so home reads as
+            # "look what your agent did" rather than "tell the agent what
+            # to do". Window is rolling 7 days from now.
+            n_jobs_auto_found_week = conn.execute(
+                "SELECT COUNT(*) FROM jobs "
+                "WHERE source = 'agent_search' "
+                "  AND created_at >= julianday('now') - 7"
+            ).fetchone()[0]
+            n_score_runs_week = conn.execute(
+                "SELECT COUNT(*) FROM skill_runs "
+                "WHERE skill_name = 'score_match' "
+                "  AND created_at >= julianday('now') - 7"
+            ).fetchone()[0]
+            n_suggestions_week = conn.execute(
+                "SELECT COUNT(*) FROM inbox_items "
+                "WHERE kind = 'agent_suggestion' "
+                "  AND created_at >= julianday('now') - 7"
+            ).fetchone()[0]
+            n_agent_runs_week = conn.execute(
+                "SELECT COUNT(*) FROM agent_runs "
+                "WHERE started_at >= julianday('now') - 7 "
+                "  AND status = 'ok'"
+            ).fetchone()[0]
+            # cost burned by autonomous activity this week (skill_runs + agent_runs)
+            cost_week_row = conn.execute(
+                "SELECT "
+                "  COALESCE(SUM(cost_usd), 0) "
+                "FROM skill_runs WHERE created_at >= julianday('now') - 7"
+            ).fetchone()
+            cost_week = float(cost_week_row[0] or 0.0)
+
         # State-machine for the next-step card:
         #   no goal & no job  → set a goal OR paste a JD (parallel paths)
         #   goal but no job   → emphasize "add a JD now" (the actual blocker)
@@ -206,6 +242,13 @@ def create_app(
                     "pending_inbox": n_pending_inbox,
                 },
                 next_step=next_step,
+                weekly={
+                    "jobs_auto_found": n_jobs_auto_found_week,
+                    "score_runs": n_score_runs_week,
+                    "suggestions": n_suggestions_week,
+                    "agent_runs": n_agent_runs_week,
+                    "cost_usd": cost_week,
+                },
                 runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
                 active_tab="home",
             ),
@@ -3307,12 +3350,39 @@ def main() -> None:
         notifier=notifier,
     )
 
+    # W14.12 — start the autonomous scheduler in-process so users get
+    # ambient agent behavior just by running `python -m offerguide.ui.web`.
+    # Previously the scheduler was a separate `python -m offerguide.autonomous`
+    # process; users typically forgot to start it, leading to "agent doesn't
+    # do anything" complaints. We spawn it on a background thread that lives
+    # for the web process's lifetime. Disable with OFFERGUIDE_NO_SCHEDULER=1.
+    sched_status = "disabled (OFFERGUIDE_NO_SCHEDULER=1)"
+    if os.environ.get("OFFERGUIDE_NO_SCHEDULER") != "1" and settings.deepseek_api_key:
+        try:
+            import threading
+
+            from ..autonomous.scheduler import build_agent_wake_scheduler
+
+            def _run_scheduler() -> None:
+                try:
+                    sched = build_agent_wake_scheduler(settings=settings)
+                    sched.run_blocking()  # AutonomousScheduler API
+                except Exception as e:
+                    log.exception("scheduler thread crashed: %s", e)
+
+            t = threading.Thread(target=_run_scheduler, daemon=True, name="og-scheduler")
+            t.start()
+            sched_status = "running (in-process thread)"
+        except Exception as e:
+            sched_status = f"failed to start: {e}"
+
     print(f"\n✦ OfferGuide UI on http://{settings.web_host}:{settings.web_port}")
-    print(f"  resume = {settings.resume_pdf or '(none — set OFFERGUIDE_RESUME_PDF)'}")
+    print(f"  resume    = {settings.resume_pdf or '(none — set OFFERGUIDE_RESUME_PDF)'}")
     print(
-        f"  llm    = {'configured' if settings.deepseek_api_key else 'NOT configured (set DEEPSEEK_API_KEY)'}"
+        f"  llm       = {'configured' if settings.deepseek_api_key else 'NOT configured (set DEEPSEEK_API_KEY)'}"
     )
-    print(f"  notify = {settings.notify_channel} ({'ready' if settings.notify_ready() else 'fallback console'})")
+    print(f"  notify    = {settings.notify_channel} ({'ready' if settings.notify_ready() else 'fallback console'})")
+    print(f"  scheduler = {sched_status}")
     uvicorn.run(app, host=settings.web_host, port=settings.web_port, log_level="info")
 
 

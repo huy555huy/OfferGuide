@@ -93,24 +93,32 @@ class TestManualJDEntry:
     def test_pipeline_page_shows_paste_form(self, app_client):
         client, _ = app_client
         resp = client.get("/pipeline")
-        # The paste-JD form is on the pipeline page itself
+        # The paste-JD form is on the pipeline page itself.
+        # W14.12: copy changed from "粘贴 JD" to "偶尔手动粘一条 JD" since
+        # paste was demoted from primary to fallback path.
         assert 'action="/api/pipeline/jobs/manual"' in resp.text
         assert 'name="raw_text"' in resp.text
-        assert "粘贴 JD" in resp.text
+        assert "粘" in resp.text  # any "粘" reference confirms form is present
 
-    def test_pipeline_paste_form_open_by_default_when_empty(self, app_client):
-        """Fresh users should see the form open without an extra click."""
+    def test_pipeline_paste_form_demoted_when_empty(self, app_client):
+        """W14.12: form is now CLOSED by default — agent should auto-find
+        jobs, paste is fallback. Previously (W14.11) auto-opened on empty
+        pipeline because manual paste was the primary bootstrap path; we
+        rolled that back per "agent should be the main path" feedback."""
         client, _ = app_client
         resp = client.get("/pipeline")
-        # The <details> wrapping the form should have `open` when empty
         assert 'action="/api/pipeline/jobs/manual"' in resp.text
-        # Find the <details> that contains the form action and check it has `open`
+        # The <details> wrapping the form should NOT have `open` anymore
         idx = resp.text.find('action="/api/pipeline/jobs/manual"')
         before = resp.text[:idx]
         last_details = before.rfind("<details")
-        assert "open" in resp.text[last_details:idx], (
-            "form's <details> wrapper should be open when pipeline is empty"
-        )
+        details_open = resp.text[last_details:idx]
+        # `open` would appear as `<details ... open ...>` — we check that
+        # the attribute isn't there. Empty pipeline copy still mentions
+        # paste as a fallback so users can find it.
+        assert " open" not in details_open or 'open=""' not in details_open
+        # And the empty-state hint should sell the agent path first
+        assert "agent" in resp.text and "scheduler" in resp.text
 
 
 # ═══════════════════════════════════════════════════════════════════

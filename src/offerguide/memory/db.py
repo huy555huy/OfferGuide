@@ -438,6 +438,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE jobs ADD COLUMN extras_json TEXT NOT NULL DEFAULT '{}'"
         )
+    # W14.12: jobs.created_at — needed for "agent 本周自动找到 N 个 JD" home
+    # weekly report. Defaults to julianday('now') so existing rows get a
+    # post-migration timestamp (close enough for stats; the alternative was
+    # a more expensive backfill from extras_json which not all sources fill).
+    if "created_at" not in cols:
+        conn.execute(
+            "ALTER TABLE jobs ADD COLUMN created_at REAL NOT NULL DEFAULT (julianday('now'))"
+        )
 
     # inbox_items agent-suggestion columns (W13.3)
     inbox_cols = {
