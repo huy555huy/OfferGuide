@@ -1,29 +1,32 @@
-"""Agentic 找岗位 collector — Tavily 搜索 + LLM 抽 JD body, 写 jobs 表.
+"""Agentic 找岗位 collector — LLM-driven multi-hop retrieval.
 
-Replaces (and obsoletes the user-visible behavior of) the old
-``spiders.awesome_jobs`` path. The W14.12 audit found that the only
-default-enabled spider returned **company directories** (~150-char rows
-like "百度 · 校招 / 投递入口: ..."), not real JDs — so score_match
-returned garbage and apply_assistant had nothing to chew on.
+W14.15: rewritten as a real agent loop instead of single-pass filter.
 
-This module is a sibling of ``agentic.corpus_collector`` (which does the
-same shape for 面经). The two share design choices because the tradeoffs
-are identical: search → domain filter → fetch → LLM extract → ingest.
+Why the rewrite — user feedback (verbatim):
+> "不应该是放宽 filter, 而应该是 LLM 根据这个自己去进一步找 JD 在哪,
+>  这就是接 LLM 的意义啊, 不然我要他干嘛呢"
 
-Why this is real "自动找岗位":
+Old behavior (W14.12-W14.14): Tavily search → domain filter → fetch →
+LLM extracts whatever it can → ingest. Failure mode: Tavily returns a
+大厂 careers index page → LLM either rejects ("not a concrete JD") or
+fabricates a low-quality JD body. Either way: useless ingest.
 
-- Queries are **derived from the user's north-star goal** (e.g.
-  "AI Agent 暑期实习 2026"), not a fixed source list. Update the goal,
-  the agent searches differently next tick.
-- LLM does the noise filtering: actively-hiring vs expired, JD body vs
-  company directory, on-target vs off-target. The score_match SKILL
-  doesn't have to compensate.
-- Output is a real RawJob with multi-hundred-char raw_text — downstream
-  (score_match, apply_assistant, tailor_resume) finally has substance
-  to work on.
+New behavior (W14.15): LLM examines each fetched page and decides what
+the page IS, then chooses the next action:
 
-Cost: ~6-12 LLM calls per sweep at deepseek-v4-flash (~$0.005-0.012 per
-sweep) + Tavily search (free up to 1000/month).
+  - ``concrete_jd``      → extract body, ingest, stop
+  - ``careers_index``    → return 1-3 sub-page URLs the agent should fetch next
+  - ``listing``          → return 1-3 specific JD URLs from the listing
+  - ``irrelevant``/``outdated`` → stop, no ingest
+
+The collector runs a BFS over (url, depth) pairs, feeding sub-page URLs
+back into the queue, capped by:
+  - ``max_llm_calls`` (default 12) — total budget per sweep
+  - ``max_depth``     (default 2) — at most 2 hops past the initial Tavily hit
+
+Cost vs old: ~2-3× LLM calls per sweep (~$0.02-0.04 with deepseek-v4-flash)
+but the ingested rows are ACTUAL JDs instead of fabricated content — the
+downstream score_match + apply_assistant get real input to work with.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ from ..llm import LLMClient, LLMError
 from ..memory import Store
 from ..platforms import RawJob
 from ..workers import scout
-from .search import SearchBackend, SearchHit
+from .search import SearchBackend
 
 log = logging.getLogger(__name__)
 
@@ -110,44 +113,54 @@ class JobCollectionResult:
     notes: list[str] = field(default_factory=list)
 
 
-_FILTER_PROMPT = """你是 JD 抽取器。给定一段网页文本, 判断 + 抽取。
+_DECIDE_PROMPT = """你是 JD 检索 agent。给定**一个网页 + 它上面的链接**, 判断这页是什么, 决定下一步动作。
 
 用户当前 north star: 「{north_star}」
 
-判断标准 (W14.14 放宽):
+5 种 page_kind:
 
-1. **has_jd_content** (宽松): 文本里**包含**有用的招聘信息就 true。可以是:
-   - 一个具体岗位 (强 — 直接 ingestible)
-   - 或 一个公司的招聘合集页 / 校招介绍 (有"招什么角色 / 工作内容 / 投递入口"的)
-   - 或 多个岗位列表 (你抽出最匹配 north star 的那个)
-   只有当文本完全无招聘信息 (404 页 / 客服页 / 不相关博客) 才 false。
+1. **concrete_jd** — 这页是一个具体岗位的 JD (有工作内容 / 任职要求 / 公司 / 地点 / 投递入口)。
+   抽 body 入库, next_action.kind = "ingest"
 
-2. **is_recent** (宽松): 不能是明确 ≥ 2024 已结束的招聘。其他都视为 true。
-   提到 "2024/2025 已结束" → false。提到 "2026" 或没具体年份 → true。
+2. **careers_index** — 公司 careers 入口页 (例 talent.bytedance.com 主页), 不是 JD。
+   但页面 / links 里**指向了**该公司具体职位列表。
+   挑 1-3 个跟 north star 最相关的子页 URL → next_action.kind = "follow_links"
 
-3. **relevance_score** (0-3): 跟 north star 多相关:
-   - 3 = 角色名/方向**直接对得上** ("AI Agent 实习" 对 "AI Agent 实习")
-   - 2 = 同领域 ("LLM 应用工程师" 对 "AI Agent 实习" 算 2)
-   - 1 = 相关公司但角色偏 ("字节后端实习" 对 "AI Agent 实习" 算 1)
-   - 0 = 完全不相关 (运营 / 设计 / 测试)
-   ≥ 2 就值得入库 (宁可入了再 score_match 严判, 不要前期一刀切)
+3. **listing** — 多岗位列表页 (例 牛客 "字节 2026 校招" 帖, 列了 20 个岗位)。
+   挑 1-3 个具体 JD URL → next_action.kind = "follow_links"
 
-4. 抽出 jd_body_clean: 工作内容 + 任职要求 + 公司 + 岗位 + 地点。≥ 150 字就够。
+4. **irrelevant** — 客服页 / 博客 / 跟招聘无关 / 不匹配 north star 方向。
+   next_action.kind = "stop"
+
+5. **outdated** — 明确是 2024 或更早的过期招聘。
+   next_action.kind = "stop"
+
+链接里**只挑符合 north star 方向**的 (例: 找 AI Agent 实习, 别返算法 OD / 后端 / 测试岗)。
 
 输出严格 JSON:
 {{
-  "has_jd_content": <bool>,
-  "is_recent": <bool>,
-  "relevance_score": <int 0-3>,
-  "company": <str, 公司中文名, 没明确就猜>,
-  "title": <str, 岗位 title — 多岗位列表里挑跟 north star 最近的一个>,
+  "page_kind": "concrete_jd" | "careers_index" | "listing" | "irrelevant" | "outdated",
+  "company": <str | null, 没明确就 null>,
+  "title": <str | null, page_kind=concrete_jd 时填岗位 title>,
   "location": <str | null>,
-  "jd_body_clean": <str, ≥ 150 字, 含具体工作内容>,
-  "rationale": <str, 1 句话: 为啥判这个 score, 抽了哪个岗位>
+  "jd_body_clean": <str, ≥ 200 字, 仅 page_kind=concrete_jd 时填; 其他填 "">,
+  "next_action": {{
+    "kind": "ingest" | "follow_links" | "stop",
+    "urls": [<str>],   // follow_links 时 1-3 个绝对 URL, 其他空数组
+    "rationale": <str, 1 句话: 为啥这个 page_kind, 选了哪些链接>
+  }}
 }}
 
-如果 has_jd_content=false, 其他可以填默认值。
 **不要 markdown 代码块**。"""
+
+
+@dataclass
+class _PendingHit:
+    """One URL queued for fetch + LLM evaluation."""
+    url: str
+    depth: int  # 0 = initial Tavily hit, 1+ = follow_link
+    snippet: str = ""  # Tavily snippet, used as fallback when fetch fails
+    parent_url: str | None = None  # for audit trail in notes
 
 
 class JobCollector:
@@ -164,13 +177,19 @@ class JobCollector:
         store: Store,
         llm: LLMClient,
         search: SearchBackend,
-        max_pages: int = 8,
-        page_fetch_timeout_s: float = 15.0,
+        max_llm_calls: int = 12,
+        max_depth: int = 2,
+        page_fetch_timeout_s: float = 12.0,
     ) -> None:
+        """``max_llm_calls`` caps total LLM calls per sweep (cost cap).
+        ``max_depth`` caps how many follow_links hops past the initial
+        Tavily hit (depth 0 = Tavily hit, depth 1 = first follow, ...).
+        """
         self.store = store
         self.llm = llm
         self.search = search
-        self.max_pages = max_pages
+        self.max_llm_calls = max_llm_calls
+        self.max_depth = max_depth
         self._http = httpx.Client(
             timeout=page_fetch_timeout_s,
             headers={
@@ -188,17 +207,16 @@ class JobCollector:
         role_keywords: list[str] | None = None,
         companies: list[str] | None = None,
     ) -> JobCollectionResult:
-        """Run one search-driven sweep.
+        """Run one LLM-driven multi-hop JD sweep.
 
-        ``north_star`` — the user's current goal (e.g. "拿 1 个 AI Agent
-        暑期实习 offer"). Drives the LLM filter's match decision and is
-        injected into the query text.
+        Flow:
+          1. Tavily search → seed URLs at depth=0
+          2. BFS: pop URL, fetch, ask LLM what it is + what to do next
+          3. Either ingest (concrete JD) or queue follow_links (depth+1)
+          4. Stop when LLM budget hits or queue empties
 
-        ``role_keywords`` — short keyword list to slot into search queries.
-        Auto-extracted from north_star if not provided.
-
-        ``companies`` — companies to seed company-specific queries with.
-        Defaults to a curated AI/LLM company list.
+        ``north_star`` — drives both query generation and LLM relevance judgment.
+        ``role_keywords`` / ``companies`` — auto-derived if omitted.
         """
         queries = self._make_queries(
             north_star=north_star,
@@ -206,113 +224,142 @@ class JobCollector:
             companies=companies or list(_DEFAULT_AI_COMPANIES),
         )
 
-        all_hits: list[SearchHit] = []
+        # Step 1 — Tavily search to seed the BFS queue
         seen_urls: set[str] = set()
         notes: list[str] = []
+        queue: list[_PendingHit] = []
 
         for q in queries:
-            hits = self.search.search(q, max_results=8)
+            hits = self.search.search(q, max_results=6)
             for h in hits:
                 if h.url in seen_urls:
                     continue
                 seen_urls.add(h.url)
-                all_hits.append(h)
+                if not _is_preferred_domain(h.url):
+                    continue
+                queue.append(_PendingHit(url=h.url, depth=0, snippet=h.snippet))
             notes.append(f"query {q!r}: {len(hits)} hits")
+        notes.append(f"queue seeded: {len(queue)} URLs from preferred domains")
 
-        # Filter to fetchable / known-friendly domains
-        candidates = [h for h in all_hits if _is_preferred_domain(h.url)]
-        candidates = candidates[: self.max_pages]
-        notes.append(
-            f"after domain filter: {len(candidates)} / {len(all_hits)} candidates",
-        )
-
+        # Step 2 — BFS with LLM as the decision-maker at each node
         inserted = 0
         skipped_dup = 0
         skipped_low_quality = 0
         evaluated = 0
+        llm_calls = 0
         new_job_ids: list[int] = []
 
-        for hit in candidates:
+        while queue and llm_calls < self.max_llm_calls:
+            hit = queue.pop(0)
             evaluated += 1
+
             page_text = self._fetch_text(hit.url)
             if not page_text:
-                # Fall back to the search snippet — sometimes Tavily's
-                # excerpt has the JD core even when the full page 403s.
                 if len(hit.snippet) > 200:
                     page_text = hit.snippet
                 else:
-                    notes.append(f"skip {hit.url[:60]}: fetch failed + snippet too thin")
+                    notes.append(
+                        f"d{hit.depth} skip {hit.url[:55]}: fetch fail + snippet薄",
+                    )
                     skipped_low_quality += 1
                     continue
 
-            verdict = self._llm_evaluate(north_star, page_text)
+            verdict = self._llm_decide(north_star, hit.url, page_text)
+            llm_calls += 1
             if verdict is None:
-                notes.append(f"skip {hit.url[:60]}: LLM 返回非 JSON")
+                notes.append(f"d{hit.depth} skip {hit.url[:55]}: LLM 返回非 JSON")
                 skipped_low_quality += 1
                 continue
 
-            # W14.14 — relaxed: has_jd_content + is_recent + relevance >= 2
-            has_content = bool(verdict.get("has_jd_content"))
-            is_recent = bool(verdict.get("is_recent", True))  # default True if missing
-            relevance = int(verdict.get("relevance_score", 0) or 0)
+            kind = verdict.get("page_kind", "irrelevant")
+            next_act = verdict.get("next_action", {}) or {}
+            next_kind = next_act.get("kind", "stop")
+            rationale = (next_act.get("rationale") or verdict.get("rationale") or "")[:90]
 
-            if not has_content:
-                notes.append(f"skip {hit.url[:60]}: no JD content ({verdict.get('rationale', '')[:80]})")
-                skipped_low_quality += 1
-                continue
-            if not is_recent:
-                notes.append(f"skip {hit.url[:60]}: outdated ({verdict.get('rationale', '')[:80]})")
-                skipped_low_quality += 1
-                continue
-            if relevance < 2:
-                notes.append(f"skip {hit.url[:60]}: relevance={relevance} ({verdict.get('rationale', '')[:80]})")
-                skipped_low_quality += 1
+            # Ingest if LLM said this is a concrete JD
+            if kind == "concrete_jd" and next_kind == "ingest":
+                jd_body = (verdict.get("jd_body_clean") or "").strip()
+                if len(jd_body) < 150:
+                    notes.append(
+                        f"d{hit.depth} skip {hit.url[:55]}: 标 concrete_jd 但 body 太短 ({len(jd_body)})",
+                    )
+                    skipped_low_quality += 1
+                    continue
+                title = (verdict.get("title") or "").strip()[:200]
+                company = (verdict.get("company") or "").strip()[:100]
+                location = (verdict.get("location") or "").strip()[:100]
+                rj = RawJob(
+                    source="agent_search",
+                    url=hit.url,
+                    title=title or f"(JD from {hit.url[:50]})",
+                    company=company or None,
+                    location=location or None,
+                    raw_text=jd_body,
+                    extras={
+                        "rationale": rationale,
+                        "via_depth": hit.depth,
+                        "parent_url": hit.parent_url,
+                    },
+                )
+                try:
+                    was_new, job_id = scout.ingest(self.store, rj)
+                    if was_new:
+                        inserted += 1
+                        new_job_ids.append(job_id)
+                        notes.append(
+                            f"d{hit.depth} ✓ INGEST {hit.url[:50]} → job#{job_id} ({company} · {title[:30]})",
+                        )
+                    else:
+                        skipped_dup += 1
+                        notes.append(f"d{hit.depth} dup {hit.url[:55]}")
+                except Exception as e:
+                    notes.append(f"d{hit.depth} ingest 失败 {hit.url[:50]}: {e}")
+                    skipped_low_quality += 1
                 continue
 
-            jd_body = (verdict.get("jd_body_clean") or "").strip()
-            # W14.14: lower body threshold from 200 → 150 chars (matches the
-            # prompt's new "≥ 150 字就够" target). Below 150 the auto_score
-            # daemon won't pick it up anyway (MIN_TEXT_FOR_AUTO_EVAL=200), so
-            # we still skip. This drops borderline rows pre-ingest.
-            if len(jd_body) < 150:
-                notes.append(f"skip {hit.url[:60]}: body too short ({len(jd_body)} 字)")
-                skipped_low_quality += 1
+            # Follow links if LLM said this is a careers_index / listing
+            if kind in ("careers_index", "listing") and next_kind == "follow_links":
+                if hit.depth >= self.max_depth:
+                    notes.append(
+                        f"d{hit.depth} skip {hit.url[:55]}: {kind} 但已到 max_depth",
+                    )
+                    skipped_low_quality += 1
+                    continue
+                sub_urls = next_act.get("urls", []) or []
+                added = 0
+                for sub_url in sub_urls[:3]:
+                    sub_url = (sub_url or "").strip()
+                    if not sub_url or sub_url in seen_urls:
+                        continue
+                    if not sub_url.startswith(("http://", "https://")):
+                        # Resolve relative URLs against the parent
+                        from urllib.parse import urljoin
+                        sub_url = urljoin(hit.url, sub_url)
+                    if sub_url in seen_urls:
+                        continue
+                    seen_urls.add(sub_url)
+                    queue.append(_PendingHit(
+                        url=sub_url, depth=hit.depth + 1,
+                        parent_url=hit.url,
+                    ))
+                    added += 1
+                notes.append(
+                    f"d{hit.depth} {kind} {hit.url[:50]} → 加 {added} 个子 URL ({rationale})",
+                )
                 continue
 
-            # Build a RawJob and ingest via the same path the extension /
-            # spiders use. dedup by content_hash means re-running the
-            # sweep is safe (same JD won't double-count).
-            # RawJob.title is required (str, not Optional). Fall back to a
-            # synthetic title built from the URL if the LLM didn't extract one.
-            extracted_title = (verdict.get("title") or "").strip()[:200]
-            extracted_company = (verdict.get("company") or "").strip()[:100]
-            extracted_location = (verdict.get("location") or "").strip()[:100]
-            rj = RawJob(
-                source="agent_search",
-                url=hit.url,
-                title=extracted_title or f"(JD from {hit.url[:50]})",
-                company=extracted_company or None,
-                location=extracted_location or None,
-                raw_text=jd_body,
-                extras={
-                    "rationale": verdict.get("rationale", ""),
-                    "search_query_url": hit.url,
-                },
-            )
-            try:
-                was_new, job_id = scout.ingest(self.store, rj)
-                if was_new:
-                    inserted += 1
-                    new_job_ids.append(job_id)
-                else:
-                    skipped_dup += 1
-            except Exception as e:
-                notes.append(f"ingest failed for {hit.url[:60]}: {e}")
-                skipped_low_quality += 1
+            # Anything else: irrelevant / outdated / stop
+            notes.append(f"d{hit.depth} skip {hit.url[:55]}: {kind} ({rationale})")
+            skipped_low_quality += 1
+
+        notes.append(
+            f"sweep done: {llm_calls} LLM calls, {evaluated} URLs evaluated, "
+            f"{inserted} ingested, {skipped_dup} dups, {skipped_low_quality} skipped",
+        )
 
         return JobCollectionResult(
             queries_run=queries,
-            hits_seen=len(all_hits),
+            hits_seen=len(seen_urls),
             hits_evaluated=evaluated,
             inserted=inserted,
             skipped_dup=skipped_dup,
@@ -373,26 +420,34 @@ class JobCollector:
             log.debug("fetch failed %s: %s", url, e)
             return ""
 
-    def _llm_evaluate(
+    def _llm_decide(
         self,
         north_star: str,
+        url: str,
         page_text: str,
     ) -> dict[str, Any] | None:
+        """Ask LLM: what is this page + what should I do next?
+
+        Returns the parsed verdict dict, or None on LLM/JSON failure.
+        Includes URL in user msg so LLM can resolve relative links and
+        recognize careers-index URL patterns.
+        """
         snippet = page_text[:6000]
+        user_msg = f"【当前 URL】 {url}\n\n【页面内容】\n{snippet}"
         try:
             resp = self.llm.chat(
                 messages=[
                     {
                         "role": "system",
-                        "content": _FILTER_PROMPT.format(north_star=north_star),
+                        "content": _DECIDE_PROMPT.format(north_star=north_star),
                     },
-                    {"role": "user", "content": snippet},
+                    {"role": "user", "content": user_msg},
                 ],
                 temperature=0.0,
                 json_mode=True,
             )
         except LLMError as e:
-            log.warning("LLM JD-filter failed: %s", e)
+            log.warning("LLM JD-decide failed: %s", e)
             return None
         try:
             return json.loads(resp.content)

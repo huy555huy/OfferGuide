@@ -69,18 +69,19 @@ class TestJobCollector:
 
         class _StubLLM:
             def chat(self, messages, **kw):
-                # Return a positive verdict (W14.14 schema)
+                # W14.15 multi-hop schema: page_kind + next_action
                 import json
                 return LLMResponse(
                     content=json.dumps({
-                        "has_jd_content": True,
-                        "is_recent": True,
-                        "relevance_score": 3,
+                        "page_kind": "concrete_jd",
                         "company": "字节跳动",
                         "title": "AI Agent 暑期实习",
                         "location": "北京",
                         "jd_body_clean": good_snippet,
-                        "rationale": "明确实习岗 + 匹配 AI Agent 方向",
+                        "next_action": {
+                            "kind": "ingest", "urls": [],
+                            "rationale": "明确实习岗 + 匹配 AI Agent",
+                        },
                     }),
                     model="stub",
                 )
@@ -124,17 +125,16 @@ class TestJobCollector:
 
         class _StubLLM:
             def chat(self, messages, **kw):
-                # W14.14 schema: low relevance + has_content false
+                # W14.15 multi-hop schema: irrelevant page → stop
                 import json
                 return LLMResponse(content=json.dumps({
-                    "has_jd_content": False,
-                    "is_recent": True,
-                    "relevance_score": 0,
-                    "company": "",
-                    "title": "",
-                    "location": None,
-                    "jd_body_clean": "",
-                    "rationale": "公司目录, 不是具体岗位",
+                    "page_kind": "irrelevant",
+                    "company": None, "title": None,
+                    "location": None, "jd_body_clean": "",
+                    "next_action": {
+                        "kind": "stop", "urls": [],
+                        "rationale": "公司目录, 不是具体岗位",
+                    },
                 }), model="stub")
 
         coll = JobCollector(store=store, llm=_StubLLM(), search=_StubSearch())
@@ -149,76 +149,191 @@ class TestJobCollector:
             n = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
         assert n == 0
 
-    def test_relevance_2_or_above_passes(self, tmp_path):
-        """W14.14: relaxed filter — relevance>=2 (not strict 3) is enough.
-        Catches the real-walkthrough case where Tavily found related-but-
-        not-exact-match JDs and the strict filter rejected all 8."""
+    def test_multi_hop_follows_links_then_ingests(self, tmp_path):
+        """W14.15 — the real test: Tavily returns a careers index page,
+        LLM says 'follow these 2 sub-URLs', collector fetches them, the
+        sub-pages are concrete JDs, ingest. Old single-pass code would
+        have rejected the index page outright; new agent loop digs deeper."""
         from offerguide.agentic.job_collector import JobCollector
         from offerguide.agentic.search import SearchHit
 
-        store = offerguide.Store(tmp_path / "rel.db")
+        store = offerguide.Store(tmp_path / "hop.db")
         store.init_schema()
-        body = "LLM 应用工程师 实习 - 同领域但不是 AI Agent 完全对名" + ("." * 250)
+
+        index_url = "https://talent.bytedance.com/campus"
+        sub_urls = [
+            "https://talent.bytedance.com/campus/123",
+            "https://talent.bytedance.com/campus/456",
+        ]
+        index_page = "字节跳动 2026 校招主页 - " + ("." * 300)
+        jd_body_a = ("AI Agent 暑期实习 工作内容: 设计 LLM agent loop. "
+                     "任职要求: Python, LangGraph 经验." + "." * 200)
+        jd_body_b = ("LLM 应用工程师 实习 工作内容: prompt 工程 + 评测. "
+                     "任职要求: 大模型应用经验." + "." * 200)
 
         class _StubSearch:
             name = "stub"
             def search(self, q, *, max_results=10):
-                return [SearchHit(title="x", url="https://nowcoder.com/abc", snippet=body)]
+                return [SearchHit(title="字节 校招", url=index_url, snippet=index_page)]
+
+        # Track which URLs LLM has been asked about, to return per-URL verdicts
+        seen_urls_in_llm: list[str] = []
 
         class _StubLLM:
-            def chat(self, messages, **kw):
+            def chat(self_inner, messages, **kw):
                 import json
+                user_text = messages[1]["content"]
+                seen_urls_in_llm.append(user_text)
+                # Order matters: check the more-specific sub URLs FIRST,
+                # otherwise "talent.bytedance.com/campus" matches both
+                # the index URL and any sub-URL that starts with it.
+                if sub_urls[0] in user_text:
+                    body = jd_body_a
+                    title = "AI Agent 实习"
+                elif sub_urls[1] in user_text:
+                    body = jd_body_b
+                    title = "LLM 应用工程师 实习"
+                elif index_url in user_text:
+                    # Index page → follow_links to sub-URLs
+                    return LLMResponse(content=json.dumps({
+                        "page_kind": "careers_index",
+                        "company": "字节跳动", "title": None,
+                        "location": None, "jd_body_clean": "",
+                        "next_action": {
+                            "kind": "follow_links", "urls": sub_urls,
+                            "rationale": "字节 careers 主页, 选 2 个 AI 相关子页",
+                        },
+                    }), model="stub")
+                else:
+                    body = jd_body_a
+                    title = "AI Agent 实习"
                 return LLMResponse(content=json.dumps({
-                    "has_jd_content": True,
-                    "is_recent": True,
-                    "relevance_score": 2,  # related, not exact
-                    "company": "公司A",
-                    "title": "LLM 应用工程师 实习",
-                    "location": "上海",
+                    "page_kind": "concrete_jd",
+                    "company": "字节跳动",
+                    "title": title,
+                    "location": "北京",
                     "jd_body_clean": body,
-                    "rationale": "同领域 LLM 应用, 算 2",
+                    "next_action": {
+                        "kind": "ingest", "urls": [],
+                        "rationale": "具体岗位 JD",
+                    },
                 }), model="stub")
 
         coll = JobCollector(store=store, llm=_StubLLM(), search=_StubSearch())
+
+        # Stub fetch so sub-URLs return content (real test endpoint doesn't exist)
+        page_for_url = {
+            index_url: index_page,
+            sub_urls[0]: jd_body_a,
+            sub_urls[1]: jd_body_b,
+        }
+        coll._fetch_text = lambda url: page_for_url.get(url, "")
+
         try:
             r = coll.collect(north_star="AI Agent 实习")
         finally:
             coll.close()
-        # Pre-W14.14 (strict matches_north_star=true), this would skip.
-        # Post-W14.14: relevance>=2 → ingested.
-        assert r.inserted == 1
 
-    def test_relevance_1_or_below_skipped(self, tmp_path):
+        # The agent should have walked: index → 2 sub-URLs → 2 ingests
+        assert r.inserted == 2, f"expected 2 ingests via multi-hop, got {r.inserted}\n notes={r.notes}"
+        # And it took 3 LLM calls total (1 for index + 2 for sub-pages)
+        assert len(seen_urls_in_llm) == 3
+        # Notes should record the depth=0 follow_links hop
+        assert any("careers_index" in n for n in r.notes)
+        assert any("INGEST" in n for n in r.notes)
+
+    def test_max_depth_caps_recursion(self, tmp_path):
+        """A page that LLM keeps saying 'follow these other links' must
+        eventually stop at max_depth (default 2) — never infinite loop."""
         from offerguide.agentic.job_collector import JobCollector
         from offerguide.agentic.search import SearchHit
 
-        store = offerguide.Store(tmp_path / "rel2.db")
+        store = offerguide.Store(tmp_path / "depth.db")
         store.init_schema()
 
         class _StubSearch:
             name = "stub"
             def search(self, q, *, max_results=10):
-                return [SearchHit(title="x", url="https://nowcoder.com/zzz", snippet="x" * 250)]
+                return [SearchHit(title="x", url="https://nowcoder.com/a", snippet="x" * 250)]
+
+        # LLM always says "follow these other URLs" → tests depth cap
+        counter = {"n": 0}
 
         class _StubLLM:
-            def chat(self, messages, **kw):
+            def chat(self_inner, messages, **kw):
                 import json
+                counter["n"] += 1
+                # Generate a fresh sub URL each time so dedup doesn't kick in
+                next_url = f"https://nowcoder.com/sub-{counter['n']}"
                 return LLMResponse(content=json.dumps({
-                    "has_jd_content": True,
-                    "is_recent": True,
-                    "relevance_score": 1,  # only loosely related
-                    "company": "x", "title": "x", "location": None,
-                    "jd_body_clean": "x" * 200,
-                    "rationale": "测试岗位, 不是 AI",
+                    "page_kind": "careers_index",
+                    "company": None, "title": None,
+                    "location": None, "jd_body_clean": "",
+                    "next_action": {
+                        "kind": "follow_links", "urls": [next_url],
+                        "rationale": "still digging",
+                    },
                 }), model="stub")
 
-        coll = JobCollector(store=store, llm=_StubLLM(), search=_StubSearch())
+        coll = JobCollector(
+            store=store, llm=_StubLLM(), search=_StubSearch(),
+            max_depth=2,
+        )
+        # Always returns "page exists" so fetch doesn't short-circuit
+        coll._fetch_text = lambda url: "x" * 250
         try:
-            r = coll.collect(north_star="AI Agent 实习")
+            r = coll.collect(north_star="AI 实习")
         finally:
             coll.close()
+        # Walks depth 0 (initial Tavily hit) + depth 1 + depth 2, then
+        # rejects deeper. With max_depth=2: 0 → 1 → 2 → STOP at depth 2's
+        # "follow_links" attempt. So 3 LLM calls maximum (one per depth).
+        assert counter["n"] <= 3
+        # No ingests since LLM never said concrete_jd
         assert r.inserted == 0
-        assert r.skipped_low_quality >= 1
+
+    def test_max_llm_calls_caps_total_cost(self, tmp_path):
+        """Even if LLM keeps suggesting follow_links, total LLM calls must
+        not exceed max_llm_calls. Cost guarantee."""
+        from offerguide.agentic.job_collector import JobCollector
+        from offerguide.agentic.search import SearchHit
+
+        store = offerguide.Store(tmp_path / "budget.db")
+        store.init_schema()
+
+        # Seed many initial URLs so the queue is long
+        seeds = [SearchHit(title=f"x{i}", url=f"https://nowcoder.com/seed-{i}",
+                           snippet="x" * 250)
+                 for i in range(20)]
+
+        class _StubSearch:
+            name = "stub"
+            def search(self, q, *, max_results=10):
+                return seeds  # always return all 20
+
+        counter = {"n": 0}
+
+        class _StubLLM:
+            def chat(self_inner, messages, **kw):
+                import json
+                counter["n"] += 1
+                return LLMResponse(content=json.dumps({
+                    "page_kind": "irrelevant", "company": None, "title": None,
+                    "location": None, "jd_body_clean": "",
+                    "next_action": {"kind": "stop", "urls": [], "rationale": "skip"},
+                }), model="stub")
+
+        coll = JobCollector(
+            store=store, llm=_StubLLM(), search=_StubSearch(),
+            max_llm_calls=5,
+        )
+        coll._fetch_text = lambda url: "x" * 250
+        try:
+            coll.collect(north_star="x")
+        finally:
+            coll.close()
+        # Hard cap: 5 LLM calls regardless of how many URLs are queued
+        assert counter["n"] <= 5
 
     def test_dedup_via_content_hash(self, tmp_path):
         """Re-running on the same DB does NOT double-insert."""
@@ -237,15 +352,14 @@ class TestJobCollector:
 
         class _StubLLM:
             def chat(self, messages, **kw):
-                # W14.14 schema
+                # W14.15 multi-hop schema
                 import json
                 return LLMResponse(content=json.dumps({
-                    "has_jd_content": True, "is_recent": True,
-                    "relevance_score": 3,
+                    "page_kind": "concrete_jd",
                     "company": "A公司", "title": "AI 实习",
                     "location": "北京",
                     "jd_body_clean": body,
-                    "rationale": "ok",
+                    "next_action": {"kind": "ingest", "urls": [], "rationale": "ok"},
                 }), model="stub")
 
         coll = JobCollector(store=store, llm=_StubLLM(), search=_StubSearch())
