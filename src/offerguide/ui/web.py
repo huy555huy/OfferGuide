@@ -158,6 +158,39 @@ def create_app(
             n_pending_inbox = conn.execute(
                 "SELECT COUNT(*) FROM inbox_items WHERE status='pending'"
             ).fetchone()[0]
+            # W14.11: state-aware next-step suggestion. Replaces the generic
+            # "三步走" onboarding banner with a context-sensitive prompt
+            # that points at the actual next thing to do.
+            n_active_goals = conn.execute(
+                "SELECT COUNT(*) FROM user_goals WHERE status='active'"
+            ).fetchone()[0]
+            latest_job_id = conn.execute(
+                "SELECT id FROM jobs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            latest_job_id = latest_job_id[0] if latest_job_id else None
+
+        # State-machine for the next-step card:
+        #   no goal & no job  → set a goal OR paste a JD (parallel paths)
+        #   goal but no job   → emphasize "add a JD now" (the actual blocker)
+        #   job but no app    → "go generate a 投递包" (one click away)
+        #   has applications  → "wake agent for review" (let model drive)
+        next_step = None
+        if not latest_run and (n_active_goals == 0 and n_jobs == 0):
+            next_step = {
+                "kind": "first_use",
+                "title": "👋 第一次用? 这里有两条路, 哪条都行",
+            }
+        elif n_active_goals > 0 and n_jobs == 0:
+            next_step = {
+                "kind": "need_jd",
+                "title": "🎯 Goal 设好了, 现在缺 JD — 30 秒粘一个就开始",
+            }
+        elif n_jobs > 0 and n_apps_active == 0 and n_apps_offer == 0:
+            next_step = {
+                "kind": "have_jd",
+                "title": "📋 已经有 JD 在 pipeline, 去生成投递包 / 调简历",
+                "latest_job_id": latest_job_id,
+            }
 
         return templates.TemplateResponse(
             request,
@@ -172,6 +205,7 @@ def create_app(
                     "offers": n_apps_offer,
                     "pending_inbox": n_pending_inbox,
                 },
+                next_step=next_step,
                 runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
                 active_tab="home",
             ),
@@ -254,6 +288,47 @@ def create_app(
                 transition_options=pv_mod.transition_options,
                 active_tab="pipeline",
             ),
+        )
+
+    @app.post("/api/pipeline/jobs/manual", response_class=HTMLResponse)
+    def pipeline_add_manual_job(
+        request: Request,
+        raw_text: str = Form(...),
+        title: str | None = Form(None),
+        company: str | None = Form(None),
+        location: str | None = Form(None),
+        url: str | None = Form(None),
+    ) -> Any:
+        """W14.11: paste-a-JD bootstrap path. The W13.1 cleanup deleted
+        /quick-eval thinking "扩展抓 + agent discover_jobs 自动" was enough,
+        but real walk-through showed: fresh DB + no extension installed = no
+        way to get a JD into the system at all → tailor / apply / agent all
+        sit empty. This restores a single-form path: paste raw JD text →
+        creates a jobs row → redirect to /apply/<id> so the user lands
+        directly on "generate a 投递包".
+        """
+        from ..platforms import manual
+
+        cleaned = (raw_text or "").strip()
+        if len(cleaned) < 50:
+            raise HTTPException(
+                400, "JD 太短 (< 50 字), 没法生成有用的投递包",
+            )
+        try:
+            rj = manual.from_text(
+                cleaned,
+                title=(title or None),
+                company=(company or None),
+                location=(location or None),
+                url=(url or None),
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        was_new, job_id = scout.ingest(store, rj)
+        # Whether new or duplicate, jump straight to /apply so the user
+        # always sees forward motion (matches what they were after).
+        return RedirectResponse(
+            f"/apply/{job_id}", status_code=303,
         )
 
     @app.post(
@@ -1341,6 +1416,13 @@ def create_app(
     # paste-ready application package (Boss直聘 self-intro + form Q/A +
     # submission strategy). User opens /apply/<job_id> → one-click copy each
     # piece → goes to Boss/牛客 with everything ready.
+
+    @app.get("/apply", response_class=HTMLResponse)
+    def apply_index(request: Request) -> Any:
+        """W14.11: /apply (no id) — used to be a 404 that confused fresh
+        users who clicked "Apply" expecting to see a job picker. Now
+        redirect to /pipeline where they can pick a job (or paste one)."""
+        return RedirectResponse("/pipeline", status_code=303)
 
     @app.get("/apply/{job_id}", response_class=HTMLResponse)
     def apply_view(request: Request, job_id: int) -> Any:

@@ -157,7 +157,8 @@ class TestUnifiedEmptyStates:
     def test_pipeline_empty_uses_v2_structure(self, fresh_client):
         client, _ = fresh_client
         resp = client.get("/pipeline")
-        assert "Pipeline 还是空的" in resp.text
+        # W14.11: copy updated to surface the 3 entry paths upfront
+        assert "Pipeline 空" in resp.text or "Pipeline 还是空的" in resp.text
         assert "empty-icon" in resp.text
         assert "empty-title" in resp.text
 
@@ -191,12 +192,13 @@ class TestHomeOnboarding:
 
     def test_non_empty_db_hides_first_time_banner(self, fresh_client):
         client, store = fresh_client
-        # Insert one inbox suggestion so suggestions list is non-empty
-        from offerguide import inbox as inbox_mod
-        inbox_mod.enqueue_agent_suggestion(
-            store, title="t", body="b",
-            source_skill_name="score_match", source_skill_version="0.1.0",
-        )
+        # W14.11: next-step is now state-aware. Insert a job so we leave
+        # the "first_use" branch and don't show the "👋 第一次用" header.
+        with store.connect() as conn:
+            conn.execute(
+                "INSERT INTO jobs(source, raw_text, content_hash) VALUES ('m', ?, 'h1')",
+                ("x" * 250,),
+            )
         resp = client.get("/")
         assert "👋 第一次用" not in resp.text
 

@@ -134,16 +134,52 @@
     {% endif %}
 </div>
 
-{# ─────────── 1.5 — Onboarding banner: only show when truly empty ─────────── #}
+{# ─────────── 1.5 — Stateful next-step card (W14.11) ─────────── #}
 
-{% if not latest_run and stats.jobs == 0 and stats.active_apps == 0 and not suggestions %}
+{% if next_step %}
 <div class="card" style="background: var(--primary-soft); border-color: var(--primary);">
-    <h2 style="margin: 0 0 0.5rem; font-family: var(--font-serif); font-size: 1rem;">👋 第一次用? 三步走</h2>
-    <ol style="margin: 0; padding-left: 1.25rem; font-size: 0.875rem; line-height: 1.8;">
-        <li>去 <a href="/goals">🎯 Goals</a> 设你的 north star (例: <em>"2026 暑期拿 1 个 AI Agent 实习 offer"</em>)</li>
-        <li>装好浏览器扩展 (<code>extension/</code> 文件夹), 在 Boss / 牛客 看到岗位时点扩展抓取</li>
-        <li>回到 <a href="/agent">🤖 Agent</a> 唤醒一次, 让 agent 读现状给建议 — 建议会出现在这里</li>
-    </ol>
+    <h2 style="margin: 0 0 0.625rem; font-family: var(--font-serif); font-size: 1rem;">{{ next_step.title }}</h2>
+
+    {% if next_step.kind == "first_use" %}
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap: 0.75rem;">
+        <div>
+            <div style="font-weight:600; font-size:0.92rem;">A. 我有想投的具体岗位</div>
+            <div class="small muted" style="margin: 0.25rem 0 0.5rem;">
+                30 秒最快路径: 去 pipeline 粘贴 JD 文本 → 跳 /apply 生成投递包
+            </div>
+            <a href="/pipeline" class="btn">📋 去粘一个 JD</a>
+        </div>
+        <div>
+            <div style="font-weight:600; font-size:0.92rem;">B. 我先想清楚目标</div>
+            <div class="small muted" style="margin: 0.25rem 0 0.5rem;">
+                设个 north star, agent 后续每次唤醒都会读, 让所有建议对齐
+            </div>
+            <a href="/goals" class="btn secondary">🎯 设 north star</a>
+        </div>
+    </div>
+    <div class="small muted" style="margin-top: 0.625rem; padding-top: 0.5rem; border-top: 1px solid var(--border-soft);">
+        都做完了再去 <a href="/agent">🤖 唤醒 agent</a>, 它会读现状给建议 (建议会出现在 inbox)
+    </div>
+
+    {% elif next_step.kind == "need_jd" %}
+    <div class="small" style="line-height: 1.7;">
+        Agent 跟自动化能跑起来需要 JD 当输入。最快办法: 看到一个想投的岗位, 整段 JD 粘到 pipeline。
+    </div>
+    <div class="actions" style="margin-top: 0.625rem;">
+        <a href="/pipeline" class="btn">📋 去 pipeline 粘 JD</a>
+        <span class="muted small">或装浏览器扩展自动抓 (<code>extension/</code>)</span>
+    </div>
+
+    {% elif next_step.kind == "have_jd" %}
+    <div class="small" style="line-height: 1.7;">
+        最近抓的 JD 已经在 pipeline。现在可以: 生成投递包 (Boss直聊 + Q&A + checklist) 或调一份针对性简历。
+    </div>
+    <div class="actions" style="margin-top: 0.625rem;">
+        <a href="/apply/{{ next_step.latest_job_id }}" class="btn">📤 给最近 job 生成投递包</a>
+        <a href="/tailor" class="btn secondary">📄 微调简历</a>
+        <a href="/pipeline" class="btn ghost">看完整 pipeline</a>
+    </div>
+    {% endif %}
 </div>
 {% endif %}
 

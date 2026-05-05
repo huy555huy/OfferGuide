@@ -131,20 +131,58 @@
         <h1>Pipeline · 投递战况</h1>
         <p>{{ pipeline.total_active }} 个 active · {{ pipeline.counts.terminal }} 个已结束。每张卡片悬停可见操作按钮 — 一键推进状态，状态自动同步到 application_events。</p>
     </div>
-    <span class="muted small">JD 通过浏览器扩展从 Boss / 牛客抓取</span>
+    <span class="muted small">三种入 JD: 下面表单粘贴 / 浏览器扩展抓 / agent 自动 discover</span>
 </div>
 
+{# W14.11 — paste-a-JD entry. Always available so a fresh user can
+   bootstrap the system with a single copy-paste, no extension required.
+   The form posts to /api/pipeline/jobs/manual which redirects straight
+   to /apply/<new_job_id>. Auto-opens when pipeline is empty so a fresh
+   user sees the form immediately. #}
+<details class="card" {% if pipeline.total_active == 0 and pipeline.counts.terminal == 0 %}open{% endif %} style="margin-bottom: 1rem;">
+    <summary style="cursor: pointer; font-weight: 600; font-size: 1.05rem;">📋 粘贴 JD 文本 (从 Boss / 牛客 / 任何来源直接复制过来)</summary>
+    <form method="post" action="/api/pipeline/jobs/manual" style="margin-top: 0.75rem;">
+        <label class="field">
+            <span class="label-text">JD 原文 (≥ 50 字, 必填) — 整段复制过来即可, 不用整理</span>
+            <textarea name="raw_text" required minlength="50" rows="8"
+                      placeholder="工作内容: 1. 设计并开发 ...&#10;岗位要求: 1. 计算机/软件相关专业 ..."></textarea>
+        </label>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0.5rem; margin-top:0.5rem;">
+            <label class="field">
+                <span class="label-text">公司 (可选, 强烈建议填)</span>
+                <input type="text" name="company" placeholder="字节跳动">
+            </label>
+            <label class="field">
+                <span class="label-text">岗位 title (可选)</span>
+                <input type="text" name="title" placeholder="AI Agent 暑期实习">
+            </label>
+            <label class="field">
+                <span class="label-text">地点 (可选)</span>
+                <input type="text" name="location" placeholder="北京 / 上海">
+            </label>
+        </div>
+        <label class="field" style="margin-top: 0.5rem;">
+            <span class="label-text">原 URL (可选, 后面方便点回去)</span>
+            <input type="text" name="url" placeholder="https://www.zhipin.com/...">
+        </label>
+        <div class="actions" style="margin-top: 0.75rem;">
+            <button type="submit">→ 添加并直接生成投递包</button>
+            <span class="muted small">添加后跳到 /apply 页, agent 立刻能基于这条 JD 工作 (生成投递包 / 微调简历 / 评估匹配)</span>
+        </div>
+    </form>
+</details>
+
 {# Always render the 5-column kanban. Empty DB → all columns empty,
-   each shows "空" placeholder. We surface a banner explaining what
-   to do when truly empty, but keep the structure visible so users
-   learn the lifecycle. #}
+   each shows "空" placeholder. The empty hint above the kanban explains
+   the three paths to get JDs in. #}
 {% if pipeline.total_active == 0 and pipeline.counts.terminal == 0 %}
-<div class="empty">
+<div class="empty" style="margin-bottom: 1rem;">
     <div class="empty-icon">📋</div>
-    <div class="empty-title">Pipeline 还是空的</div>
+    <div class="empty-title">Pipeline 空 — 抓 / 粘 / 让 agent 找, 选一个开始</div>
     <div class="empty-hint">
-        装好浏览器扩展 (<code>extension/</code> 文件夹), 在 Boss / 牛客 看到岗位时点扩展抓取——抓进来后会自动出现在这里。<br>
-        每张卡片可一键推进状态 (草稿 → 已投 → 已看 → 已回 → 面试)。
+        ① <strong>上面表单粘贴 JD 文本</strong> (最快, 30 秒) ·
+        ② 装浏览器扩展 (<code>extension/</code> 文件夹) 自动抓 ·
+        ③ 让 agent 调 <code>discover_new_jobs</code> 自动发现 (在 /agent 页给目标 "找 5 个 AI 实习岗")
     </div>
 </div>
 {% endif %}
