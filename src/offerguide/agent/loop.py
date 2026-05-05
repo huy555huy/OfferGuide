@@ -478,6 +478,103 @@ ACTION_TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    # ────── W14.20 working memory tools ──────
+    {
+        "type": "function",
+        "function": {
+            "name": "write_note_to_self",
+            "description": (
+                "给**未来的自己**写一条 todo / observation. 下次 wake 你会在 "
+                "snapshot 顶部看到这条 note. 用来跨 wake 接力 — 例如:\n"
+                "- '下次 wake 看这 4 个 JD score 出来了没, 高分的写 suggestion'\n"
+                "- '用户对 Anthropic 兴趣还不确定, 等用户 approve/reject 那条 suggestion 后再调 deeper'\n"
+                "- '今天 23:54, 用户在睡觉, 明天 8:00 后再 follow up'"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "body": {
+                        "type": "string",
+                        "description": "1-2 句话的 todo / observation. 用第一人称.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["todo", "observation", "context"],
+                        "description": "todo=具体下次该做; observation=观察; context=session 接力上下文",
+                    },
+                    "valid_for_hours": {
+                        "type": "integer",
+                        "description": "(可选) N 小时后这条 note 自动 stale. 默认 48h.",
+                    },
+                },
+                "required": ["body", "kind"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_self_note",
+            "description": (
+                "把一条 self_note 标记为 done (从 snapshot 移除). 当你完成上次留的 todo 时调."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "integer"},
+                    "reason": {
+                        "type": "string",
+                        "description": "1 句话: 为啥可以 clear (做完了 / 没必要了 / ...)",
+                    },
+                },
+                "required": ["note_id", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user_question",
+            "description": (
+                "**主动问用户一个问题** (不是 suggestion). 当你看 state 后判断"
+                "需要用户决定一件事再继续 (而不是单方面推荐) 时调.\n\n"
+                "典型场景:\n"
+                "- 用户 north star 跟简历方向不一致 — 问用户想改 north star 还是改简历重点\n"
+                "- 用户多次 reject 同类 suggestion — 问是不是方向变了\n"
+                "- 多个备选 (3 家公司你都觉得不错), 让用户挑哪几家先投\n\n"
+                "用户在 inbox 看到这条, 选一个 option, 答案会写到 user_facts 让你下次看到."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "你的问题 (≤ 80 字, 一句话直接问)",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "为啥问这个 — 给用户一些背景 (markdown, 几句话)",
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "label": {"type": "string"},
+                            },
+                            "required": ["id", "label"],
+                        },
+                        "description": "2-4 个选项. id 是回答的 short code (e.g. 'change_ns'), label 是 user 看到的文字 (e.g. '改 north star')",
+                    },
+                },
+                "required": ["question", "context", "options"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 LOOKUP_TOOL_NAMES = {sc["function"]["name"] for sc in LOOKUP_TOOL_SCHEMAS}
@@ -584,6 +681,46 @@ def snapshot_state(
     Empty sections are omitted so the prompt scales down on a fresh DB.
     """
     parts: list[str] = ["# 当前系统状态 (Snapshot)"]
+
+    # ---- W14.20 working memory: notes you wrote to your future self ----
+    # 上次 wake 你给自己留的 todo / observation. 先看, 决定: 完成 + clear,
+    # 还是接着做, 还是已经不 relevant 了 (clear with reason).
+    try:
+        with store.connect() as conn:
+            notes = conn.execute(
+                "SELECT id, body, note_kind, created_at, valid_until "
+                "FROM agent_self_notes "
+                "WHERE cleared_at IS NULL "
+                "  AND (valid_until IS NULL OR valid_until > julianday('now')) "
+                "ORDER BY created_at DESC LIMIT 8"
+            ).fetchall()
+        if notes:
+            parts.append("\n## 📝 你给自己留的 notes (working memory — 跨 wake 接力)")
+            for nid, body, kind, _ca, _vu in notes:
+                parts.append(f"- [#{nid} {kind}] {body}")
+            parts.append(
+                "  ↑ 检查: 这些是上次你给自己的 todo. 完成的调 clear_self_note(note_id, reason). "
+                "还要做的就接着做. 不再 relevant 的也 clear 掉别让 snapshot 越积越多."
+            )
+    except Exception as e:
+        log.warning("snapshot_state: self_notes read failed: %s", e)
+
+    # ---- W14.20 pending questions: things you asked user, awaiting answer ----
+    # If you have unanswered questions sitting in inbox, DO NOT ask the same
+    # thing again. Wait for answer. (When user answers, written to user_facts.)
+    try:
+        with store.connect() as conn:
+            pending_qs = conn.execute(
+                "SELECT id, title, created_at FROM inbox_items "
+                "WHERE kind = 'question' AND status = 'pending' "
+                "ORDER BY created_at DESC LIMIT 5"
+            ).fetchall()
+        if pending_qs:
+            parts.append("\n## ❓ 你已经问用户的问题 (等回答, 别重复问)")
+            for qid, qtitle, _ca in pending_qs:
+                parts.append(f"- inbox#{qid}: {qtitle}")
+    except Exception as e:
+        log.warning("snapshot_state: pending_questions read failed: %s", e)
 
     # ---- North star: active goals + progress (W13.6) ----
     # 一个真 agent 有 north star, 不是只看眼前数字。每次唤醒先想:
@@ -1348,7 +1485,109 @@ class AgentLoop:
         if tc.name == "send_notification":
             return self._execute_send_notification(tc)
 
+        # ── W14.20 working memory + question tools ──
+        if tc.name == "write_note_to_self":
+            return self._execute_write_note_to_self(tc)
+        if tc.name == "clear_self_note":
+            return self._execute_clear_self_note(tc)
+        if tc.name == "ask_user_question":
+            return self._execute_ask_user_question(tc)
+
         return f"ERROR: action tool '{tc.name}' is declared but not implemented"
+
+    # ── W14.20 self-notes (working memory) executors ──
+
+    def _execute_write_note_to_self(self, tc: ToolCall) -> str:
+        body = (tc.arguments.get("body") or "").strip()
+        kind = (tc.arguments.get("kind") or "todo").strip()
+        if not body:
+            return "ERROR: write_note_to_self requires non-empty body"
+        if kind not in {"todo", "observation", "context"}:
+            return f"ERROR: invalid kind '{kind}', must be todo/observation/context"
+        valid_for_h = tc.arguments.get("valid_for_hours")
+        try:
+            valid_for_hours = (
+                int(valid_for_h) if valid_for_h is not None else 48
+            )
+        except (TypeError, ValueError):
+            valid_for_hours = 48
+        try:
+            with self._store.connect() as conn:
+                cur = conn.execute(
+                    "INSERT INTO agent_self_notes("
+                    "  body, note_kind, valid_until, related_run_id"
+                    ") VALUES (?, ?, julianday('now') + ?, ?)",
+                    (body, kind, valid_for_hours / 24.0, self._current_run_id),
+                )
+                note_id = int(cur.lastrowid or 0)
+            return f"OK: 写入 self_note#{note_id}, 下次 wake 你会在 snapshot 顶部看到."
+        except Exception as e:
+            log.exception("write_note_to_self crashed")
+            return f"ERROR: write_note_to_self raised {type(e).__name__}: {e}"
+
+    def _execute_clear_self_note(self, tc: ToolCall) -> str:
+        try:
+            note_id = int(tc.arguments.get("note_id"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return "ERROR: clear_self_note requires note_id (integer)"
+        reason = (tc.arguments.get("reason") or "").strip()
+        if not reason:
+            return "ERROR: clear_self_note requires reason"
+        try:
+            with self._store.connect() as conn:
+                row = conn.execute(
+                    "UPDATE agent_self_notes "
+                    "SET cleared_at = julianday('now'), cleared_reason = ? "
+                    "WHERE id = ? AND cleared_at IS NULL "
+                    "RETURNING id",
+                    (reason[:200], note_id),
+                ).fetchone()
+            if row is None:
+                return f"WARN: self_note#{note_id} 已经 cleared 或不存在"
+            return f"OK: cleared self_note#{note_id} (reason={reason[:80]})"
+        except Exception as e:
+            log.exception("clear_self_note crashed")
+            return f"ERROR: clear_self_note raised {type(e).__name__}: {e}"
+
+    def _execute_ask_user_question(self, tc: ToolCall) -> str:
+        question = (tc.arguments.get("question") or "").strip()
+        context = (tc.arguments.get("context") or "").strip()
+        options = tc.arguments.get("options") or []
+        if not question:
+            return "ERROR: ask_user_question requires question"
+        if not isinstance(options, list) or len(options) < 2:
+            return "ERROR: need at least 2 options"
+        if len(options) > 4:
+            options = options[:4]
+        # Validate option shape
+        valid_options = []
+        for opt in options:
+            if not isinstance(opt, dict):
+                continue
+            opt_id = (opt.get("id") or "").strip()
+            opt_label = (opt.get("label") or "").strip()
+            if opt_id and opt_label:
+                valid_options.append({"id": opt_id[:40], "label": opt_label[:120]})
+        if len(valid_options) < 2:
+            return "ERROR: at least 2 well-formed options required (id+label)"
+
+        try:
+            from .. import inbox as _inbox
+            item = _inbox.enqueue_question(
+                self._store,
+                question=question,
+                context=context,
+                options=valid_options,
+                source_agent_run_id=self._current_run_id,
+            )
+            return (
+                f"OK: 问题入 inbox#{item.id} (kind=question, "
+                f"{len(valid_options)} 个选项). 用户答了后会写到 user_facts, "
+                f"你下次 wake 在 snapshot 里能看到答案."
+            )
+        except Exception as e:
+            log.exception("ask_user_question crashed")
+            return f"ERROR: ask_user_question raised {type(e).__name__}: {e}"
 
     def _execute_send_notification(self, tc: ToolCall) -> str:
         """W14 — agent decides to push a notification to user (Feishu/Telegram).

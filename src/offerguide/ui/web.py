@@ -146,6 +146,11 @@ def create_app(
             i for i in inbox_mod.list_items(store, status="pending", limit=20)
             if i.kind == "agent_suggestion"
         ][:6]
+        # W14.20 — pending questions agent asked user (separate, more urgent)
+        pending_questions = [
+            i for i in inbox_mod.list_items(store, status="pending", limit=20)
+            if i.kind == "question"
+        ][:3]
 
         # Just-stats (not action lists — agent gives those)
         with store.connect() as conn:
@@ -348,6 +353,7 @@ def create_app(
                 },
                 daemon_status=daemon_status,
                 activity_timeline=activity_timeline,
+                pending_questions=pending_questions,
                 runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
                 active_tab="home",
             ),
@@ -2871,6 +2877,25 @@ def create_app(
         return templates.TemplateResponse(
             request, "_inbox_list.html", _ctx(request, items=[item])
         )
+
+    @app.post("/inbox/{item_id}/answer", response_class=RedirectResponse)
+    def answer_question(
+        request: Request,
+        item_id: int,
+        option_id: str = Form(...),
+        free_text: str | None = Form(None),
+    ) -> Any:
+        """W14.20 — user picked an option for a kind='question' item.
+        Writes user_facts so agent's next wake sees the answer."""
+        try:
+            inbox_mod.answer_question(
+                store, item_id, option_id=option_id, free_text=free_text,
+            )
+        except KeyError:
+            raise HTTPException(404, f"inbox item {item_id} not found") from None
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from None
+        return RedirectResponse("/", status_code=303)
 
     # ── Browser extension ingest endpoint ──────────────────────────────
 

@@ -93,10 +93,92 @@
     .suggestion-card .source { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.125rem; }
 </style>
 
-{# ─────────── 1. Mission Control — W14.13 ─────────── #}
-{# What user sees: a real-time view of every autonomous daemon — what
-   it does, when it last ran, what it produced, when it'll fire next, +
-   a "▶ 跑一次" button to trigger now without waiting for cron. #}
+{# ─────────── W14.20 — ambient agent home: agent-driven, not user-managed ───────────
+   Order:
+     1. ❓ Questions agent asked (top — needs YOUR answer to continue)
+     2. 🎯 今日重点 — agent-prepared recommendations (Intent Preview)
+     3. 🤖 Agent 当前在想 (内心独白 — last wake's final answer)
+     4. 📈 Weekly stats (compact strip)
+     5. ⚙ Mission Control + Activity Timeline (collapsed, debug)
+
+   Old design (Mission Control on top) kept users "managing the agent". New
+   design surfaces what agent did + what it needs from you, hides ops detail.
+#}
+
+{# ─────────── 1. Pending questions agent asked (urgent, needs answer) ─────────── #}
+
+{% if pending_questions %}
+<div class="card" style="background: var(--warning-soft); border-color: var(--warning); border-left: 4px solid var(--warning);">
+    <div class="card-header">
+        <h2 style="color: var(--warning);">❓ Agent 在等你回答 ({{ pending_questions|length }})</h2>
+        <span class="meta">回答后 agent 下次 wake 会看到</span>
+    </div>
+    {% for q in pending_questions %}
+    <div style="padding: 0.875rem; background: var(--bg-elev); border-radius: var(--radius-sm); margin-bottom: 0.625rem;">
+        <div style="font-weight: 600; font-size: 0.95rem; margin-bottom: 0.5rem;">{{ q.title }}</div>
+        {% if q.body %}
+        <div class="small muted" style="margin-bottom: 0.625rem; line-height: 1.55;">{{ q.body }}</div>
+        {% endif %}
+        {% if q.question_options %}
+        <form method="post" action="/inbox/{{ q.id }}/answer" style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            {% for opt in q.question_options %}
+            <button type="submit" name="option_id" value="{{ opt.id }}"
+                    class="btn secondary" style="font-size: 0.85rem;">
+                {{ opt.label }}
+            </button>
+            {% endfor %}
+        </form>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{# ─────────── 2. Agent 内心独白 (last wake's reasoning, gives agent "personality") ─────────── #}
+
+{% if latest_run %}
+<div class="card" style="background: var(--bg-elev); border-left: 4px solid var(--primary);">
+    <div class="card-header">
+        <h2 style="font-family: var(--font-serif);">🤖 Agent 当前在想…</h2>
+        <span class="meta">
+            {% if latest_run.started_at %}
+                {% set hours_ago = ((latest_run.started_at|float) - (latest_run.started_at|float)) %}
+                run #{{ latest_run.id }}
+                {% if latest_run.iterations %}· {{ latest_run.iterations }} 步{% endif %}
+                {% if latest_run.critic_score is not none %}· critic <span class="pill {% if latest_run.critic_score >= 0.7 %}low{% elif latest_run.critic_score >= 0.4 %}middle{% else %}high{% endif %}">{{ "%.2f"|format(latest_run.critic_score) }}</span>{% endif %}
+            {% endif %}
+        </span>
+    </div>
+    <div style="font-size: 0.92rem; line-height: 1.7; white-space: pre-wrap;">{{ (latest_run.final_answer or '(空)')[:1500] }}</div>
+    <div class="actions" style="margin-top: 0.75rem;">
+        <button class="btn secondary" onclick="triggerDaemon('wake_agent', this)" data-loading-text="agent 思考中... 30-60s">
+            ▶ 立刻再唤醒 agent
+        </button>
+        <a class="btn ghost" href="/agent/runs/{{ latest_run.id }}">看完整 trajectory →</a>
+    </div>
+</div>
+{% else %}
+<div class="card" style="background: var(--primary-soft); border-color: var(--primary);">
+    <h2 style="margin: 0 0 0.5rem; font-family: var(--font-serif); font-size: 1rem;">🤖 Agent 还没跑过</h2>
+    <div class="small">心跳每小时叫 agent 一次, 它看 state 自己决定干啥. 现在手动唤醒一次试试:</div>
+    <div class="actions" style="margin-top: 0.625rem;">
+        <button class="btn" onclick="triggerDaemon('wake_agent', this)" data-loading-text="agent 思考中... 30-60s" {% if not runtime_ready %}disabled{% endif %}>
+            ▶ 唤醒 agent
+        </button>
+    </div>
+</div>
+{% endif %}
+
+{# ─────────── 3. (former Mission Control, now collapsed/de-emphasized) ─────────── #}
+
+{# Mission Control was the W14.13 top card; W14.20 demoted to bottom because
+   it's a debug view — users shouldn't be "managing daemons", they should be
+   reading "agent 在想啥 / 推了啥 / 问了啥" above. #}
+<details style="margin-bottom: 1rem;">
+    <summary class="muted small" style="cursor: pointer; padding: 0.5rem;">
+        ⚙ Mission Control (debug — 看 daemon 状态 / 手动 trigger)
+    </summary>
+    <div style="margin-top: 0.5rem;">
 
 <style>
     .mc {
@@ -219,8 +301,10 @@
     </div>
     {% endif %}
 </div>
+</div>{# /Mission Control wrapper div #}
+</details>{# /Mission Control debug collapsible (W14.20) #}
 
-{# ─────────── 1.5 — "Agent 本周报告" — kept compact below Mission Control ─────────── #}
+{# ─────────── 4. "Agent 本周报告" — compact strip ─────────── #}
 
 {% set has_weekly_activity = weekly and (
     weekly.jobs_auto_found > 0 or weekly.score_runs > 0

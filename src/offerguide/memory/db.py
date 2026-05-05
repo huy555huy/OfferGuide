@@ -151,7 +151,10 @@ CREATE TABLE IF NOT EXISTS inbox_items (
     source_agent_run_id    INTEGER,                          -- FK soft-link to agent_runs.id
     source_skill_name      TEXT,
     source_skill_version   TEXT,
-    proposed_action_json   TEXT       -- {"tool": "tailor_resume", "args": {...}} (optional)
+    proposed_action_json   TEXT,      -- {"tool": "tailor_resume", "args": {...}} (optional)
+    -- W14.20 — for kind='question' items, the multi-choice options the user
+    -- picks from. JSON list of {id, label}. NULL for non-question kinds.
+    question_options_json  TEXT
 );
 
 -- ``interview_experiences`` is the umbrella corpus table for ANY high-signal
@@ -350,6 +353,44 @@ CREATE TABLE IF NOT EXISTS agent_self_observations (
 CREATE INDEX IF NOT EXISTS idx_agent_self_obs_validity
     ON agent_self_observations(valid_until, created_at);
 
+-- ──────────── W14.20 agent self-notes (working memory) ────────────────
+-- The cron heartbeat wakes the agent every hour but the agent has no
+-- memory of "what I was about to do last wake but didn't get to". Without
+-- this, the agent re-derives priorities from snapshot every wake — wastes
+-- LLM cost + may forget multi-step plans (e.g. "kicked off discover, will
+-- score next time once new JDs land").
+--
+-- Each note is a **plain text reminder the agent wrote to its future self**.
+-- Different from agent_self_observations (which is meta-cognition about the
+-- agent's pattern); this is operational ("next wake: score the 4 jobs that
+-- just landed").
+--
+-- Notes are surfaced in the snapshot at the top of each wake — the agent
+-- sees them and decides whether to act on or clear them.
+CREATE TABLE IF NOT EXISTS agent_self_notes (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    body            TEXT NOT NULL,
+        -- One paragraph the agent wrote to itself, in its own voice
+    note_kind       TEXT NOT NULL DEFAULT 'todo',
+        -- 'todo'          — concrete next action ("score 4 new JDs")
+        -- 'observation'   — passive note ("user_facts mention 字节 application is silent")
+        -- 'context'       — session continuity ("we are in mid-iteration on tailoring resume for X")
+    valid_until     REAL,
+        -- After this julianday, the note is auto-stale and not surfaced
+    cleared_at      REAL,
+        -- When the agent decided this todo is done; clears it from snapshot
+    cleared_reason  TEXT,
+        -- "did it" / "no longer relevant" / "user said no"
+    related_run_id  INTEGER,
+        -- (soft FK to agent_runs.id) The agent_run that created this note,
+        -- for audit trail. Not enforced because: (a) the note may outlive
+        -- the run row in long-term cleanup; (b) tests want to write notes
+        -- without first creating an agent_runs row.
+    created_at      REAL DEFAULT (julianday('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_self_notes_active
+    ON agent_self_notes(cleared_at, valid_until, created_at DESC);
+
 -- ``skill_variants`` is the version registry for any SKILL that's been evolved.
 -- The original SKILL.md on disk is always implicitly version 0 (the seed).
 -- meta_evolve_skill writes new rows here as 'shadow'; the gray-release loop
@@ -469,6 +510,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if "proposed_action_json" not in inbox_cols:
             conn.execute(
                 "ALTER TABLE inbox_items ADD COLUMN proposed_action_json TEXT"
+            )
+        # W14.20 — for kind='question' inbox items, options the user can
+        # pick from. JSON list of {id, label, [hint]}. NULL for non-question kinds.
+        if "question_options_json" not in inbox_cols:
+            conn.execute(
+                "ALTER TABLE inbox_items ADD COLUMN question_options_json TEXT"
             )
 
     # interview_experiences quality + content_kind columns (W11)

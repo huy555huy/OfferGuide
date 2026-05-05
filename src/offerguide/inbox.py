@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 InboxStatus = Literal["pending", "approved", "rejected", "dismissed"]
 InboxKind = Literal[
     "agent_suggestion",     # W13.3 — anything the central agent loop proposes
+    "question",             # W14.20 — agent asks user to pick an option (multi-choice)
     "consider_jd",          # legacy — pre-W13 hardcoded "consider this JD" enqueue
     "review_suggestion",    # legacy
     "apply_decision",       # legacy
@@ -59,6 +60,8 @@ class InboxItem:
     source_skill_name: str | None = None
     source_skill_version: str | None = None
     proposed_action: dict[str, Any] | None = None
+    # W14.20 — for kind='question', the multiple-choice options the user picks from.
+    question_options: list[dict[str, Any]] | None = None
 
 
 def enqueue(
@@ -142,8 +145,41 @@ def enqueue_agent_suggestion(
 _INBOX_SELECT_COLS = (
     "id, kind, title, body, payload_json, status, created_at, "
     "decided_at, decision_note, source_agent_run_id, source_skill_name, "
-    "source_skill_version, proposed_action_json"
+    "source_skill_version, proposed_action_json, question_options_json"
 )
+
+
+def enqueue_question(
+    store: Store,
+    *,
+    question: str,
+    context: str,
+    options: list[dict[str, Any]],
+    source_agent_run_id: int | None = None,
+) -> InboxItem:
+    """W14.20 — agent's "ask the user a question" path.
+
+    Different from agent_suggestion (one-way recommendation) — this one
+    *requires* the user to pick an option. Selected option ID is written
+    to user_facts in decide(), so the agent's next wake sees the answer
+    in its snapshot.
+    """
+    payload_json = json.dumps(
+        {"options": options}, ensure_ascii=False,
+    )
+    options_json = json.dumps(options, ensure_ascii=False)
+    with store.connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO inbox_items("
+            "  kind, title, body, payload_json, status, "
+            "  source_agent_run_id, question_options_json"
+            ") VALUES ('question', ?, ?, ?, 'pending', ?, ?)",
+            (question[:200], context, payload_json, source_agent_run_id, options_json),
+        )
+        new_id = int(cur.lastrowid or 0)
+    fetched = get(store, new_id)
+    assert fetched is not None
+    return fetched
 
 
 def list_items(
@@ -260,6 +296,76 @@ def decide(
     return fetched
 
 
+def answer_question(
+    store: Store, item_id: int, *, option_id: str,
+    free_text: str | None = None,
+) -> InboxItem:
+    """W14.20 — user picked an option for a kind='question' inbox item.
+
+    Atomic flip the item → 'approved' (status reuse), records the choice
+    in decision_note, and writes a user_facts row so the agent's next
+    wake sees the answer in its snapshot.
+
+    free_text is optional extra context if user types a follow-up.
+    """
+    with store.connect() as conn:
+        # Verify item is a question + atomically flip pending → approved
+        existing = conn.execute(
+            "SELECT 1 FROM inbox_items WHERE id = ?", (item_id,),
+        ).fetchone()
+        if existing is None:
+            raise KeyError(f"inbox item {item_id} not found")
+
+        row = conn.execute(
+            "UPDATE inbox_items "
+            "SET status = 'approved', decided_at = julianday('now'), "
+            "    decision_note = ? "
+            "WHERE id = ? AND kind = 'question' AND status = 'pending' "
+            "RETURNING title, question_options_json",
+            (
+                f"chose:{option_id}" + (f" — {free_text[:200]}" if free_text else ""),
+                item_id,
+            ),
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"inbox item {item_id} either not a question or already answered"
+            )
+        question_text, options_json = row[0], row[1]
+        options = []
+        if options_json:
+            try:
+                options = json.loads(options_json) or []
+            except json.JSONDecodeError:
+                options = []
+
+    # Find the picked option's label so the user_facts row is human-readable
+    picked_label = option_id
+    for opt in options:
+        if opt.get("id") == option_id:
+            picked_label = opt.get("label", option_id)
+            break
+
+    # Write to user_facts so next agent wake sees it
+    try:
+        from . import user_facts as _uf
+        fact_text = f"用户对问题「{question_text}」选了「{picked_label}」"
+        if free_text:
+            fact_text += f"。补充: {free_text[:200]}"
+        _uf.add_fact(
+            store, fact_text=fact_text,
+            kind="preference",
+            source_skill="ask_user_question",
+            confidence=0.95,
+        )
+    except Exception as e:
+        log.debug("failed to write user_facts after question: %s", e)
+
+    fetched = get(store, item_id)
+    assert fetched is not None
+    return fetched
+
+
 def _row_to_item(row: sqlite3.Row) -> InboxItem:
     """Map an sqlite3.Row (from a SELECT using ``_INBOX_SELECT_COLS``) into
     a typed InboxItem. W14.9: switched from positional row[N] to keyed
@@ -274,6 +380,17 @@ def _row_to_item(row: sqlite3.Row) -> InboxItem:
             proposed_action = json.loads(proposed_action_json)
         except json.JSONDecodeError:
             proposed_action = None
+    # W14.20 — question_options for kind='question' items
+    question_options = None
+    try:
+        qo_json = row["question_options_json"]
+    except (KeyError, IndexError):
+        qo_json = None  # tolerate older selects that don't include the column
+    if qo_json:
+        try:
+            question_options = json.loads(qo_json)
+        except json.JSONDecodeError:
+            question_options = None
     payload_json = row["payload_json"]
     return InboxItem(
         id=row["id"],
@@ -289,4 +406,5 @@ def _row_to_item(row: sqlite3.Row) -> InboxItem:
         source_skill_name=row["source_skill_name"],
         source_skill_version=row["source_skill_version"],
         proposed_action=proposed_action,
+        question_options=question_options,
     )
