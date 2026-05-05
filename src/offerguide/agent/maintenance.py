@@ -311,9 +311,11 @@ def _run_corpus_refresh_one_company(
         store=ctx.store, llm=ctx.llm, search=search,
     )
     try:
-        result = collector.refresh_company(company=company, role_hint=role_hint)
+        # W14.7-fix: CorpusCollector exposes `collect`, not `refresh_company`.
+        # The previous name was inherited from an older draft and never existed.
+        result = collector.collect(company=company, role_hint=role_hint)
     except Exception as e:
-        return f"ERROR: refresh_company({company}) 失败: {e}"
+        return f"ERROR: collect({company}) 失败: {e}"
     return (
         f"OK: 公司={company} role={role_hint or '*'} "
         f"hits={result.hits_seen}, evaluated={result.hits_evaluated}, "
@@ -336,10 +338,13 @@ def _run_brief_for_company(ctx: MaintenanceCtx, company: str) -> str:
         return f"ERROR: refresh_brief({company}) 失败: {e}"
     if result is None:
         return f"OK: {company} 没有足够信号生成 brief (没有近期面经/JD)"
+    # W14.7-fix: refresh_brief returns BriefRow (wrapper); the CompanyBrief
+    # fields live under `result.brief`. Reading them off the wrapper directly
+    # would AttributeError on every successful regeneration.
     return (
-        f"OK: 公司={company} confidence={result.confidence:.2f} "
-        f"app_limit={result.current_app_limit} "
-        f"summary={result.summary[:120]}..."
+        f"OK: 公司={company} confidence={result.brief.confidence:.2f} "
+        f"app_limit={result.brief.current_app_limit} "
+        f"summary={result.brief.summary[:120]}..."
     )
 
 

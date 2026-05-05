@@ -140,7 +140,12 @@ class SkillRuntime:
                 pass
 
         user_msg = _render_inputs(spec, canonical)
-        input_hash = _hash_invocation(spec, canonical)
+        # W14.7-fix: hash with effective_version so seed/canary/live runs of
+        # the same inputs get distinct buckets — the hash represents the exact
+        # prompt the LLM saw, not the seed identity.
+        input_hash = _hash_invocation(
+            skill_name=spec.name, version=effective_version, inputs=canonical,
+        )
 
         t0 = time.monotonic()
         resp = self._llm.chat(
@@ -306,17 +311,28 @@ def _build_memory_query(spec: SkillSpec, inputs: dict[str, Any]) -> str:
     return " ".join(parts)[:800]
 
 
-def _hash_invocation(spec: SkillSpec, inputs: dict[str, Any]) -> str:
-    """Stable hash over (skill name, version, canonical inputs).
+def _hash_invocation(
+    *,
+    skill_name: str,
+    version: str,
+    inputs: dict[str, Any],
+) -> str:
+    """Stable hash over (skill name, effective version, canonical inputs).
 
     Inputs are stringified the same way `_render_inputs` does, so the hash key
     encodes exactly the prompt the LLM saw. Two invocations with byte-identical
     rendered prompts always hash equally; any change to a value (including a
     Pydantic model's field) flows through to a new hash.
+
+    W14.7-fix: takes ``version`` as a parameter rather than reading
+    ``spec.version``. The caller passes ``effective_version`` (which may be a
+    canary/live variant chosen by the registry), so that two runs of the same
+    inputs against different prompt variants hash differently — preserving the
+    contract that the hash represents the exact prompt the LLM saw.
     """
     payload = {
-        "name": spec.name,
-        "version": spec.version,
+        "name": skill_name,
+        "version": version,
         "inputs": {k: _stringify(v) for k, v in inputs.items()},
     }
     return hashlib.sha256(

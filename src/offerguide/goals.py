@@ -284,18 +284,23 @@ def write_self_observation(
     valid_for_days: int | None = None,
 ) -> int:
     """Agent writes a note about its own behavior pattern. Future runs see it."""
-    valid_until_clause = ""
     params: list = [observation, pattern_kind, json.dumps(evidence or {}, ensure_ascii=False)]
+    # W14.7-fix: previous version used backslash-escaped quotes inside an
+    # f-string (`{', julianday(\"now\") + ?'}`), which is a Python 3.12+
+    # feature (PEP 701). pyproject targets py3.11, so this raised SyntaxError
+    # at import time on the declared min version. Lift the conditional pieces
+    # into named vars to keep the SQL string a plain (non-f) literal.
+    extra_col = ", valid_until" if valid_for_days is not None else ""
+    extra_val = ", julianday('now') + ?" if valid_for_days is not None else ""
     if valid_for_days is not None:
-        valid_until_clause = ", valid_until = julianday('now') + ?"
         params.append(int(valid_for_days))
+    sql = (
+        "INSERT INTO agent_self_observations("
+        "  observation, pattern_kind, evidence_json" + extra_col + ") "
+        "VALUES (?, ?, ?" + extra_val + ")"
+    )
     with store.connect() as conn:
-        cur = conn.execute(
-            f"INSERT INTO agent_self_observations("
-            f"  observation, pattern_kind, evidence_json{', valid_until' if valid_for_days else ''}"
-            f") VALUES (?, ?, ?{', julianday(\"now\") + ?' if valid_for_days else ''})",
-            params,
-        )
+        cur = conn.execute(sql, params)
         return int(cur.lastrowid or 0)
 
 

@@ -200,7 +200,14 @@ def create_app(
                 max_iterations=6, critic_enabled=True,
                 notifier=notifier,
             )
-            result = agent.run(
+            # W14.7-fix: previously this was a blocking sync call inside an
+            # async handler, freezing the entire uvicorn event loop for the
+            # 10-30s the agent ran (matching the front-end's "agent 思考中"
+            # caption). The /api/agent/stream sibling already offloads via
+            # asyncio.to_thread; do the same here.
+            import asyncio
+            result = await asyncio.to_thread(
+                agent.run,
                 goal=(
                     "用户刚打开 home 页, 想看你对当前求职状况的评估。"
                     "看 snapshot, 给一段诚实的当下情况评估 (做了啥 / 待办优先级 / 有没有该提醒的事)。"

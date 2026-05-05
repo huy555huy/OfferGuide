@@ -1203,11 +1203,15 @@ class AgentLoop:
                 inject_long_term_memory=True,
             )
             # Track which skill_runs were created during the trajectory
-            # so the post-critique signal-writer can attribute scores correctly
+            # so the post-critique signal-writer can attribute scores correctly.
+            # W14.7-fix: must use result.skill_version (the version that ACTUALLY
+            # ran — could be a canary/live variant) not spec.version (always seed).
+            # Otherwise canary/live feedback is mis-attributed to the seed and
+            # fitness/promote/compare_versions all see corrupted data.
             if skill_invocations is not None:
                 skill_invocations[tc.id] = {
                     "skill_name": spec.name,
-                    "skill_version": spec.version,
+                    "skill_version": result.skill_version,
                     "skill_run_id": result.skill_run_id,
                 }
             return result.raw_text or "(SKILL returned empty content)"
