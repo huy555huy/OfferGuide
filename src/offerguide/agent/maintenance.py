@@ -224,12 +224,37 @@ def execute_maintenance_tool(name: str, arguments: dict[str, Any], ctx: Maintena
     # unless the agent actually calls one of these tools.
     try:
         if name == "discover_new_jobs":
-            return _run_job_finder_subagent(ctx)
+            # W14.19: record this run so Mission Control shows it
+            try:
+                out = _run_job_finder_subagent(ctx)
+                _record_maintenance_daemon_run(
+                    ctx.store, "discover_new_jobs", "ok",
+                    summary={"output": out[:400]},
+                )
+                return out
+            except Exception as e:
+                _record_maintenance_daemon_run(
+                    ctx.store, "discover_new_jobs", "error",
+                    error_text=str(e)[:500],
+                )
+                raise
         if name == "score_unscored_jobs":
             limit = _safe_int(arguments.get("limit"), default=5)
-            return _run_with_job_context(
-                ctx, _import_score_jobs_run(), limit=limit,
-            )
+            try:
+                out = _run_with_job_context(
+                    ctx, _import_score_jobs_run(), limit=limit,
+                )
+                _record_maintenance_daemon_run(
+                    ctx.store, "score_unscored_jobs", "ok",
+                    summary={"output": out[:400], "limit": limit},
+                )
+                return out
+            except Exception as e:
+                _record_maintenance_daemon_run(
+                    ctx.store, "score_unscored_jobs", "error",
+                    error_text=str(e)[:500],
+                )
+                raise
         if name == "enrich_thin_jds":
             max_jobs = _safe_int(arguments.get("max_jobs"), default=10)
             return _run_with_job_context(
@@ -277,6 +302,32 @@ def _import_score_jobs_run():
     decides 'now is a good time to clean up unscored jobs'."""
     from ..autonomous.jobs import auto_score_jobs
     return auto_score_jobs.run
+
+
+def _record_maintenance_daemon_run(
+    store, job_name: str, status: str, summary: dict | None = None,
+    error_text: str | None = None,
+) -> None:
+    """W14.19: write a daemon_runs row when central agent calls a
+    maintenance tool. Without this, the home Mission Control card for
+    that daemon shows 'never run' even when the agent really called it
+    multiple times — only the wake_agent + manual-trigger paths wrote
+    daemon_runs before. This closes that gap so users see real activity."""
+    try:
+        import json as _json
+        with store.connect() as conn:
+            conn.execute(
+                "INSERT INTO daemon_runs(job_name, status, ended_at, "
+                "  summary_json, error_text) "
+                "VALUES (?, ?, julianday('now'), ?, ?)",
+                (
+                    job_name, status,
+                    _json.dumps(summary or {}, ensure_ascii=False, default=str)[:4000],
+                    (error_text or None),
+                ),
+            )
+    except Exception:
+        log.debug("maintenance daemon_runs write failed (non-fatal)", exc_info=True)
 
 
 def _run_job_finder_subagent(ctx: MaintenanceCtx) -> str:

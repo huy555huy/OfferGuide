@@ -241,18 +241,33 @@ def create_app(
                     "schedule": "由中央 agent 自主决定 (无独立 cron)",
                 },
             ]
+            # W14.19 — alias-aware lookup. The daemon_runs table has
+            # historical rows under the OLD canonical names ("discover_jobs_via_search"
+            # / "auto_score_new_jobs") from when those were independent crons,
+            # plus the wake_agent → maintenance tool path that may write under
+            # either old OR new names depending on which dispatch wrote it.
+            # Without alias-aware query Mission Control shows "从未跑过" even
+            # when the daemon really ran (W14.18 → user thought "失败了").
+            DAEMON_NAME_ALIASES = {
+                "discover_new_jobs": ("discover_new_jobs", "discover_jobs_via_search"),
+                "score_unscored_jobs": ("score_unscored_jobs", "auto_score_new_jobs"),
+                "wake_agent": ("wake_agent",),
+            }
             daemon_status = []
             for spec in daemon_specs:
+                names = DAEMON_NAME_ALIASES.get(spec["name"], (spec["name"],))
+                placeholders = ",".join("?" * len(names))
                 last_row = conn.execute(
-                    "SELECT id, started_at, ended_at, status, summary_json, error_text "
-                    "FROM daemon_runs WHERE job_name = ? "
-                    "ORDER BY id DESC LIMIT 1",
-                    (spec["name"],),
+                    f"SELECT id, started_at, ended_at, status, summary_json, error_text "
+                    f"FROM daemon_runs WHERE job_name IN ({placeholders}) "
+                    f"ORDER BY id DESC LIMIT 1",
+                    names,
                 ).fetchone()
                 runs_24h = conn.execute(
-                    "SELECT COUNT(*) FROM daemon_runs "
-                    "WHERE job_name = ? AND started_at >= julianday('now') - 1",
-                    (spec["name"],),
+                    f"SELECT COUNT(*) FROM daemon_runs "
+                    f"WHERE job_name IN ({placeholders}) "
+                    f"  AND started_at >= julianday('now') - 1",
+                    names,
                 ).fetchone()[0]
                 last = None
                 if last_row:
