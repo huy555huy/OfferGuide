@@ -564,12 +564,27 @@ cron("0 */6 * * *") → wake_check  # 每 6h, agent 看看有没事，没事接�
 
 ## 14. 最终验证
 
+### 静态
 - ✅ src/ ruff: 0 errors
 - ✅ harness/ pyright: 0 errors
 - ✅ pytest: **780 passed + 12 skipped** (had 718 before W15; +62 new W15 tests, 0 failures)
 - ✅ Memory tool 6 动作 smoke test + path traversal 阻拦
 - ✅ /debug + home 心智窗口 渲染验证
 - ✅ Migration script idempotent, 检测 fresh DB 不报错
+
+### 真实 server end-to-end (2026-05-06)
+跑活的 server (uv run --extra ui python -m offerguide.ui.web), 用真 DeepSeek API:
+
+- ✅ 启动 → worldview/ 自动 bootstrap 6 个 markdown 文件 (MEMORY/candidate/tracked-jobs/upcoming-events/reflections/strategy)
+- ✅ Home: 心智窗口卡片展示 worldview MEMORY.md 前 60 行; chat 输入框; harness_runs 摘要 strip
+- ✅ /debug: 4 section 渲染 (Harness Runs / Scheduled Wakes / Harness Events / Daemon Runs)
+- ✅ POST /api/home/chat ("帮我看看现在的状态") → 200 OK
+- ✅ Harness loop 跑了 8 iter, $0.0835 cost, status=ok
+- ✅ Agent 自主调 memory tool 7 次 (view 每个 worldview 文件) — **真心智在 in-context 决策**, 不是 hardcoded plan
+- ✅ Agent 给出诚实评估: "worldview 是全新的，我不了解你"+ 列出系统事实 (日期 2026-05-06 周三, 校招阶段判断) + 主动问 3 个具体问题填 candidate.md
+- ✅ 重新进 home → harness_runs strip 真实展示这一次 wake (status=ok, 8 步, $0.0835)
+
+**关键观察**: agent 没瞎调 discover_jobs 找岗位 — 它先意识到"我不了解用户" → 优先 ask_user. 这正是 instructions.md 里"主动 vs 被动原则"在 in-context 起作用, 不是 if-else 编出来.
 
 ## 15. 给 GEPA / 后续工作的留白
 
@@ -578,3 +593,48 @@ cron("0 */6 * * *") → wake_check  # 每 6h, agent 看看有没事，没事接�
 - W14 central agent (agent/loop.py + maintenance.py) 仍存在（deprecated path），未删；后续可清
 
 **爆破半径实际**：1 个新模块 (harness/, 8 文件) + 2 个改文件 (scheduler.py, web.py) + 2 个新模板 (debug.html + home.html 修改) + 1 个迁移脚本 + 1 个新 tests 文件 (55 tests)。**没有破坏任何现有 tests（718 → 773 全 pass）。**
+
+---
+
+## 16. W15.12 — review 撞出 7 bug + 6 smell, 都修了
+
+正式 code review 后发现 7 个会在生产坏的 bug 和 6 个 design smell. 全部修了 + 加 13 个 regression test.
+
+### Bug 修复
+
+| # | 文件 | 问题 | 修复 |
+|---|---|---|---|
+| 1 | loop.py:223 | max_iterations 命中后 status='ok' 误导 telemetry | 加 STATUS_TRUNCATED, 按 finish_reason 分 status |
+| 2 | loop.py:175-197 | 模型同时返 content + tool_calls 时 final_text 丢失 | 每 iter 累积 resp.content 到 final_text_parts |
+| 3 | loop.py:148-225 | 无 try/finally — context mgmt / dispatch crash 让 harness_runs 永远 'running' | 整个 loop 包 try/finally, 异常路径走 'error' status |
+| 4 | tools.py:487 | paste:// URL 用 builtin hash() (process-randomized) → dedup 失效 | 改用 hashlib.sha256(raw).hexdigest()[:16] |
+| 5 | tools.py:430 + job_finder_agent.py | discover_jobs sub-agent cost 不进 telemetry — 一次 sweep $0.10-0.20 漏记 | JobFinderResult 加 total_cost_usd; HarnessDeps.extra_cost_usd 流回主 harness_runs |
+| 6 | feedback.py:91 | notes JSON 截断到 2000 字会切到字符串中间 → 无效 JSON → GEPA 崩 | 先按 user_text/metadata 内部缩, 保 dump 出来一定 valid |
+| 7 | scheduler.py:362 | pt.cleanup() 不在 finally — harness 失败时 scheduled_wake 永不 fire → 无限循环 | cleanup 移到 finally, 失败也跑 |
+
+### Smell 修复
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | Agent 第一次 wake 浪费 7 iter view 每个 worldview 文件 — auto-load 没告诉 agent 其它文件状态 | auto_load 加文件索引 (每文件 1 行: 行数 + 第一个 heading); instructions.md 明确"不要每次 wake 都 view 所有文件" |
+| 2 | compaction LLM call 没 timeout 防御 | 加 broader Exception catch, 失败走 noop 不卡死 |
+| 3 | SKILL 输出 JSON 解析失败时返 "{}" 让 agent 蒙圈 | fallback 显示 raw_text 前 500 字让 agent 自纠 |
+| 5 | build_deps 静默吞 search/skills/profile/notifier 初始化错 | 全部 log.warning, 不静默 |
+| 6 | loop.py 死代码 _ = tools / _ = _dt | 砍了 |
+| 8 | memory view 大文件不截断 | 默认 500 行截断 + 提示 view_range 看更多 |
+
+### 验证
+
+- ✅ src/ ruff: 0 errors
+- ✅ harness/ pyright: 0 errors
+- ✅ pytest: **780 → 793 passed + 12 skipped** (+13 review-fix tests, 0 既有失败)
+
+### 关键 review 教训
+
+我 W15 一边写一边觉得"测试都过了应该没事". 这次正式 review 才发现：测试 pass ≠ 代码对.
+- Bug 1 测试不会失败因为没人查 status='ok' 是不是该是 'truncated'
+- Bug 5 测试不会失败因为我们 stub LLM 永远 cost=0
+- Bug 3 测试不会失败因为没人故意制造 ctx mgmt 异常
+- Bug 7 测试不会失败因为没人故意让 harness_run 抛错
+
+**面试如果被问"你怎么知道你的代码没问题"**: "代码 review 是和测试不同的活. 测试验证我以为该测的, review 验证我没想到该测的. 这次发现 7 个 bug 都不在原 test set 覆盖范围."

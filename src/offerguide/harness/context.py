@@ -232,6 +232,13 @@ class ContextManager:
 
         # Build a summarization prompt. We render middle as plain text.
         rendered = _render_messages_for_summary(middle)
+        # Smell 2 fix (W15.12 review): pass extra={"timeout": ...} where
+        # supported. LLMClient.chat doesn't expose a per-call timeout
+        # parameter directly — protection here is defense in depth via
+        # the underlying httpx client's default 180s. If compaction
+        # crashes for any reason (timeout, network, rate limit), we
+        # fall back to NOT compacting and let the next iteration's
+        # tool-result clearing handle headroom.
         try:
             resp = self.llm.chat(
                 messages=[
@@ -242,6 +249,11 @@ class ContextManager:
             )
         except LLMError as e:
             log.warning("compaction LLM call failed: %s", e)
+            return messages, False
+        except Exception as e:
+            # Bug 3 cousin: compaction hang / unexpected crash should not
+            # take down the whole agent loop. Log and skip compaction.
+            log.exception("compaction crashed (non-LLMError): %s", e)
             return messages, False
 
         summary_text = resp.content.strip()

@@ -75,6 +75,9 @@ class FeedbackContext:
     signal_weight: float = 1.0
 
 
+_NOTES_MAX_LEN = 2000
+
+
 def record(store: Store, fb: FeedbackContext) -> int:
     """Record a feedback signal. Returns evolution_signals.id.
 
@@ -83,12 +86,11 @@ def record(store: Store, fb: FeedbackContext) -> int:
     GEPA will skip these (no SKILL to evolve), but the row stays for audit.
     """
     skill_name, skill_version = _lookup_skill_meta(store, fb.skill_run_id)
-    notes_payload = {
-        "user_text": fb.user_text,
-        "metadata": fb.metadata or {},
-        "related_inbox_id": fb.related_inbox_id,
-    }
-    notes_text = _json.dumps(notes_payload, ensure_ascii=False)[:2000]
+    notes_text = _build_notes_json(
+        user_text=fb.user_text,
+        metadata=fb.metadata,
+        related_inbox_id=fb.related_inbox_id,
+    )
 
     with store.connect() as conn:
         cur = conn.execute(
@@ -108,6 +110,38 @@ def record(store: Store, fb: FeedbackContext) -> int:
         skill_name, skill_version, fb.skill_run_id, fb.related_inbox_id,
     )
     return sig_id
+
+
+def _build_notes_json(
+    *,
+    user_text: str | None,
+    metadata: dict[str, Any] | None,
+    related_inbox_id: int | None,
+) -> str:
+    """Produce a notes JSON string guaranteed to be valid + ≤ _NOTES_MAX_LEN.
+
+    Bug 6 fix (W15.12 review): the old impl did
+    ``json.dumps(payload)[:2000]`` which truncates mid-string when
+    user_text/metadata is long → invalid JSON → GEPA evolver crashes
+    reading the row. Now we shrink the inner fields BEFORE serializing.
+    """
+    payload: dict[str, Any] = {
+        "user_text": (user_text or "")[:1200] if user_text else None,
+        "metadata": metadata or {},
+        "related_inbox_id": related_inbox_id,
+    }
+    encoded = _json.dumps(payload, ensure_ascii=False)
+    if len(encoded) <= _NOTES_MAX_LEN:
+        return encoded
+    # Still too long — strip metadata down to a marker
+    payload["metadata"] = {"_truncated": True, "_orig_keys": list((metadata or {}).keys())}
+    encoded = _json.dumps(payload, ensure_ascii=False)
+    if len(encoded) <= _NOTES_MAX_LEN:
+        return encoded
+    # Last resort: drop user_text too
+    payload["user_text"] = None
+    payload["_dropped"] = "user_text and metadata for length"
+    return _json.dumps(payload, ensure_ascii=False)[:_NOTES_MAX_LEN]
 
 
 def _lookup_skill_meta(

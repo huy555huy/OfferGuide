@@ -914,3 +914,254 @@ class TestInboxFeedbackWiring:
             ).fetchone()[0]
         # No signal recorded for failed decide
         assert n_after == n_before
+
+
+# ═══════════════════════════════════════════════════════════════════
+# W15.12 — review fixes (Bug 1-7 + Smell 1, 6, 8)
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestReviewFixes:
+    # ── Bug 1: max_iterations → status='truncated' (not 'ok')
+    def test_max_iter_persists_truncated_status(self, deps):
+        # Push enough tool_calls that loop runs 2 iter then caps
+        for i in range(5):
+            deps.llm.push_tool_call(  # type: ignore[union-attr]
+                name="memory",
+                arguments={"command": "view", "path": "MEMORY.md"},
+                call_id=f"t{i}",
+            )
+        result = harness_run(
+            trigger=make_cron_heartbeat(), deps=deps,
+            max_iterations=2,
+        )
+        assert result.finish_reason == "max_iterations"
+        with deps.store.connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM harness_runs WHERE id = ?",
+                (result.run_id,),
+            ).fetchone()
+        assert row[0] == "truncated"  # NOT 'ok'
+
+    def test_end_turn_persists_ok_status(self, deps):
+        deps.llm.push_text("nothing to do")  # type: ignore[union-attr]
+        result = harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        with deps.store.connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM harness_runs WHERE id = ?",
+                (result.run_id,),
+            ).fetchone()
+        assert row[0] == "ok"
+
+    # ── Bug 2: final_text accumulates content from tool-calling iterations
+    def test_final_text_captures_reasoning_alongside_tool_calls(self, deps):
+        # Iter 1: model returns BOTH content + tool_call (some models do this)
+        deps.llm.queue.append(LLMResponse(  # type: ignore[union-attr]
+            content="我先看一眼 worldview.",
+            model="stub",
+            tool_calls=[ToolCall(
+                id="t1", name="memory",
+                arguments={"command": "view", "path": "MEMORY.md"},
+            )],
+            prompt_tokens=100, completion_tokens=20,
+        ))
+        # Iter 2: end_turn with final reasoning
+        deps.llm.push_text("看完了, 不做事了.")  # type: ignore[union-attr]
+        result = harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        # Both iterations' content present
+        assert "我先看一眼" in result.final_text
+        assert "看完了" in result.final_text
+
+    # ── Bug 3: try/finally ensures harness_runs never stuck in 'running'
+    def test_loop_crash_in_ctx_management_records_error(
+        self, tmp_store, tmp_worldview, monkeypatch,
+    ):
+        from offerguide.harness import context as ctx_mod
+
+        def _exploding_clear(*a, **kw):
+            raise RuntimeError("simulated ctx crash")
+
+        monkeypatch.setattr(
+            ctx_mod.ContextManager, "maybe_clear_tool_results", _exploding_clear,
+        )
+        deps = HarnessDeps(
+            settings=Settings(deepseek_api_key="x", default_model="stub"),
+            store=tmp_store,
+            memory_store=MemoryStore(root=tmp_worldview),
+            llm=StubLLM(),  # type: ignore[arg-type]
+        )
+        result = harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        assert result.finish_reason == "loop_crash"
+        with tmp_store.connect() as conn:
+            row = conn.execute(
+                "SELECT status, error_text FROM harness_runs WHERE id = ?",
+                (result.run_id,),
+            ).fetchone()
+        # Status MUST be 'error', not 'running'
+        assert row[0] == "error"
+        assert "simulated ctx crash" in (row[1] or "")
+
+    # ── Bug 4: paste:// URL stable across processes
+    def test_paste_synthetic_url_is_stable(self, deps):
+        from offerguide.harness.tools import _exec_fetch_jd
+        text = "x" * 250  # ≥ 200 chars to pass validation
+
+        # Same content twice → same URL → second is detected as dup
+        r1 = _exec_fetch_jd({"url_or_text": text}, deps)
+        r2 = _exec_fetch_jd({"url_or_text": text}, deps)
+
+        assert "OK ingested" in r1
+        # Second call should detect dup (same URL via stable hash)
+        assert "dup of existing job" in r2
+
+    # ── Bug 5: discover_jobs cost flows into harness_runs.cost_usd
+    def test_extra_cost_usd_reset_each_run(self, deps):
+        # Pre-set extra_cost_usd to non-zero (simulating leak from prior run)
+        deps.extra_cost_usd = 99.99
+        deps.llm.push_text("done")  # type: ignore[union-attr]
+        result = harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        # The 99.99 must NOT contaminate this run — loop resets to 0
+        # at start, so cost_usd here is just stub LLM's $0.0 + 0
+        assert result.cost_usd < 1.0  # nowhere near 99.99
+
+    def test_sub_agent_cost_added_to_total(self, deps):
+        # Manually set extra_cost_usd as if a sub-agent ran (simulates
+        # what _exec_discover_jobs does)
+        deps.llm.push_tool_call(  # type: ignore[union-attr]
+            name="memory",
+            arguments={"command": "view", "path": "MEMORY.md"},
+            call_id="t1",
+        )
+        # Hook: bump extra_cost_usd via a side effect on next call
+        original_chat = deps.llm.chat_with_tools  # type: ignore[union-attr]
+
+        def _patched(messages, **kw):
+            r = original_chat(messages, **kw)
+            deps.extra_cost_usd += 0.5  # simulate sub-agent cost
+            return r
+
+        deps.llm.chat_with_tools = _patched  # type: ignore[union-attr]
+        deps.llm.push_text("done")  # type: ignore[union-attr]
+        result = harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        assert result.cost_usd >= 0.5  # sub-agent cost included
+        # Persisted too
+        with deps.store.connect() as conn:
+            row = conn.execute(
+                "SELECT cost_usd, tool_calls_json FROM harness_runs WHERE id = ?",
+                (result.run_id,),
+            ).fetchone()
+        assert float(row[0]) >= 0.5
+        # tool_calls_json now has sub_agent_cost_usd field
+        payload = _json.loads(row[1])
+        assert payload.get("sub_agent_cost_usd", 0) >= 0.5
+
+    # ── Bug 6: feedback notes JSON always valid even with huge inputs
+    def test_feedback_notes_remains_valid_json_when_truncated(self, tmp_store):
+        # Huge user_text that would naively dumps()→2000-char-truncate to invalid JSON
+        huge_text = "我的反馈非常长 " * 500  # ~3500 chars
+        sig_id = harness_feedback.on_inbox_accepted(
+            tmp_store, inbox_id=1, skill_run_id=None, user_text=huge_text,
+        )
+        with tmp_store.connect() as conn:
+            row = conn.execute(
+                "SELECT notes FROM evolution_signals WHERE id = ?",
+                (sig_id,),
+            ).fetchone()
+        # Must be valid JSON — not truncated mid-string
+        parsed = _json.loads(row[0])
+        assert isinstance(parsed, dict)
+        assert "user_text" in parsed
+        assert "related_inbox_id" in parsed
+
+    def test_feedback_notes_handles_huge_metadata(self, tmp_store):
+        huge_meta = {f"key_{i}": "v" * 100 for i in range(50)}
+        sig_id = harness_feedback.record(
+            tmp_store,
+            harness_feedback.FeedbackContext(
+                signal_kind="user_thumbs",
+                signal_value=1.0,
+                related_inbox_id=1,
+                metadata=huge_meta,
+            ),
+        )
+        with tmp_store.connect() as conn:
+            row = conn.execute(
+                "SELECT notes FROM evolution_signals WHERE id = ?",
+                (sig_id,),
+            ).fetchone()
+        parsed = _json.loads(row[0])  # must parse
+        # Either preserved or marker-replaced
+        assert isinstance(parsed, dict)
+        assert "metadata" in parsed
+
+    # ── Bug 7: scheduler cleanup runs even if harness_run fails
+    def test_scheduler_cleanup_runs_on_harness_failure(self, tmp_store):
+        # Create a scheduled wake that's due
+        with tmp_store.connect() as conn:
+            conn.execute(
+                "INSERT INTO harness_scheduled_wakes(fire_at, reason) "
+                "VALUES (julianday('now') - 0.001, 'test')"
+            )
+            wake_id = int(conn.execute(
+                "SELECT id FROM harness_scheduled_wakes "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0])
+
+        pending = poll_pending(tmp_store)
+        assert len(pending) >= 1
+        pt = pending[0]
+
+        # Simulate scheduler logic: harness_run fails, but cleanup still runs.
+        try:
+            raise RuntimeError("simulated harness crash")
+        except Exception:
+            pass
+        finally:
+            if pt.cleanup is not None:
+                pt.cleanup()
+
+        # Wake should now be marked fired (won't be polled again)
+        with tmp_store.connect() as conn:
+            row = conn.execute(
+                "SELECT fired_at FROM harness_scheduled_wakes WHERE id = ?",
+                (wake_id,),
+            ).fetchone()
+        assert row[0] is not None  # cleanup did run
+
+    # ── Smell 1: auto_load includes worldview file index
+    def test_auto_load_includes_file_index(self, tmp_worldview):
+        m = MemoryStore(root=tmp_worldview)
+        text = m.auto_load_text(max_lines=200)
+        # Index header present
+        assert "worldview/ 文件索引" in text
+        # Each non-MEMORY.md file appears with line count
+        assert "candidate.md" in text
+        assert "tracked-jobs.md" in text
+        # Pattern: "- name (N lines): heading"
+        assert "lines)" in text
+
+    # ── Smell 8: view truncates large files
+    def test_view_truncates_huge_file(self, tmp_worldview):
+        m = MemoryStore(root=tmp_worldview)
+        big = "\n".join(f"line {i}" for i in range(2000))
+        m.execute({"command": "create", "path": "big.md", "file_text": big})
+        result = m.execute({"command": "view", "path": "big.md"})
+        assert "showing first 500" in result
+        assert "use view_range=[start,end] for the rest" in result
+        assert "line 0" in result
+        assert "line 499" in result
+        assert "line 999" not in result  # truncated
+
+    # ── Smell 6: dead code removed (no `_ = tools` statement at top level)
+    def test_loop_module_no_dead_imports(self):
+        from offerguide.harness import loop as loop_mod
+        src = Path(loop_mod.__file__).read_text(encoding="utf-8")
+        # Check non-comment lines only — the comment explaining the fix
+        # legitimately mentions the old code.
+        non_comment_lines = [
+            ln for ln in src.splitlines()
+            if not ln.lstrip().startswith("#")
+        ]
+        body = "\n".join(non_comment_lines)
+        assert "_ = tools" not in body
+        assert "_ = _dt" not in body

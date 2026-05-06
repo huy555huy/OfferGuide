@@ -34,6 +34,13 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+# Smell 8 fix: default view truncation limit. Big enough for typical
+# worldview files (under 200 lines each), small enough that a runaway
+# file (e.g. agent appended to reflections.md without bound) doesn't
+# torpedo a single context.
+DEFAULT_VIEW_LIMIT = 500
+
+
 # Bootstrap files written when worldview/ is empty. The agent owns these
 # files after creation — feel free to restructure / add new files.
 _BOOTSTRAP_FILES: dict[str, str] = {
@@ -210,11 +217,19 @@ class MemoryStore:
     # ── Cross-wake helpers (used by Context assembly) ────────────────
 
     def auto_load_text(self, max_lines: int = 200) -> str:
-        """Return first ``max_lines`` of MEMORY.md as a single string.
+        """Return first ``max_lines`` of MEMORY.md + worldview file index.
 
         Empty string if MEMORY.md is missing. Injected into the system
         context every wake so the agent always sees its 'home page'
         without needing to call view explicitly.
+
+        Smell 1 fix (W15.12 review): also append a one-line-per-file
+        worldview index showing line count + first non-empty header. With
+        just MEMORY.md auto-loaded, the agent didn't know if other files
+        had content or were empty placeholders, so it would defensively
+        ``view`` every file every wake (~6 wasted iter). The index lets
+        agent skip a ``view`` when the heading hasn't changed since
+        bootstrap.
         """
         memory_md = self.root / "MEMORY.md"
         if not memory_md.exists():
@@ -227,6 +242,15 @@ class MemoryStore:
         kept = lines[:max_lines]
         if len(lines) > max_lines:
             kept.append(f"... (truncated; {len(lines) - max_lines} more lines)")
+
+        # Append index of other worldview files
+        index = self._build_file_index(skip="MEMORY.md")
+        if index:
+            kept.append("")
+            kept.append("---")
+            kept.append("# worldview/ 文件索引 (其它文件状态)")
+            kept.extend(index)
+
         return "\n".join(kept)
 
     def list_files(self) -> list[str]:
@@ -235,6 +259,32 @@ class MemoryStore:
             p.relative_to(self.root).as_posix()
             for p in self.root.rglob("*.md")
         )
+
+    def _build_file_index(self, *, skip: str | None = None) -> list[str]:
+        """One line per non-skipped .md file: ``- name (N lines): first heading``.
+
+        Helps agent decide if a file is empty (still bootstrap text), has
+        agent-written content, or recently changed — without `view`-ing.
+        """
+        out: list[str] = []
+        for fname in self.list_files():
+            if fname == skip:
+                continue
+            try:
+                content = (self.root / fname).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            file_lines = content.splitlines()
+            n = len(file_lines)
+            # First non-empty line that's a heading or content marker
+            first = ""
+            for line in file_lines:
+                stripped = line.strip()
+                if stripped:
+                    first = stripped[:80]
+                    break
+            out.append(f"- {fname} ({n} lines): {first}")
+        return out
 
     # ── Internals: command implementations ──────────────────────────
 
@@ -254,6 +304,7 @@ class MemoryStore:
             return f"OK dir {path_str}:\n" + "\n".join(f"  - {n}" for n in inner)
 
         text = full.read_text(encoding="utf-8")
+        all_lines = text.splitlines()
         view_range = args.get("view_range")
         if view_range:
             if (
@@ -263,15 +314,26 @@ class MemoryStore:
             ):
                 return "ERROR: view_range must be [start, end] integers"
             start, end = view_range[0], view_range[1]
-            lines = text.splitlines()
             # 1-indexed; -1 means end-of-file
             start_idx = max(0, start - 1)
-            end_idx = len(lines) if end == -1 else min(len(lines), end)
-            sliced = lines[start_idx:end_idx]
+            end_idx = len(all_lines) if end == -1 else min(len(all_lines), end)
+            sliced = all_lines[start_idx:end_idx]
             numbered = _number_lines(sliced, start=start_idx + 1)
             return f"OK {path_str} (lines {start}-{end}):\n{numbered}"
-        numbered = _number_lines(text.splitlines(), start=1)
-        return f"OK {path_str} ({len(text.splitlines())} lines):\n{numbered}"
+
+        # Smell 8 fix (W15.12 review): default view truncates large files
+        # to DEFAULT_VIEW_LIMIT lines so a single command doesn't blow up
+        # the model's context. Agent can use view_range=[1,N] to override.
+        n = len(all_lines)
+        if n > DEFAULT_VIEW_LIMIT:
+            sliced = all_lines[:DEFAULT_VIEW_LIMIT]
+            numbered = _number_lines(sliced, start=1)
+            return (
+                f"OK {path_str} ({n} lines, showing first {DEFAULT_VIEW_LIMIT} — "
+                f"use view_range=[start,end] for the rest):\n{numbered}"
+            )
+        numbered = _number_lines(all_lines, start=1)
+        return f"OK {path_str} ({n} lines):\n{numbered}"
 
     def _cmd_create(self, args: dict[str, Any]) -> str:
         path_str = self._require_path(args)

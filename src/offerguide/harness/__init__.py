@@ -30,6 +30,7 @@ Entry points:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,8 @@ from .triggers import (
     make_user_input_trigger,
     poll_pending,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def default_worldview_dir(settings: Settings | None = None) -> Path:
@@ -97,12 +100,15 @@ def build_deps(
             default_model=settings.default_model,
         )
 
+    # Smell 5 fix (W15.12 review): log init failures instead of silent
+    # except-pass. Without these warnings users see "tool requires X" errors
+    # at runtime with no clue WHY init failed (network / missing dep / ...).
     search: Any | None = None
     try:
         from ..agentic.search import build_default_search
         search = build_default_search()
-    except Exception:
-        pass
+    except Exception as e:
+        _log.warning("harness.build_deps: search backend init failed: %s", e)
 
     runtime = None
     skills: list[Any] = []
@@ -112,7 +118,8 @@ def build_deps(
         try:
             skills_root = Path(__file__).parent.parent / "skills"
             skills = list(discover_skills(skills_root))
-        except Exception:
+        except Exception as e:
+            _log.warning("harness.build_deps: skill discovery failed: %s", e)
             skills = []
 
     profile_text: str | None = None
@@ -122,13 +129,15 @@ def build_deps(
             from ..profile import load_resume_pdf
             prof = load_resume_pdf(resume_path)
             profile_text = prof.raw_resume_text
-        except Exception:
+        except Exception as e:
+            _log.warning("harness.build_deps: resume load failed: %s", e)
             profile_text = None
 
-    import contextlib
     notifier = None
-    with contextlib.suppress(Exception):
+    try:
         notifier = make_notifier(settings)
+    except Exception as e:
+        _log.warning("harness.build_deps: notifier init failed: %s", e)
 
     return HarnessDeps(
         settings=settings,

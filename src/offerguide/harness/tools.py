@@ -66,6 +66,12 @@ class HarnessDeps:
     current_run_id: int | None = None
     """Set by the loop; tools record references back to the run."""
 
+    extra_cost_usd: float = 0.0
+    """Sub-agent / external LLM cost sink (W15.12 Bug 5 fix). Tools that
+    drive their own LLM calls (e.g. ``discover_jobs`` → JobFinderAgent)
+    accumulate cost here so the master loop can include it in
+    ``harness_runs.cost_usd``. Reset to 0 at the start of each run."""
+
     def find_skill(self, name: str) -> SkillSpec | None:
         for s in self.skills:
             if s.name == name:
@@ -433,8 +439,12 @@ def _exec_discover_jobs(args: dict[str, Any], deps: HarnessDeps) -> str:
         result = agent.run(north_star=criteria)
     finally:
         agent.close()
+    # Bug 5 fix: propagate sub-agent cost to harness telemetry. Without this,
+    # 5 discover_jobs calls × ~$0.15 = $0.75 invisible in harness_runs.
+    sub_cost = float(getattr(result, "total_cost_usd", 0.0) or 0.0)
+    deps.extra_cost_usd += sub_cost
     summary = (
-        f"OK discover_jobs done in {result.iterations} iters. "
+        f"OK discover_jobs done in {result.iterations} iters (sub-agent cost ${sub_cost:.4f}). "
         f"Inserted {result.inserted} new JDs (job_ids: {result.new_job_ids[:8]}). "
         f"Skipped {result.skipped_dup} dups. Finish: {result.finish_reason}"
     )
@@ -484,7 +494,12 @@ def _exec_fetch_jd(args: dict[str, Any], deps: HarnessDeps) -> str:
         # Text path: ingest with synthetic URL
         if len(raw) < 200:
             return f"ERROR: text too short ({len(raw)} chars) — paste full JD"
-        synth_url = f"paste://{abs(hash(raw)):x}"
+        # Bug 4 fix: hashlib.sha256 (stable across processes) instead of
+        # builtin hash() (Python 3.3+ randomizes per-process — same JD pasted
+        # twice in different runs gets different URL → dedup fails).
+        import hashlib as _hl
+        url_digest = _hl.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        synth_url = f"paste://{url_digest}"
         rj = RawJob(
             source="user_paste_text",
             url=synth_url,
@@ -525,7 +540,15 @@ def _exec_score_match(args: dict[str, Any], deps: HarnessDeps) -> str:
         "candidate_resume": deps.user_profile_text[:4000],
     }
     result = deps.runtime.invoke(spec, inputs)
-    parsed = result.parsed or {}
+    if result.parsed is None:
+        # Smell 3 fix: SKILL output failed JSON parse — show agent the raw
+        # text so it can self-correct (e.g. "model returned markdown code block")
+        return (
+            f"WARN score_match for job#{job_id}: SKILL output not valid JSON. "
+            f"Raw output (first 500 chars):\n{result.raw_text[:500]}\n"
+            f"(skill_run_id={result.skill_run_id})"
+        )
+    parsed = result.parsed
     return (
         f"OK score_match for job#{job_id} ({job.get('company')} · {job.get('title')}):\n"
         f"  score: {parsed.get('score', '?')}\n"
@@ -556,10 +579,15 @@ def _exec_tailor_advice(args: dict[str, Any], deps: HarnessDeps) -> str:
         "current_resume": deps.user_profile_text[:6000],
     }
     result = deps.runtime.invoke(spec, inputs)
-    parsed = result.parsed or {}
+    if result.parsed is None:
+        return (
+            f"WARN tailor_advice for job#{job_id}: SKILL output not valid JSON. "
+            f"Raw (first 500 chars):\n{result.raw_text[:500]}\n"
+            f"(skill_run_id={result.skill_run_id})"
+        )
     return (
         f"OK tailor_advice for job#{job_id}:\n"
-        f"  {_json.dumps(parsed, ensure_ascii=False, indent=2)[:1500]}\n"
+        f"  {_json.dumps(result.parsed, ensure_ascii=False, indent=2)[:1500]}\n"
         f"  (skill_run_id={result.skill_run_id})"
     )
 
@@ -584,10 +612,15 @@ def _exec_interview_prep(args: dict[str, Any], deps: HarnessDeps) -> str:
         "round": args.get("round", "未指定"),
     }
     result = deps.runtime.invoke(spec, inputs)
-    parsed = result.parsed or {}
+    if result.parsed is None:
+        return (
+            f"WARN interview_prep for job#{job_id}: SKILL output not valid JSON. "
+            f"Raw (first 500 chars):\n{result.raw_text[:500]}\n"
+            f"(skill_run_id={result.skill_run_id})"
+        )
     return (
         f"OK interview_prep for job#{job_id} (round: {inputs['round']}):\n"
-        f"  {_json.dumps(parsed, ensure_ascii=False, indent=2)[:2000]}\n"
+        f"  {_json.dumps(result.parsed, ensure_ascii=False, indent=2)[:2000]}\n"
         f"  (skill_run_id={result.skill_run_id})"
     )
 
@@ -622,10 +655,15 @@ def _exec_reflect_outcome(args: dict[str, Any], deps: HarnessDeps) -> str:
         "jd_text": job.get("raw_text", "")[:3000],
     }
     result = deps.runtime.invoke(spec, inputs)
-    parsed = result.parsed or {}
+    if result.parsed is None:
+        return (
+            f"WARN reflect_outcome for job#{job_id}: SKILL output not valid JSON. "
+            f"Raw (first 500 chars):\n{result.raw_text[:500]}\n"
+            f"(skill_run_id={result.skill_run_id}; event recorded)"
+        )
     return (
         f"OK reflect_outcome for job#{job_id} ({outcome}):\n"
-        f"  {_json.dumps(parsed, ensure_ascii=False, indent=2)[:1500]}\n"
+        f"  {_json.dumps(result.parsed, ensure_ascii=False, indent=2)[:1500]}\n"
         f"  (skill_run_id={result.skill_run_id}; event recorded)"
     )
 

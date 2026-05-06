@@ -360,20 +360,37 @@ def build_agent_wake_scheduler(
         runs: list[dict[str, Any]] = []
         if pending:
             for pt in pending[:5]:  # cap per-tick to bound cost
+                # Bug 7 fix: cleanup MUST run regardless of harness_run
+                # success/failure. Otherwise a scheduled wake that reliably
+                # crashes the agent gets re-polled forever (infinite cost
+                # loop). We track per-row failures via daemon_runs telemetry.
+                run_ok = False
+                run_summary: dict[str, Any] = {"source": pt.source}
                 try:
                     res = harness_run(trigger=pt.trigger_event, deps=deps)
-                    runs.append({
-                        "source": pt.source,
+                    run_ok = True
+                    run_summary.update({
                         "run_id": res.run_id,
                         "iterations": res.iterations,
                         "finish": res.finish_reason,
                         "cost_usd": round(res.cost_usd, 4),
                     })
-                    if pt.cleanup is not None:
-                        pt.cleanup()
                 except Exception as e:
                     log.exception("pending trigger failed: %s", e)
-                    runs.append({"source": pt.source, "error": str(e)[:200]})
+                    run_summary["error"] = str(e)[:200]
+                finally:
+                    runs.append(run_summary)
+                    # Always run cleanup (e.g. mark scheduled_wake fired_at)
+                    # so the same trigger doesn't re-fire next tick. If
+                    # cleanup itself fails, log + move on.
+                    if pt.cleanup is not None:
+                        try:
+                            pt.cleanup()
+                        except Exception:
+                            log.exception(
+                                "cleanup failed for source=%s (run_ok=%s)",
+                                pt.source, run_ok,
+                            )
         else:
             # Heartbeat fallback: agent looks around, no-ops if nothing to do
             res = harness_run(

@@ -167,6 +167,11 @@ class JobFinderResult:
     search_queries: list[str] = field(default_factory=list)
     finish_reason: str = ""
     notes: list[str] = field(default_factory=list)
+    total_cost_usd: float = 0.0
+    """W15.12 review fix (Bug 5): total LLM cost burned by this sweep.
+    The harness tools layer reads this and accumulates into the parent
+    harness_runs.cost_usd so /debug shows true total cost (sub-agent
+    + main agent), not just the main agent's tool-decision tokens."""
 
 
 class JobFinderAgent:
@@ -207,6 +212,7 @@ class JobFinderAgent:
         self._inserted_ids = []
         self._skipped_dup = 0
         self._notes = []
+        total_cost = 0.0  # W15.12 Bug 5: track cost so harness can include it
 
         messages: list[dict[str, Any]] = [
             {"role": "system",
@@ -228,6 +234,8 @@ class JobFinderAgent:
                 self._notes.append(f"iter {iteration} LLM error: {e}")
                 finish_reason = f"llm_error: {e}"
                 break
+
+            total_cost += resp.cost_usd or 0.0
 
             # Append the assistant's tool-call announcement to the convo
             assistant_msg: dict[str, Any] = {
@@ -289,6 +297,7 @@ class JobFinderAgent:
             search_queries=list(self._search_qs),
             finish_reason=finish_reason,
             notes=self._notes,
+            total_cost_usd=total_cost,
         )
 
     # ── Tool dispatchers ──────────────────────────────────────────
