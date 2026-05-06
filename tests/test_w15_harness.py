@@ -1152,6 +1152,39 @@ class TestReviewFixes:
         assert "line 499" in result
         assert "line 999" not in result  # truncated
 
+    # ── Q1: temperature is configurable per-call (W15.13)
+    def test_temperature_default_passed_through(self, deps):
+        deps.llm.push_text("done")  # type: ignore[union-attr]
+        harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        # StubLLM stores all chat_with_tools calls
+        assert deps.llm.calls  # type: ignore[union-attr]
+        last = deps.llm.calls[-1]  # type: ignore[union-attr]
+        assert last["temperature"] == 0.4  # default
+
+    def test_temperature_override(self, deps):
+        deps.llm.push_text("done")  # type: ignore[union-attr]
+        harness_run(
+            trigger=make_user_input_trigger("be creative"),
+            deps=deps,
+            temperature=0.7,
+        )
+        last = deps.llm.calls[-1]  # type: ignore[union-attr]
+        assert last["temperature"] == 0.7
+
+    # ── Q4: tighter compaction thresholds (W15.13)
+    def test_compaction_threshold_tightened_to_30k(self):
+        # The constants are exported. Verify they match the documented
+        # tighter values so future drift is caught.
+        from offerguide.harness.context import (
+            CLEAR_TOOL_RESULTS_TRIGGER_TOKENS,
+            COMPACTION_TRIGGER_TOKENS,
+        )
+        assert COMPACTION_TRIGGER_TOKENS == 30_000
+        assert CLEAR_TOOL_RESULTS_TRIGGER_TOKENS == 12_000
+        # Invariant: clear must trigger BEFORE compaction so the cheap
+        # path runs first and may avoid an expensive LLM compaction call.
+        assert CLEAR_TOOL_RESULTS_TRIGGER_TOKENS < COMPACTION_TRIGGER_TOKENS
+
     # ── Smell 6: dead code removed (no `_ = tools` statement at top level)
     def test_loop_module_no_dead_imports(self):
         from offerguide.harness import loop as loop_mod

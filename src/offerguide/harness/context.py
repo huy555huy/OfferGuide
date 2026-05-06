@@ -36,13 +36,21 @@ log = logging.getLogger(__name__)
 # Anthropic's published triggers. Tuned for OpenAI-compat (DeepSeek ~64K
 # context) — we use lower thresholds because total context budget is
 # smaller than Claude's.
-COMPACTION_TRIGGER_TOKENS = 40_000
-"""Above this estimated input_tokens, run compaction. Conservative for
-DeepSeek's ~64K window — leaves headroom for tool results + output."""
+#
+# Q4 (W15.13 review answer): 40K → 30K. Realistic worst case at 8 iter:
+# system prompt 3K + 5 tool results × 6K = 33K alone. Old 40K trigger
+# left only 24K for the next call's output + new content → too tight,
+# would hit DeepSeek's 64K hard limit and crash with context_length_exceeded.
+# 30K trigger leaves comfortable headroom.
+COMPACTION_TRIGGER_TOKENS = 30_000
+"""Above this estimated input_tokens, run compaction (model summarizes
+older messages). Tuned for DeepSeek's ~64K window."""
 
-CLEAR_TOOL_RESULTS_TRIGGER_TOKENS = 15_000
+CLEAR_TOOL_RESULTS_TRIGGER_TOKENS = 12_000
 """Above this, replace old tool output blocks with placeholders.
-Cheaper than compaction (no LLM call) so tries this first."""
+Cheaper than compaction (no LLM call) so tries this first.
+Q4: 15K → 12K to keep clearing well below compaction threshold (30K)
+so the cheap path runs FIRST and may obviate compaction."""
 
 KEEP_RECENT_TOOL_RESULTS = 4
 """How many most-recent tool results to keep after clearing."""

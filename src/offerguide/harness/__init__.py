@@ -159,19 +159,29 @@ def run_one(
     deps: HarnessDeps | None = None,
     max_iterations: int = 20,
     system_facts: SystemFacts | None = None,
+    temperature: float | None = None,
 ) -> RunResult:
     """Convenience: build deps + run one loop. For CLI / cron / triggers.
 
     Pass ``deps=`` if you've already built them (e.g. long-running
     process). Otherwise we build fresh per call (cheap enough; LLMClient
     is just an httpx wrapper).
+
+    Args:
+        temperature: optional override of loop default. Pass higher
+            (e.g. 0.5) for chat triggers where you want creative interpretation
+            of user intent; lower (e.g. 0.3) for cron heartbeats where you
+            want deterministic decisions.
     """
     deps = deps or build_deps(settings=settings)
-    return run(
-        trigger=trigger, deps=deps,
-        max_iterations=max_iterations,
-        system_facts=system_facts,
-    )
+    kwargs: dict[str, Any] = {
+        "trigger": trigger, "deps": deps,
+        "max_iterations": max_iterations,
+        "system_facts": system_facts,
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    return run(**kwargs)
 
 
 __all__ = [

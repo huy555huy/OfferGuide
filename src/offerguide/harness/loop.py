@@ -109,10 +109,19 @@ class RunResult:
     error_text: str | None = None
 
 
+DEFAULT_TEMPERATURE = 0.4
+"""Q1 (W15.13 review answer): exposed as a parameter so callers can
+override per-trigger if they want creativity vs determinism trade-offs.
+We don't bake automatic per-trigger logic here — that's editorial
+encoding the harness shouldn't do. Callers (chat endpoint, scheduler)
+decide based on their context."""
+
+
 def run(
     *, trigger: TriggerEvent, deps: HarnessDeps,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     system_facts: SystemFacts | None = None,
+    temperature: float = DEFAULT_TEMPERATURE,
 ) -> RunResult:
     """One agent run. Returns when the model stops calling tools or hits
     max_iterations.
@@ -131,6 +140,11 @@ def run(
       (Bug 2), so reasoning produced alongside tool_calls isn't lost.
     - sub-agent cost (e.g. discover_jobs) flows back via ``deps.extra_cost_usd``
       and is added to harness_runs.cost_usd (Bug 5).
+
+    Args:
+        temperature: LLM sampling temperature (W15.13 Q1). 0.4 default;
+            chat endpoint may pass higher (creativity), scheduled wakes
+            may pass lower (determinism).
     """
     if deps.llm is None:
         return RunResult(
@@ -181,7 +195,7 @@ def run(
                 resp = deps.llm.chat_with_tools(
                     messages=messages,
                     tools=ALL_TOOL_SCHEMAS,
-                    temperature=0.4,
+                    temperature=temperature,
                     tool_choice="auto",
                 )
             except LLMError as e:

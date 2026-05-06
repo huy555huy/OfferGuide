@@ -18,6 +18,17 @@ Per W15 §11.5 E: cron heartbeat retreats from "main path" (W14.18) to
 All three triggers funnel into the same `loop.run(trigger=..., deps=...)`
 call. The trigger object's `kind` + `detail` field framing tells the agent
 what woke it.
+
+Q3 (W15.13 review answer) — STATUS:
+- ``schedule_next_wake`` path is **fully wired**: agent calls tool →
+  row in harness_scheduled_wakes → scheduler.poll_pending picks up →
+  cron tick fires it. End-to-end works.
+- ``fire_event`` + ``_poll_unprocessed_events`` are **scaffolding for
+  future UI lifecycle buttons** (e.g. user clicks "I applied" on a job
+  card → fires user_marked_applied event → next cron wakes agent).
+  Not yet wired in UI; planned for W15.14+. The path is tested
+  (test_w15_harness.TestTriggers) but unused in production. Kept
+  because cost-of-keeping is low and removing means re-deriving later.
 """
 
 from __future__ import annotations
