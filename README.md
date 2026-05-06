@@ -1,8 +1,31 @@
 # OfferGuide
 
-**国内校招 Ambient 求职 Copilot + GEPA-style Self-Evolution.**
+**国内校招 Ambient 求职 Copilot — agent 帮你精投决策、投后追踪、面试备战。**
 
-> 不点投递按钮——做精投决策、投后跟踪、面试备战；用户 dogfood 数据驱动 SKILL 自动进化。
+> 核心 1 步：粘 1 个 JD → 10-20s 出 [评分 / 关键 gap / 简历定向修改建议 /
+> 投不投建议]。点"已投"后, agent 7 天自动查回应, 不用你记。
+>
+> 内核：W15 harness 极简骨架 + 模型 in-context 决策 + worldview markdown
+> 持久记忆 + GEPA SKILL 自进化（用户反馈 → 进化数据）。Anthropic 风格。
+
+## Quick start
+
+```bash
+git clone <repo> && cd offerguide
+uv sync --extra ui --extra autonomous
+
+# 配 .env (至少 LLM key + 简历路径)
+cp .env.example .env  # 填 OFFERGUIDE_LLM_API_KEY 和 OFFERGUIDE_RESUME_PDF
+
+# 一键体检 (装机问题立刻定位)
+uv run python scripts/doctor.py
+
+# 起服务
+uv run --extra ui python -m offerguide.ui.web
+# → http://127.0.0.1:8000
+```
+
+→ home 顶部"🎯 这家公司值不值得投" 输入框 → 粘 1 个 JD → 看报告 → "✓ 已投".
 
 ![dashboard](docs/screenshots/dashboard.png)
 

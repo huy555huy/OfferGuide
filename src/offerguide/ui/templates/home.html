@@ -134,11 +134,37 @@
 </div>
 {% endif %}
 
-{# ─────────── W15: 💬 Chat input — 跟 agent 直接说话 ─────────── #}
+{# ─────────── W15.14: 🎯 Hero — 评估 1 个岗位 (核心 use case) ─────────── #}
 
-<div class="card" style="background: var(--bg-elev); border-left: 4px solid var(--primary);">
+<div class="card" style="background: var(--bg-elev); border-left: 4px solid var(--primary); border-width: 1px 1px 1px 4px;">
     <div class="card-header">
-        <h2 style="font-family: var(--font-serif);">💬 跟 agent 说话</h2>
+        <h2 style="font-family: var(--font-serif); font-size: 1.25rem;">🎯 这家公司值不值得投?</h2>
+        <span class="meta">粘 JD 链接或文本 — 10-20s 出评估 + 改简历建议</span>
+    </div>
+    <form id="evaluate-form" onsubmit="return submitEvaluate(event)">
+        <textarea id="evaluate-input" rows="3" required
+                  placeholder="粘 JD 链接 (BOSS/牛客/官网) — 大厂招聘平台一般反爬, 撞墙就直接粘 JD 文本"
+                  style="width: 100%; padding: 0.75rem 0.875rem; border: 1px solid var(--border);
+                         border-radius: var(--radius-sm); font-family: inherit; font-size: 0.9rem;
+                         resize: vertical; box-sizing: border-box;"></textarea>
+        <div class="actions" style="margin-top: 0.5rem;">
+            <button type="submit" class="btn" id="evaluate-submit"
+                    {% if not runtime_ready %}disabled title="缺 LLM key"{% endif %}>
+                ▶ 评估 (10-20s)
+            </button>
+            <span id="evaluate-status" class="muted small" style="margin-left: 0.5rem;"></span>
+        </div>
+    </form>
+    <div id="evaluate-result" style="display: none; margin-top: 0.875rem;"></div>
+</div>
+
+{# ─────────── 💬 Chat input — generic agent 对话 (次要入口) ─────────── #}
+
+<details class="card" style="background: var(--bg-elev); margin-bottom: 1rem;">
+    <summary style="cursor: pointer; font-weight: 600; font-size: 0.92rem; padding: 0.25rem 0;">
+        💬 跟 agent 说话 (通用对话, 30-90s) — 点开
+    </summary>
+    <div class="card-header" style="margin-top: 0.5rem;">
         <span class="meta">输入会唤醒 agent, 它会看 worldview + 自己决定怎么帮你</span>
     </div>
     <form id="agent-chat-form" onsubmit="return submitAgentChat(event)">
@@ -160,7 +186,7 @@
                                          border-radius: var(--radius-sm);
                                          font-size: 0.875rem; white-space: pre-wrap;
                                          line-height: 1.6;"></div>
-</div>
+</details>
 
 {# ─────────── W15: 🧠 Agent's worldview summary ─────────── #}
 
@@ -619,6 +645,147 @@ async function wakeAgent(btn) {
         window.toast('网络错误: ' + e, 'error');
         window.btnReset(btn);
     }
+}
+
+// W15.14 — evaluate 1 job: paste JD → structured report
+async function submitEvaluate(ev) {
+    ev.preventDefault();
+    const input = document.getElementById('evaluate-input');
+    const submit = document.getElementById('evaluate-submit');
+    const status = document.getElementById('evaluate-status');
+    const resultBox = document.getElementById('evaluate-result');
+    const text = input.value.trim();
+    if (!text) return false;
+    submit.disabled = true;
+    status.textContent = '抓取 + 评分 + 定向中... (10-20s)';
+    resultBox.style.display = 'none';
+    try {
+        const r = await fetch('/api/evaluate-job', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({url_or_text: text}),
+        });
+        if (!r.ok) {
+            const err = await r.text();
+            status.textContent = '失败: ' + err.slice(0, 200);
+            window.toast('评估失败: ' + err.slice(0, 100), 'error', 5000);
+            return false;
+        }
+        const data = await r.json();
+        renderEvaluation(data, resultBox);
+        resultBox.style.display = 'block';
+        status.textContent = `✓ 完成 ${data.duration_ms}ms · $${(data.cost_usd || 0).toFixed(4)}`;
+        input.value = '';
+    } catch (e) {
+        status.textContent = '网络错误: ' + e;
+        window.toast('网络错误: ' + e, 'error');
+    } finally {
+        submit.disabled = false;
+    }
+    return false;
+}
+
+function renderEvaluation(d, box) {
+    if (d.user_facing_error || d.fetch_status === 'error') {
+        box.innerHTML = `
+            <div style="padding: 0.875rem; background: var(--danger-soft);
+                        border-left: 4px solid var(--danger); border-radius: var(--radius-sm);">
+                <strong>❌ 评估失败</strong><br>
+                <span class="small">${escapeHtml(d.user_facing_error || d.fetch_error || '未知错误')}</span>
+            </div>`;
+        return;
+    }
+    const score = d.score;
+    let scoreColor = 'var(--text-muted)';
+    let scoreLabel = '?';
+    if (typeof score === 'number') {
+        scoreLabel = score.toFixed(1);
+        scoreColor = score >= 7 ? 'var(--success)' : score >= 4 ? 'var(--warning)' : 'var(--danger)';
+    }
+    const gapsList = (d.key_gaps || []).slice(0, 6).map(g =>
+        `<li style="margin-bottom: 0.25rem;">${escapeHtml(g)}</li>`,
+    ).join('');
+    const tailor = d.tailor_advice;
+    let tailorBlock = '';
+    if (tailor && d.tailor_status === 'ok') {
+        tailorBlock = `
+            <details style="margin-top: 0.625rem;">
+                <summary style="cursor: pointer; font-weight: 600; font-size: 0.9rem;">📝 简历定向修改建议</summary>
+                <pre style="margin: 0.5rem 0 0; padding: 0.625rem; background: var(--bg);
+                            border: 1px solid var(--border-soft); border-radius: 4px;
+                            font-size: 0.78rem; line-height: 1.5; white-space: pre-wrap;
+                            font-family: var(--font-mono); max-height: 320px; overflow-y: auto;
+                            ">${escapeHtml(JSON.stringify(tailor, null, 2))}</pre>
+            </details>`;
+    } else if (d.tailor_status === 'skipped') {
+        tailorBlock = `<div class="muted small" style="margin-top: 0.625rem;">📝 简历建议: 跳过 (没简历)</div>`;
+    }
+    box.innerHTML = `
+        <div style="padding: 0.875rem 1rem; background: var(--bg-subtle); border-radius: var(--radius-sm);">
+            <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.625rem;">
+                <span style="font-family: var(--font-serif); font-size: 2rem; font-weight: 700; color: ${scoreColor};">${scoreLabel}</span>
+                <div style="flex: 1;">
+                    <div style="font-weight: 600; font-size: 1rem;">${escapeHtml(d.company)} · ${escapeHtml(d.title)}</div>
+                    <div class="muted small">${escapeHtml(d.location || '未指定地点')} · job#${d.job_id}</div>
+                </div>
+            </div>
+            <div style="margin-bottom: 0.625rem; font-size: 0.875rem; line-height: 1.6;">
+                <strong>评估理由:</strong> ${escapeHtml(d.score_reasoning || '(无)')}
+            </div>
+            ${gapsList ? `<div style="margin-bottom: 0.625rem;">
+                <strong style="font-size: 0.875rem;">关键 gap:</strong>
+                <ul style="margin: 0.25rem 0 0; padding-left: 1.5rem; font-size: 0.85rem;">${gapsList}</ul>
+            </div>` : ''}
+            ${tailorBlock}
+            <div class="actions" style="margin-top: 0.875rem; padding-top: 0.625rem;
+                                          border-top: 1px solid var(--border-soft);">
+                <button class="btn" onclick="trackJob(${d.job_id}, this)">+ 加入跟踪</button>
+                <button class="btn secondary" onclick="markApplied(${d.job_id}, this)">✓ 已投 (agent 7 天后会查)</button>
+                <a class="btn ghost" href="/jobs">看所有跟踪 →</a>
+            </div>
+        </div>`;
+}
+
+async function trackJob(jobId, btn) {
+    btn.disabled = true;
+    try {
+        const r = await fetch(`/api/jobs/${jobId}/track`, {method: 'POST'});
+        if (r.ok) {
+            const d = await r.json();
+            window.toast(d.created ? '✓ 加入跟踪' : '已经在跟踪列表里', 'success', 3000);
+            btn.textContent = '✓ 在跟踪';
+        } else {
+            window.toast('失败: ' + await r.text(), 'error', 4000);
+            btn.disabled = false;
+        }
+    } catch (e) {
+        window.toast('网络错误: ' + e, 'error');
+        btn.disabled = false;
+    }
+}
+
+async function markApplied(jobId, btn) {
+    btn.disabled = true;
+    try {
+        const r = await fetch(`/api/jobs/${jobId}/applied`, {method: 'POST'});
+        if (r.ok) {
+            window.toast('✓ 标记已投, agent 7 天后会主动查回应', 'success', 4000);
+            btn.textContent = '✓ 已投';
+        } else {
+            window.toast('失败: ' + await r.text(), 'error', 4000);
+            btn.disabled = false;
+        }
+    } catch (e) {
+        window.toast('网络错误: ' + e, 'error');
+        btn.disabled = false;
+    }
+}
+
+function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
 }
 
 // W15.9 — chat input: send message to harness, get back what agent did

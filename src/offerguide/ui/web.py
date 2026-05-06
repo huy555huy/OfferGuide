@@ -626,6 +626,183 @@ def create_app(
             "cost_usd": round(res.cost_usd, 4),
         }
 
+    @app.post("/api/evaluate-job", response_class=JSONResponse)
+    async def evaluate_job_endpoint(request: Request) -> Any:
+        """W15.14 hero flow: paste a JD URL/text → structured evaluation.
+
+        Bypasses agent loop for speed (~10-20s vs 30-90s) since this is
+        a user-driven flow where we KNOW we want fetch + score + tailor.
+        Returns structured JSON the frontend renders as cards (not a
+        raw markdown blob from agent's final_text).
+        """
+        if not settings.deepseek_api_key:
+            raise HTTPException(400, "需要先配 LLM key (.env)")
+        if runtime is None:
+            raise HTTPException(400, "SkillRuntime 未初始化")
+        body = await request.json()
+        url_or_text = (body.get("url_or_text") or "").strip()
+        if not url_or_text:
+            raise HTTPException(400, "url_or_text 不能为空")
+        if len(url_or_text) > 50_000:
+            raise HTTPException(400, "JD 文本太长 (max 50K 字符)")
+        company_hint = (body.get("company_hint") or "").strip() or None
+        title_hint = (body.get("title_hint") or "").strip() or None
+
+        from ..harness import (
+            HarnessDeps,
+            MemoryStore,
+            default_worldview_dir,
+        )
+        from ..harness import _schema as _hs
+        from ..harness.evaluate import evaluate_job
+        _hs.init_harness_schema(store)
+        deps = HarnessDeps(
+            settings=settings, store=store,
+            memory_store=MemoryStore(root=default_worldview_dir(settings)),
+            llm=LLMClient(
+                api_key=settings.deepseek_api_key,
+                base_url=settings.deepseek_base_url,
+                default_model=settings.default_model,
+            ),
+            runtime=runtime, skills=skills,
+            user_profile_text=profile.raw_resume_text if profile else None,
+            notifier=notifier,
+        )
+        import asyncio as _asyncio
+        try:
+            result = await _asyncio.to_thread(
+                evaluate_job,
+                url_or_text=url_or_text, deps=deps,
+                company_hint=company_hint, title_hint=title_hint,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                if deps.llm:
+                    deps.llm.close()
+        return result.to_dict()
+
+    @app.post("/api/jobs/{job_id}/track", response_class=JSONResponse)
+    def track_job(job_id: int, request: Request) -> Any:
+        """W15.14: user clicks "加入跟踪" on an evaluation result card.
+
+        Adds an applications row with status='considered' so /jobs page
+        shows it and agent sees it in worldview/tracked-jobs.md (next
+        wake will reflect via record_event).
+
+        Idempotent: if already tracked, returns existing application_id.
+        """
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM jobs WHERE id = ?", (job_id,),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(404, f"job#{job_id} not found")
+            existing = conn.execute(
+                "SELECT id FROM applications WHERE job_id = ?", (job_id,),
+            ).fetchone()
+            if existing:
+                return {"application_id": int(existing[0]), "created": False}
+            cur = conn.execute(
+                "INSERT INTO applications(job_id, status) VALUES (?, 'considering') "
+                "RETURNING id",
+                (job_id,),
+            )
+            app_id = int(cur.fetchone()[0])
+
+        # Also fire a harness event so agent knows next wake
+        from ..harness import _schema as _hs
+        _hs.init_harness_schema(store)
+        with store.connect() as conn:
+            conn.execute(
+                "INSERT INTO harness_events(kind, job_id, note, source) "
+                "VALUES (?, ?, ?, ?)",
+                ("user_tracked", job_id, "user clicked '加入跟踪'", "user"),
+            )
+        return {"application_id": app_id, "created": True}
+
+    @app.post("/api/jobs/{job_id}/applied", response_class=JSONResponse)
+    def mark_applied(job_id: int, request: Request) -> Any:
+        """W15.14: user clicks "已投" on a job — track + transition status.
+
+        Idempotent. Triggers a 7-day-out scheduled wake so agent
+        proactively checks for response (true ambient ownership).
+        """
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM jobs WHERE id = ?", (job_id,),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(404, f"job#{job_id} not found")
+            existing = conn.execute(
+                "SELECT id, status FROM applications WHERE job_id = ?", (job_id,),
+            ).fetchone()
+            if existing:
+                app_id = int(existing[0])
+                conn.execute(
+                    "UPDATE applications SET status = 'applied', "
+                    "  applied_at = COALESCE(applied_at, julianday('now')) "
+                    "WHERE id = ?", (app_id,),
+                )
+            else:
+                cur = conn.execute(
+                    "INSERT INTO applications(job_id, status, applied_at) "
+                    "VALUES (?, 'applied', julianday('now')) RETURNING id",
+                    (job_id,),
+                )
+                app_id = int(cur.fetchone()[0])
+
+        # Schedule a 7-day-out wake to check for response. This wires
+        # the "agent ownership" promise: after user marks applied, the
+        # agent will proactively wake to check status without user nag.
+        from ..harness import _schema as _hs
+        _hs.init_harness_schema(store)
+        with store.connect() as conn:
+            # 7 days = 7.0 in julianday delta
+            conn.execute(
+                "INSERT INTO harness_scheduled_wakes(fire_at, reason) "
+                "VALUES (julianday('now') + 7, ?)",
+                (f"check job#{job_id} response 7 days after user applied",),
+            )
+            conn.execute(
+                "INSERT INTO harness_events(kind, job_id, note, source) "
+                "VALUES (?, ?, ?, ?)",
+                ("user_marked_applied", job_id, "user clicked '已投'", "user"),
+            )
+        return {"application_id": app_id, "next_wake": "+7d"}
+
+    @app.get("/jobs", response_class=HTMLResponse)
+    def jobs_view(request: Request) -> Any:
+        """W15.14: tracked jobs visualization. Replaces "look in worldview
+        markdown" with a real UI."""
+        with store.connect() as conn:
+            rows = conn.execute(
+                "SELECT j.id, j.title, j.company, j.location, j.url, "
+                "       a.id, a.status, a.applied_at, a.last_status_change "
+                "FROM jobs j "
+                "LEFT JOIN applications a ON a.job_id = j.id "
+                "ORDER BY COALESCE(a.last_status_change, j.id) DESC "
+                "LIMIT 100"
+            ).fetchall()
+        jobs_view_data: list[dict[str, Any]] = []
+        for r in rows:
+            jobs_view_data.append({
+                "job_id": int(r[0]), "title": r[1], "company": r[2],
+                "location": r[3], "url": r[4],
+                "application_id": int(r[5]) if r[5] is not None else None,
+                "status": r[6] or "evaluated",
+                "applied_at": r[7], "last_status_change": r[8],
+            })
+        return templates.TemplateResponse(
+            request,
+            "jobs.html",
+            _ctx(
+                request,
+                jobs=jobs_view_data,
+                runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
+                active_tab="jobs",
+            ),
+        )
+
     @app.get("/debug", response_class=HTMLResponse)
     def debug_view(request: Request) -> Any:
         """W15.9 — Mission Control + harness telemetry debug view.

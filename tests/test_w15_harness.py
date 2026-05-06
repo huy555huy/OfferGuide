@@ -1185,6 +1185,131 @@ class TestReviewFixes:
         # path runs first and may avoid an expensive LLM compaction call.
         assert CLEAR_TOOL_RESULTS_TRIGGER_TOKENS < COMPACTION_TRIGGER_TOKENS
 
+    # ── W15.14: evaluate_job() reactive flow
+    def test_evaluate_job_with_paste_text_no_runtime(self, tmp_store, tmp_worldview):
+        """No runtime → fetch succeeds, score/tailor skipped (graceful)."""
+        from offerguide.harness.evaluate import evaluate_job
+        deps = HarnessDeps(
+            settings=Settings(deepseek_api_key="x", default_model="stub"),
+            store=tmp_store,
+            memory_store=MemoryStore(root=tmp_worldview),
+            llm=None, runtime=None,
+        )
+        text = "字节跳动算法实习生 招聘信息 工作内容 NLP/Agent " * 30
+        result = evaluate_job(url_or_text=text, deps=deps)
+        assert result.fetch_status == "ok"
+        assert result.job_id is not None
+        assert result.score_status == "skipped"
+        assert result.tailor_status == "skipped"
+
+    def test_evaluate_job_too_short_text(self, tmp_store, tmp_worldview):
+        from offerguide.harness.evaluate import evaluate_job
+        deps = HarnessDeps(
+            settings=Settings(deepseek_api_key="x", default_model="stub"),
+            store=tmp_store,
+            memory_store=MemoryStore(root=tmp_worldview),
+        )
+        result = evaluate_job(url_or_text="too short", deps=deps)
+        assert result.fetch_status == "error"
+        assert "太短" in (result.user_facing_error or "")
+
+    # ── W15.14: /api/evaluate-job endpoint
+    def test_evaluate_endpoint_requires_llm(self, web_client):
+        client, _ = web_client
+        resp = client.post(
+            "/api/evaluate-job",
+            json={"url_or_text": "x" * 250},
+        )
+        # web_client fixture has no LLM key set
+        assert resp.status_code == 400
+
+    # ── W15.14: /api/jobs/{id}/track endpoint
+    def test_track_job_idempotent(self, web_client):
+        client, store = web_client
+        # Create a job manually
+        with store.connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO jobs(source, url, title, company, raw_text, content_hash) "
+                "VALUES ('test', 'paste://t1', 't', 'co', 'x', 'hash1') RETURNING id"
+            )
+            job_id = int(cur.fetchone()[0])
+
+        r1 = client.post(f"/api/jobs/{job_id}/track")
+        assert r1.status_code == 200
+        d1 = r1.json()
+        assert d1["created"] is True
+        assert "application_id" in d1
+
+        # Second track call → idempotent (returns same application_id, created=False)
+        r2 = client.post(f"/api/jobs/{job_id}/track")
+        assert r2.status_code == 200
+        d2 = r2.json()
+        assert d2["created"] is False
+        assert d2["application_id"] == d1["application_id"]
+
+    def test_track_unknown_job_404(self, web_client):
+        client, _ = web_client
+        resp = client.post("/api/jobs/99999/track")
+        assert resp.status_code == 404
+
+    # ── W15.14: /api/jobs/{id}/applied schedules followup wake
+    def test_marked_applied_schedules_7d_wake(self, web_client):
+        client, store = web_client
+        with store.connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO jobs(source, url, title, company, raw_text, content_hash) "
+                "VALUES ('test', 'paste://t2', 't', 'co', 'x', 'hash2') RETURNING id"
+            )
+            job_id = int(cur.fetchone()[0])
+
+        resp = client.post(f"/api/jobs/{job_id}/applied")
+        assert resp.status_code == 200
+        d = resp.json()
+        assert d["next_wake"] == "+7d"
+
+        # Application created with status='applied'
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM applications WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        assert row[0] == "applied"
+
+        # Scheduled wake row created ~7 days out (use SQL for ground truth)
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT reason, fire_at - julianday('now') AS days_out "
+                "FROM harness_scheduled_wakes ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        assert f"job#{job_id}" in row[0]
+        days_out = float(row[1])
+        assert 6.99 < days_out < 7.01, f"expected ~7 days, got {days_out:.4f}"
+
+    # ── W15.14: /jobs page
+    def test_jobs_page_renders(self, web_client):
+        client, store = web_client
+        # Empty state
+        r = client.get("/jobs")
+        assert r.status_code == 200
+        assert "还没评估过任何岗位" in r.text
+
+        # With a job
+        with store.connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO jobs(source, url, title, company, raw_text, content_hash) "
+                "VALUES ('test', 'paste://t3', '算法实习', '字节跳动', 'x', 'hash3') RETURNING id"
+            )
+            job_id = int(cur.fetchone()[0])
+            conn.execute(
+                "INSERT INTO applications(job_id, status) VALUES (?, 'considered')",
+                (job_id,),
+            )
+        r2 = client.get("/jobs")
+        assert r2.status_code == 200
+        assert "字节跳动" in r2.text
+        assert "算法实习" in r2.text
+        assert "评估过 / 待决" in r2.text
+
     # ── Smell 6: dead code removed (no `_ = tools` statement at top level)
     def test_loop_module_no_dead_imports(self):
         from offerguide.harness import loop as loop_mod
