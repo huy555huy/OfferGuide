@@ -134,6 +134,85 @@
 </div>
 {% endif %}
 
+{# ─────────── W15: 💬 Chat input — 跟 agent 直接说话 ─────────── #}
+
+<div class="card" style="background: var(--bg-elev); border-left: 4px solid var(--primary);">
+    <div class="card-header">
+        <h2 style="font-family: var(--font-serif);">💬 跟 agent 说话</h2>
+        <span class="meta">输入会唤醒 agent, 它会看 worldview + 自己决定怎么帮你</span>
+    </div>
+    <form id="agent-chat-form" onsubmit="return submitAgentChat(event)">
+        <textarea id="agent-chat-input" rows="2" required
+                  placeholder="比如: 帮我找几个字节实习 / 我要面腾讯明天准备一下 / 这家公司值不值得投: <粘 JD 链接>"
+                  style="width: 100%; padding: 0.75rem 0.875rem; border: 1px solid var(--border);
+                         border-radius: var(--radius-sm); font-family: inherit; font-size: 0.9rem;
+                         resize: vertical; box-sizing: border-box;"></textarea>
+        <div class="actions" style="margin-top: 0.5rem;">
+            <button type="submit" class="btn" id="agent-chat-submit"
+                    {% if not runtime_ready %}disabled title="缺 LLM key"{% endif %}>
+                ▶ 发送 (agent 处理 30-90s)
+            </button>
+            <span id="agent-chat-status" class="muted small" style="margin-left: 0.5rem;"></span>
+        </div>
+    </form>
+    <div id="agent-chat-result" style="margin-top: 0.75rem; display: none;
+                                         padding: 0.75rem; background: var(--bg-subtle);
+                                         border-radius: var(--radius-sm);
+                                         font-size: 0.875rem; white-space: pre-wrap;
+                                         line-height: 1.6;"></div>
+</div>
+
+{# ─────────── W15: 🧠 Agent's worldview summary ─────────── #}
+
+{% if worldview_summary %}
+<div class="card" style="background: var(--bg-elev); border-left: 4px solid var(--success);">
+    <div class="card-header">
+        <h2 style="font-family: var(--font-serif);">🧠 Agent 现在对你的理解</h2>
+        <span class="meta">来自 .offerguide/worldview/ — agent 自己维护的 markdown 文件</span>
+    </div>
+    {% set wv_files = ['MEMORY.md', 'candidate.md', 'tracked-jobs.md', 'upcoming-events.md'] %}
+    {% for fname in wv_files %}
+        {% if fname in worldview_summary and worldview_summary[fname].strip() %}
+        <details style="margin-bottom: 0.5rem; padding: 0.5rem 0.75rem; background: var(--bg-subtle); border-radius: var(--radius-sm);"
+                 {% if loop.first %}open{% endif %}>
+            <summary style="cursor: pointer; font-weight: 600; font-size: 0.9rem;">
+                📄 {{ fname }}
+                <span class="muted small" style="margin-left: 0.5rem;">前 60 行</span>
+            </summary>
+            <pre style="margin: 0.5rem 0 0; padding: 0.625rem; background: var(--bg-elev);
+                        border: 1px solid var(--border-soft); border-radius: 4px;
+                        font-size: 0.78rem; line-height: 1.5; white-space: pre-wrap;
+                        font-family: var(--font-mono); max-height: 360px; overflow-y: auto;">{{ worldview_summary[fname] }}</pre>
+        </details>
+        {% endif %}
+    {% endfor %}
+    {% if not worldview_summary %}
+    <div class="small muted">worldview 还是空的 — agent 第一次 wake 后会自己 ask_user 拿基础信息.</div>
+    {% endif %}
+</div>
+{% endif %}
+
+{# ─────────── W15: ⚡ Agent 最近做了啥 (harness_runs) ─────────── #}
+
+{% if harness_runs_recent %}
+<div class="card" style="padding: 0.875rem 1rem;">
+    <div class="card-header" style="margin-bottom: 0.5rem;">
+        <h3 style="font-family: var(--font-serif); margin: 0; font-size: 1rem;">⚡ Agent 最近 5 次 wake</h3>
+        <a href="/debug" class="muted small">详细看 /debug →</a>
+    </div>
+    {% for r in harness_runs_recent %}
+    <div style="display: flex; gap: 0.625rem; padding: 0.375rem 0; border-bottom: 1px solid var(--border-soft); font-size: 0.82rem; align-items: flex-start;">
+        <span class="pill {% if r.status == 'ok' %}low{% elif r.status == 'error' %}high{% else %}medium{% endif %}" style="min-width: 50px; text-align: center;">{{ r.status }}</span>
+        <code style="color: var(--primary); min-width: 110px;">{{ r.trigger_kind }}</code>
+        <div style="flex: 1; color: var(--text-muted); font-size: 0.8rem;">
+            {{ r.iterations }} 步 · ${{ "%.4f"|format(r.cost_usd) }}
+            {% if r.final_text %}<br>{{ r.final_text[:140] }}{% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
 {# ─────────── 2. Agent 内心独白 (last wake's reasoning, gives agent "personality") ─────────── #}
 
 {% if latest_run %}
@@ -540,6 +619,50 @@ async function wakeAgent(btn) {
         window.toast('网络错误: ' + e, 'error');
         window.btnReset(btn);
     }
+}
+
+// W15.9 — chat input: send message to harness, get back what agent did
+async function submitAgentChat(ev) {
+    ev.preventDefault();
+    const input = document.getElementById('agent-chat-input');
+    const submit = document.getElementById('agent-chat-submit');
+    const status = document.getElementById('agent-chat-status');
+    const result = document.getElementById('agent-chat-result');
+    const message = input.value.trim();
+    if (!message) return false;
+    submit.disabled = true;
+    status.textContent = 'agent 处理中... 30-90s';
+    result.style.display = 'none';
+    try {
+        const r = await fetch('/api/home/chat', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({message: message}),
+        });
+        if (r.ok) {
+            const data = await r.json();
+            const tools = (data.tool_calls || []).join('\n  · ');
+            result.textContent =
+                `✓ 完成 (run #${data.run_id} · ${data.iterations} 步 · ` +
+                `$${data.cost_usd} · ${data.finish_reason})\n\n` +
+                (data.final_text || '(agent 没回 final text)') +
+                (tools ? `\n\n工具调用:\n  · ${tools}` : '');
+            result.style.display = 'block';
+            input.value = '';
+            status.textContent = '✓ 完成 — 刷新看 worldview 变化';
+            setTimeout(() => location.reload(), 2000);
+        } else {
+            const err = await r.text();
+            status.textContent = '失败: ' + err.slice(0, 200);
+            window.toast('chat 失败: ' + err.slice(0, 100), 'error', 5000);
+        }
+    } catch (e) {
+        status.textContent = '网络错误: ' + e;
+        window.toast('网络错误: ' + e, 'error');
+    } finally {
+        submit.disabled = false;
+    }
+    return false;
 }
 
 // W14.13 — Mission Control: manually trigger any daemon without waiting for cron

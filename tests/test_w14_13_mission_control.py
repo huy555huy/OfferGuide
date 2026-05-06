@@ -116,11 +116,11 @@ class TestActivityTimeline:
     def test_recent_daemon_runs_appear_in_timeline(self, app_client):
         client, store = app_client
         with store.connect() as conn:
-            for i in range(3):
+            for _i in range(3):
                 conn.execute(
                     "INSERT INTO daemon_runs(job_name, status, summary_json) "
                     "VALUES (?, 'ok', '{}')",
-                    (f"discover_jobs_via_search",),
+                    ("discover_jobs_via_search",),
                 )
             conn.execute(
                 "INSERT INTO daemon_runs(job_name, status, error_text, summary_json) "
@@ -161,24 +161,42 @@ class TestManualTriggerAPI:
 
     def test_trigger_records_daemon_run(self, app_client, monkeypatch):
         """Manual trigger should write a daemon_runs row (status=ok or
-        error) so the timeline reflects the manual run alongside cron runs."""
+        error) so the timeline reflects the manual run alongside cron runs.
+
+        W15.7: endpoint now routes through harness.run_one — patch that
+        instead of the deleted W14 daemon helpers."""
         client, store = app_client
-        # Stub the underlying daemon function so the test doesn't hit Tavily
-        from offerguide.autonomous import scheduler as sched_mod
+        from offerguide.harness import RunResult
+        from offerguide.ui import web as web_mod
 
-        def _fake_discover(jc):
-            return {"inserted": 2, "hits_evaluated": 5, "queries": 4}
+        def _fake_harness_run(*, trigger, deps, max_iterations=20):
+            return RunResult(
+                run_id=999, iterations=2,
+                final_text="(stub) discovered 2 new jobs",
+                tool_call_log=["iter1.discover_jobs(criteria='...')"],
+                cost_usd=0.0, latency_ms=10,
+                finish_reason="end_turn",
+            )
 
-        monkeypatch.setattr(
-            sched_mod, "_discover_via_search_job", _fake_discover,
-        )
+        # Patch the module-level alias the route imports lazily inside
+        # the handler. Easiest: patch on the harness module itself.
+        from offerguide import harness as harness_mod
+        monkeypatch.setattr(harness_mod, "run", _fake_harness_run)
+        # Some lazy imports go through harness.loop.run too — patch both
+        from offerguide.harness import loop as harness_loop_mod
+        monkeypatch.setattr(harness_loop_mod, "run", _fake_harness_run)
+        # And the bound name in ui.web (was imported as `harness_run`)
+        if hasattr(web_mod, "harness_run"):
+            monkeypatch.setattr(web_mod, "harness_run", _fake_harness_run)
 
         resp = client.post("/api/scheduler/trigger/discover_jobs_via_search")
         assert resp.status_code == 200
         data = resp.json()
         assert data["job"] == "discover_jobs_via_search"
-        assert data["result"]["inserted"] == 2
         assert "run_id" in data
+        # New result schema has harness_run_id + iterations + finish + cost_usd
+        assert "harness_run_id" in data["result"]
+        assert data["result"]["iterations"] == 2
 
         # daemon_runs row should be present with status=ok
         with store.connect() as conn:
@@ -188,16 +206,23 @@ class TestManualTriggerAPI:
             ).fetchone()
         assert row[0] == "discover_jobs_via_search"
         assert row[1] == "ok"
-        assert "inserted" in row[2]
+        assert "harness_run_id" in row[2]
 
     def test_trigger_failure_records_error(self, app_client, monkeypatch):
+        """W15.7: route through harness; assert error path records to daemon_runs."""
         client, store = app_client
-        from offerguide.autonomous import scheduler as sched_mod
 
-        def _broken(jc):
+        def _broken(*, trigger, deps, max_iterations=20):
             raise RuntimeError("simulated daemon crash")
 
-        monkeypatch.setattr(sched_mod, "_discover_via_search_job", _broken)
+        from offerguide import harness as harness_mod
+        from offerguide.harness import loop as harness_loop_mod
+        from offerguide.ui import web as web_mod
+        monkeypatch.setattr(harness_mod, "run", _broken)
+        monkeypatch.setattr(harness_loop_mod, "run", _broken)
+        if hasattr(web_mod, "harness_run"):
+            monkeypatch.setattr(web_mod, "harness_run", _broken)
+
         resp = client.post("/api/scheduler/trigger/discover_jobs_via_search")
         assert resp.status_code == 500
         # daemon_runs row should be 'error' with the message captured

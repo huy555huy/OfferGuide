@@ -1,0 +1,300 @@
+"""Single-threaded master loop — the heart of the W15 harness.
+
+Anthropic's published agent loop pattern (verbatim from research):
+
+    WHILE NOT task_complete:
+      1. Gather context (history + memory + tool results)
+      2. response = model.messages.create(messages, tools, context_management)
+      3. IF stop_reason == 'tool_use':
+           execute tools sequentially → ToolResult blocks → append
+         ELSE:
+           return final text → mark complete
+
+That's it. No planner-executor-reflector chain. No "if-then-else what to do
+next" hardcoded in harness. The model decides moment-by-moment what to call,
+when to ask user, when to update memory, when to stop.
+
+Our loop adds two harness-layer responsibilities (because OpenAI-compat
+DeepSeek doesn't do them server-side):
+- Token estimation + compaction (in context.py)
+- Tool-result clearing on long runs (in context.py)
+
+Plus persistence:
+- Insert harness_runs row at start, update at end (id flows into deps so
+  tools can record references)
+- Track tool calls + cost for /debug telemetry
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import json as _json
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..llm import LLMError
+from . import _schema, tools
+from .context import ContextManager, SystemFacts
+from .tools import ALL_TOOL_SCHEMAS, HarnessDeps, dispatch
+
+log = logging.getLogger(__name__)
+
+
+# Per-run hard cap so a runaway agent doesn't loop forever. Tuned higher
+# than W14 (8 iter) because the new agent is fully in driver seat —
+# multi-step reasoning is expected.
+DEFAULT_MAX_ITERATIONS = 20
+
+# Per-tool-call timeout safety net — if a tool blocks > N seconds we
+# don't have a way to interrupt cleanly with sync httpx, but we log it.
+SOFT_TOOL_TIMEOUT_S = 90
+
+
+@dataclass
+class TriggerEvent:
+    """Why the loop is being invoked. Consumed by the loop to build the
+    initial user message that frames this wake."""
+
+    kind: str
+    """'cron' | 'event' | 'user_input' | 'scheduled'"""
+
+    detail: dict[str, Any] = field(default_factory=dict)
+    """Arbitrary JSON. E.g. {'event': 'user_paste_jd', 'job_id': 42} or
+    {'message': 'find me some jobs'} or {'wake_id': 7, 'reason': '...'}."""
+
+    def render_initial_user_message(self) -> str:
+        """One sentence the loop puts as the first user message of the run."""
+        if self.kind == "cron":
+            return (
+                "心跳 wake 触发. 看下你的 worldview 和 inbox 状态, 自己决定要不要做事. "
+                "什么都不做也是 OK 的 — 真没事就 done."
+            )
+        if self.kind == "scheduled":
+            reason = self.detail.get("reason", "(no reason recorded)")
+            return (
+                f"你之前 schedule 的 wake 到了. Reason: {reason!r}. "
+                "看 worldview 看具体上下文, 决定要不要执行."
+            )
+        if self.kind == "event":
+            event_kind = self.detail.get("event", "unknown")
+            return (
+                f"事件触发: {event_kind}. 详情: {_json.dumps(self.detail, ensure_ascii=False)[:500]}. "
+                "决定下一步."
+            )
+        if self.kind == "user_input":
+            msg = self.detail.get("message", "")
+            return f"用户消息: {msg}"
+        return f"未知触发: {self.kind}"
+
+
+@dataclass
+class RunResult:
+    """What one loop run produced. Consumed by trigger system + UI."""
+
+    run_id: int | None
+    iterations: int
+    final_text: str
+    tool_call_log: list[str]
+    cost_usd: float
+    latency_ms: int
+    finish_reason: str
+    error_text: str | None = None
+
+
+def run(
+    *, trigger: TriggerEvent, deps: HarnessDeps,
+    max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    system_facts: SystemFacts | None = None,
+) -> RunResult:
+    """One agent run. Returns when the model stops calling tools or hits
+    max_iterations.
+
+    Side effects: inserts harness_runs row; writes tool results to
+    domain tables via dispatched tools; may call schedule_next_wake →
+    inserts into harness_scheduled_wakes.
+    """
+    if deps.llm is None:
+        return RunResult(
+            run_id=None, iterations=0, final_text="",
+            tool_call_log=[], cost_usd=0.0, latency_ms=0,
+            finish_reason="no_llm", error_text="LLMClient is None",
+        )
+
+    # Ensure harness tables exist (idempotent)
+    _schema.init_harness_schema(deps.store)
+
+    # Insert harness_runs row early so tools can reference deps.current_run_id
+    run_id = _start_run(deps, trigger)
+    deps.current_run_id = run_id
+
+    # Build initial messages
+    ctx_mgr = ContextManager(llm=deps.llm, memory=deps.memory_store)
+    system_msg_text = ctx_mgr.build_initial_system(system_facts=system_facts)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_msg_text},
+        {"role": "user", "content": trigger.render_initial_user_message()},
+    ]
+
+    tool_call_log: list[str] = []
+    total_cost_usd = 0.0
+    final_text = ""
+    finish_reason = "max_iterations"
+    error_text: str | None = None
+    iteration = 0
+    t0 = time.monotonic()
+
+    for iteration in range(1, max_iterations + 1):
+        # Pre-call context management
+        messages, cleared = ctx_mgr.maybe_clear_tool_results(messages)
+        if cleared > 0:
+            log.info("loop iter %d: cleared %d tool results", iteration, cleared)
+        messages, compacted = ctx_mgr.maybe_compact(messages)
+        if compacted:
+            log.info("loop iter %d: compaction ran", iteration)
+
+        # Call the model
+        try:
+            resp = deps.llm.chat_with_tools(
+                messages=messages,
+                tools=ALL_TOOL_SCHEMAS,
+                temperature=0.4,
+                tool_choice="auto",
+            )
+        except LLMError as e:
+            log.warning("loop iter %d: LLM error: %s", iteration, e)
+            finish_reason = "llm_error"
+            error_text = str(e)
+            break
+
+        ctx_mgr.last_prompt_tokens = resp.prompt_tokens
+        total_cost_usd += resp.cost_usd or 0.0
+
+        # Append assistant message
+        assistant_msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": resp.content or "",
+        }
+        if resp.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": _json.dumps(tc.arguments, ensure_ascii=False),
+                    },
+                }
+                for tc in resp.tool_calls
+            ]
+        messages.append(assistant_msg)
+
+        if not resp.tool_calls:
+            # Model stopped calling tools → end of run
+            final_text = resp.content or ""
+            finish_reason = "end_turn"
+            break
+
+        # Execute each tool call (sequential, like Claude Code)
+        for tc in resp.tool_calls:
+            tool_t0 = time.monotonic()
+            tool_result = dispatch(tc.name, tc.arguments, deps)
+            tool_dt = time.monotonic() - tool_t0
+            if tool_dt > SOFT_TOOL_TIMEOUT_S:
+                log.warning(
+                    "loop iter %d: tool %s took %.1fs (slow)",
+                    iteration, tc.name, tool_dt,
+                )
+            tool_call_log.append(
+                f"iter{iteration}.{tc.name}({_brief_args(tc.arguments)})"
+                f" → {tool_result[:60]}"
+            )
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": tool_result,
+            })
+
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    _end_run(
+        deps, run_id=run_id, iterations=iteration,
+        tool_calls=tool_call_log, final_text=final_text,
+        cost_usd=total_cost_usd, status="ok" if error_text is None else "error",
+        error_text=error_text,
+    )
+
+    return RunResult(
+        run_id=run_id,
+        iterations=iteration,
+        final_text=final_text,
+        tool_call_log=tool_call_log,
+        cost_usd=total_cost_usd,
+        latency_ms=latency_ms,
+        finish_reason=finish_reason,
+        error_text=error_text,
+    )
+
+
+# ── Persistence helpers ──────────────────────────────────────────────
+
+
+def _start_run(deps: HarnessDeps, trigger: TriggerEvent) -> int:
+    detail_json = _json.dumps(trigger.detail, ensure_ascii=False, default=str)
+    with deps.store.connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO harness_runs(trigger_kind, trigger_detail) "
+            "VALUES (?, ?) RETURNING id",
+            (trigger.kind, detail_json[:2000]),
+        )
+        return int(cur.fetchone()[0])
+
+
+def _end_run(
+    deps: HarnessDeps, *, run_id: int, iterations: int,
+    tool_calls: list[str], final_text: str, cost_usd: float,
+    status: str, error_text: str | None,
+) -> None:
+    with deps.store.connect() as conn:
+        conn.execute(
+            "UPDATE harness_runs SET ended_at = julianday('now'), "
+            "iterations = ?, tool_calls_json = ?, final_text = ?, "
+            "cost_usd = ?, status = ?, error_text = ? WHERE id = ?",
+            (
+                iterations,
+                _json.dumps([t[:200] for t in tool_calls],
+                            ensure_ascii=False)[:8000],
+                final_text[:4000],
+                round(cost_usd, 6),
+                status,
+                error_text[:500] if error_text else None,
+                run_id,
+            ),
+        )
+
+
+def _brief_args(args: dict[str, Any]) -> str:
+    if not args:
+        return ""
+    parts = []
+    for k, v in args.items():
+        s = str(v)
+        parts.append(f"{k}={s[:30]!r}" if len(s) > 30 else f"{k}={v!r}")
+    return ", ".join(parts)[:80]
+
+
+# Re-export common types so callers can `from offerguide.harness.loop import ...`
+__all__ = [
+    "DEFAULT_MAX_ITERATIONS",
+    "RunResult",
+    "TriggerEvent",
+    "run",
+]
+
+
+# Silence linter: tools is imported for its side effects (dispatch table population
+# happens at import time) — used only via dispatch() above.
+_ = tools
+
+# Silence linter: _dt re-imported for type hint resolution downstream
+_ = _dt

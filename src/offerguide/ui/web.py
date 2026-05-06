@@ -330,6 +330,47 @@ def create_app(
                 "latest_job_id": latest_job_id,
             }
 
+        # W15.9 — surface the agent's worldview as the centerpiece of home.
+        # This is the "心智窗口" — what the agent actually thinks about the
+        # user / their job hunt right now. Read the markdown files the agent
+        # owns; show snippets so the user can read agent's brain at a glance.
+        worldview_summary: dict[str, str] = {}
+        worldview_files: list[str] = []
+        try:
+            from ..harness import MemoryStore, default_worldview_dir
+            wdir = default_worldview_dir(settings)
+            mstore = MemoryStore(root=wdir)
+            for fname in ("MEMORY.md", "candidate.md", "tracked-jobs.md", "upcoming-events.md"):
+                fpath = wdir / fname
+                if fpath.exists():
+                    text = fpath.read_text(encoding="utf-8")
+                    # First 60 lines is enough for at-a-glance — full file at /worldview/<fname>
+                    lines = text.splitlines()[:60]
+                    worldview_summary[fname] = "\n".join(lines)
+            worldview_files = mstore.list_files()
+        except Exception as e:
+            log.debug("worldview load failed (non-fatal): %s", e)
+
+        # Recent harness runs — 5 most recent for "agent 最近做了啥" strip
+        harness_runs_recent: list[dict[str, Any]] = []
+        try:
+            with store.connect() as conn:
+                rows = conn.execute(
+                    "SELECT id, trigger_kind, started_at, ended_at, "
+                    "       iterations, status, final_text, cost_usd "
+                    "FROM harness_runs ORDER BY started_at DESC LIMIT 5"
+                ).fetchall()
+            for r in rows:
+                harness_runs_recent.append({
+                    "id": int(r[0]), "trigger_kind": r[1],
+                    "started_at": r[2], "ended_at": r[3],
+                    "iterations": int(r[4] or 0), "status": r[5],
+                    "final_text": (r[6] or "")[:200],
+                    "cost_usd": float(r[7] or 0.0),
+                })
+        except Exception:
+            pass  # harness_runs table may not exist yet
+
         return templates.TemplateResponse(
             request,
             "home.html",
@@ -354,6 +395,9 @@ def create_app(
                 daemon_status=daemon_status,
                 activity_timeline=activity_timeline,
                 pending_questions=pending_questions,
+                worldview_summary=worldview_summary,
+                worldview_files=worldview_files,
+                harness_runs_recent=harness_runs_recent,
                 runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
                 active_tab="home",
             ),
@@ -385,14 +429,19 @@ def create_app(
         if runtime is None:
             raise HTTPException(400, "SkillRuntime 没初始化 (检查 LLM 配置)")
 
+        # W15.7: route through the harness instead of the deleted W14
+        # daemon helpers. The endpoint preserves the daemon_runs telemetry
+        # contract (mission control timeline) but executes via harness.
         from ..agentic.search import build_default_search
-        from ..autonomous.scheduler import (
-            JobContext,
-            _auto_score_via_daemon,
-            _discover_via_search_job,
+        from ..harness import (
+            HarnessDeps,
+            MemoryStore,
+            default_worldview_dir,
+            make_user_input_trigger,
         )
+        from ..harness import _schema as _harness_schema
+        from ..harness import run as harness_run
 
-        # Build a fresh JobContext with the same resources the web app has
         llm = LLMClient(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
@@ -402,15 +451,21 @@ def create_app(
             search = build_default_search()
         except Exception:
             search = None
-        ctx = JobContext(
-            settings=settings, store=store, llm=llm,
-            runtime=runtime, skills=skills,
+        _harness_schema.init_harness_schema(store)
+        deps = HarnessDeps(
+            settings=settings,
+            store=store,
+            memory_store=MemoryStore(root=default_worldview_dir(settings)),
+            llm=llm,
+            runtime=runtime,
+            skills=skills,
+            search=search,
+            notifier=notifier,
             user_profile_text=profile.raw_resume_text if profile else None,
-            search=search, notifier=notifier,
         )
 
-        # Record a daemon_runs row for this manual run so it shows up in
-        # the activity timeline like a cron run would.
+        # Record a daemon_runs row for this manual trigger so the
+        # Mission Control activity timeline still shows it (UI legacy).
         with store.connect() as conn:
             cur = conn.execute(
                 "INSERT INTO daemon_runs(job_name, status, summary_json) "
@@ -419,27 +474,25 @@ def create_app(
             )
             run_id = int(cur.fetchone()[0])
 
+        # Map old daemon names to a user-input goal the harness agent runs
+        if job_name == "discover_jobs_via_search":
+            user_msg = "(manual trigger) 帮我用 discover_jobs 找几个新岗位."
+        elif job_name == "auto_score_new_jobs":
+            user_msg = "(manual trigger) 给最近还没 score 的 jobs 跑 score_match."
+        else:  # wake_agent
+            user_msg = "(manual trigger) 看下当前状态自己决定干啥."
+
         try:
-            if job_name == "discover_jobs_via_search":
-                result = _discover_via_search_job(ctx)
-            elif job_name == "auto_score_new_jobs":
-                result = _auto_score_via_daemon(ctx)
-            else:  # wake_agent — kick off via the same route home_wake_agent uses
-                from ..agent.loop import AgentLoop
-                agent = AgentLoop(
-                    llm=llm, runtime=runtime, store=store, skills=skills,
-                    master_resume_text=profile.raw_resume_text if profile else "",
-                    max_iterations=6, critic_enabled=True, notifier=notifier,
-                )
-                agent_result = agent.run(
-                    goal="(manual trigger from Mission Control)",
-                    trigger_kind="user_button",
-                )
-                result = {
-                    "agent_run_id": agent_result.run_id,
-                    "iterations": agent_result.iterations,
-                    "critic_score": agent_result.critic_score,
-                }
+            res = harness_run(
+                trigger=make_user_input_trigger(user_msg), deps=deps,
+                max_iterations=15,
+            )
+            result = {
+                "harness_run_id": res.run_id,
+                "iterations": res.iterations,
+                "finish": res.finish_reason,
+                "cost_usd": round(res.cost_usd, 4),
+            }
             with store.connect() as conn:
                 conn.execute(
                     "UPDATE daemon_runs SET status='ok', "
@@ -508,6 +561,155 @@ def create_app(
             "latency_ms": result.latency_ms,
             "final_answer": result.final_answer,
         }
+
+    @app.post("/api/home/chat", response_class=JSONResponse)
+    async def home_chat(request: Request) -> Any:
+        """W15.9 — chat input on home → user_input trigger to harness.
+
+        User types something ("帮我找几个字节实习" or "我要面字节明天准备一下").
+        We package as `user_input` trigger and let the agent decide what tools
+        to call. Returns a summary the home page shows ("做了 X, 看 Y").
+        """
+        if not settings.deepseek_api_key:
+            raise HTTPException(400, "agent 不可用 — 缺 LLM API key")
+        body = await request.json()
+        message = (body.get("message") or "").strip()
+        if not message:
+            raise HTTPException(400, "message 不能为空")
+        if len(message) > 2000:
+            raise HTTPException(400, "message 太长 (max 2000)")
+
+        from ..harness import (
+            HarnessDeps,
+            MemoryStore,
+            default_worldview_dir,
+            make_user_input_trigger,
+        )
+        from ..harness import _schema as _hs
+        from ..harness import run as harness_run
+
+        _hs.init_harness_schema(store)
+        llm = LLMClient(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            default_model=settings.default_model,
+        )
+        try:
+            from ..agentic.search import build_default_search
+            try:
+                _search = build_default_search()
+            except Exception:
+                _search = None
+            deps = HarnessDeps(
+                settings=settings, store=store,
+                memory_store=MemoryStore(root=default_worldview_dir(settings)),
+                llm=llm, runtime=runtime, skills=skills,
+                search=_search, notifier=notifier,
+                user_profile_text=profile.raw_resume_text if profile else None,
+            )
+            import asyncio as _asyncio
+            res = await _asyncio.to_thread(
+                harness_run,
+                trigger=make_user_input_trigger(message),
+                deps=deps,
+                max_iterations=15,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                llm.close()
+        return {
+            "run_id": res.run_id,
+            "iterations": res.iterations,
+            "finish_reason": res.finish_reason,
+            "final_text": res.final_text[:2000],
+            "tool_calls": res.tool_call_log[-10:],
+            "cost_usd": round(res.cost_usd, 4),
+        }
+
+    @app.get("/debug", response_class=HTMLResponse)
+    def debug_view(request: Request) -> Any:
+        """W15.9 — Mission Control + harness telemetry debug view.
+
+        Demoted from home (W14.13) to its own page. For developers /
+        the user when they want to see "is the agent actually running".
+        """
+        # Ensure harness tables exist (no-op if already created) so a
+        # fresh store doesn't throw OperationalError when /debug is hit
+        # before any harness wake.
+        from ..harness import _schema as _hs
+        _hs.init_harness_schema(store)
+
+        # Daemon status (same logic as home in W14, kept here)
+        with store.connect() as conn:
+            recent_daemons = conn.execute(
+                "SELECT id, job_name, started_at, ended_at, status, "
+                "       summary_json, error_text "
+                "FROM daemon_runs ORDER BY started_at DESC LIMIT 30"
+            ).fetchall()
+            recent_harness = conn.execute(
+                "SELECT id, trigger_kind, trigger_detail, started_at, "
+                "       ended_at, iterations, status, final_text, "
+                "       tool_calls_json, cost_usd, error_text "
+                "FROM harness_runs ORDER BY started_at DESC LIMIT 30"
+            ).fetchall()
+            scheduled = conn.execute(
+                "SELECT id, fire_at, reason, fired_at, requested_by_run_id "
+                "FROM harness_scheduled_wakes ORDER BY fire_at DESC LIMIT 30"
+            ).fetchall()
+            events = conn.execute(
+                "SELECT id, kind, job_id, note, source, created_at "
+                "FROM harness_events ORDER BY id DESC LIMIT 30"
+            ).fetchall()
+
+        daemons_view = []
+        for r in recent_daemons:
+            summary = {}
+            with contextlib.suppress(Exception):
+                summary = json.loads(r[5] or "{}")
+            daemons_view.append({
+                "id": int(r[0]), "job_name": r[1],
+                "started_at": r[2], "ended_at": r[3],
+                "status": r[4], "summary": summary,
+                "error_text": r[6],
+            })
+        harness_view = []
+        for r in recent_harness:
+            tcs = []
+            with contextlib.suppress(Exception):
+                tcs = json.loads(r[8] or "[]")
+            harness_view.append({
+                "id": int(r[0]), "trigger_kind": r[1],
+                "trigger_detail": (r[2] or "")[:200],
+                "started_at": r[3], "ended_at": r[4],
+                "iterations": int(r[5] or 0), "status": r[6],
+                "final_text": (r[7] or "")[:300],
+                "tool_calls": tcs[:8],
+                "cost_usd": float(r[9] or 0.0),
+                "error_text": r[10],
+            })
+        scheduled_view = [
+            {"id": int(r[0]), "fire_at": r[1], "reason": r[2],
+             "fired_at": r[3], "requested_by_run_id": r[4]}
+            for r in scheduled
+        ]
+        events_view = [
+            {"id": int(r[0]), "kind": r[1], "job_id": r[2],
+             "note": (r[3] or "")[:120], "source": r[4], "created_at": r[5]}
+            for r in events
+        ]
+        return templates.TemplateResponse(
+            request,
+            "debug.html",
+            _ctx(
+                request,
+                daemons=daemons_view,
+                harness_runs=harness_view,
+                scheduled_wakes=scheduled_view,
+                harness_events=events_view,
+                runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
+                active_tab="debug",
+            ),
+        )
 
     # /quick-eval + /chat removed in W13.1 — superseded by /agent (model in main
     # position decides what to do, no need for a separate "paste JD then pick
@@ -2874,6 +3076,35 @@ def create_app(
             raise HTTPException(404, f"inbox item {item_id} not found") from None
         except ValueError as e:
             raise HTTPException(409, str(e)) from None
+
+        # W15.11 — feed user reaction into evolution_signals so GEPA learns
+        # what kinds of suggestions the user accepts/rejects. This is the
+        # learning loop that lets agent get more selective without if-else
+        # rules ("don't push X" — agent learns by seeing X get rejected).
+        try:
+            from ..harness import feedback as _hfb
+            skill_run_id = None
+            if isinstance(item.payload, dict):
+                _srid = item.payload.get("source_skill_run_id")
+                if isinstance(_srid, int):
+                    skill_run_id = _srid
+            if decision == "approved":
+                _hfb.on_inbox_accepted(
+                    store, inbox_id=item_id, skill_run_id=skill_run_id,
+                )
+            elif decision == "rejected":
+                _hfb.on_inbox_rejected(
+                    store, inbox_id=item_id, skill_run_id=skill_run_id,
+                )
+            # 'dismissed' = soft no — record as ignored (weaker signal)
+            elif decision == "dismissed":
+                _hfb.on_inbox_ignored(
+                    store, inbox_id=item_id, days_ignored=0,
+                )
+        except Exception as _e:
+            # Feedback recording must never fail the user-facing response.
+            log.warning("inbox feedback recording failed (non-fatal): %s", _e)
+
         return templates.TemplateResponse(
             request, "_inbox_list.html", _ctx(request, items=[item])
         )
@@ -2886,7 +3117,11 @@ def create_app(
         free_text: str | None = Form(None),
     ) -> Any:
         """W14.20 — user picked an option for a kind='question' item.
-        Writes user_facts so agent's next wake sees the answer."""
+        Writes user_facts so agent's next wake sees the answer.
+
+        W15.11 — also records into evolution_signals so GEPA learns which
+        questions yielded useful answers (vs which were ignored / dismissed).
+        """
         try:
             inbox_mod.answer_question(
                 store, item_id, option_id=option_id, free_text=free_text,
@@ -2895,6 +3130,16 @@ def create_app(
             raise HTTPException(404, f"inbox item {item_id} not found") from None
         except ValueError as e:
             raise HTTPException(409, str(e)) from None
+
+        try:
+            from ..harness import feedback as _hfb
+            _hfb.on_question_answered(
+                store, inbox_id=item_id, option_id=option_id,
+                free_text=free_text,
+            )
+        except Exception as _e:
+            log.warning("question feedback recording failed (non-fatal): %s", _e)
+
         return RedirectResponse("/", status_code=303)
 
     # ── Browser extension ingest endpoint ──────────────────────────────
