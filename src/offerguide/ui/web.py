@@ -1093,16 +1093,21 @@ def create_app(
 
     @app.get("/compare", response_class=HTMLResponse)
     def compare_view(request: Request, company: str = "") -> Any:
-        """List companies with ≥2 jobs; show comparison form for one company."""
-        from ..skills.compare_jobs.helpers import lookup_application_limit
+        """List companies with ≥2 jobs; show comparison form for one company.
+
+        W15.17 — surfaces source attribution for the app limit so the UI
+        can render "this is just a community estimate, let agent research"
+        instead of a confident number that's likely wrong.
+        """
+        from ..briefs import app_limit_with_attribution
 
         company_groups = _list_company_groups(store)
 
         target_jobs: list[dict] | None = None
-        target_limit: int | None = None
+        limit_answer = None
         if company:
             target_jobs = _list_jobs_for_company(store, company)
-            target_limit = lookup_application_limit(company)
+            limit_answer = app_limit_with_attribution(store, company)
 
         return templates.TemplateResponse(
             request,
@@ -1112,7 +1117,8 @@ def create_app(
                 company_groups=company_groups,
                 selected_company=company,
                 target_jobs=target_jobs,
-                target_limit=target_limit,
+                target_limit=limit_answer.limit if limit_answer else None,
+                limit_answer=limit_answer,  # full structured answer for UI
                 active_tab="compare",
             ),
         )

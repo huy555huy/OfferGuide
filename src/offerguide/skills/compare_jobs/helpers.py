@@ -29,19 +29,30 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# ── company → default application limit ────────────────────────────
-# Used by the /compare page when user doesn't override the limit. The
-# adapter / metric also uses this to grade whether the SKILL recommended
-# a sane number of "apply" actions.
+# ── community-estimate fallback table — W15.17 honesty pass ──────────
+# 这是 community estimates (网传 / 牛客 / 知乎 / 小红书 流传), **不是官方文档**.
+# Diagnosis report §正确修法 2 指出过去把这个当 "hard limit" 是精确的错误:
+# - 字节"硬限 2": 实际是建议 2 (非硬限)
+# - 阿里 "3": 实际仅 2 个应聘意向
+# 政策每年变 / 不同 BG 不一样 / 网传 ≠ 实际.
+#
+# **正确路径**: agent 用 Tavily 现搜 4 条 2026 来源 + LLM 评估,
+# 写进 ``company_briefs`` 表给后续用户复用. 详见 ``briefs.refresh_brief()``
+# + ``briefs.app_limit_with_attribution()``.
+#
+# 这个表保留作 **last-resort fallback** — 当 LLM/Tavily 不可用时, 至少
+# 有个估计返给用户, 但调用方必须**通过 ``app_limit_with_attribution`` 访问**
+# 而不是直接调 ``lookup_application_limit``, 这样 UI 才能展示 "这只是社区
+# 估计, 请让 agent 调研" 的提示.
 COMPANY_APPLICATION_LIMITS: dict[str, int] = {
-    "字节跳动":   2,   # 校招 hard limit
+    "字节跳动":   2,   # 网传校招建议 (非硬限)
     "字节":       2,
     "ByteDance":  2,
-    "阿里巴巴":   3,
+    "阿里巴巴":   3,   # 网传 (实际可能 2 个意向)
     "阿里":       3,
     "淘天":       3,
     "Alibaba":    3,
-    "腾讯":       5,   # multi-BU but recommend curation
+    "腾讯":       5,   # 网传 multi-BU 估计
     "Tencent":    5,
     "百度":       5,
     "Baidu":      5,
@@ -58,11 +69,23 @@ COMPANY_APPLICATION_LIMITS: dict[str, int] = {
 
 
 def lookup_application_limit(company: str, default: int = 3) -> int:
-    """Resolve a company name to its known application-limit cap.
+    """Resolve a company name to its **community-estimated** app limit.
+
+    .. deprecated:: W15.17
+        Direct use is discouraged — call
+        ``offerguide.briefs.app_limit_with_attribution`` instead, which
+        returns the same number alongside source/confidence so UI can
+        surface "just an estimate, click to refresh" semantics.
 
     Tries exact match, then prefix match (so '阿里云' matches '阿里').
     Returns ``default`` if no match.
     """
+    import logging as _log
+    _log.getLogger(__name__).debug(
+        "lookup_application_limit: hit community-estimate fallback for %r — "
+        "consider calling briefs.refresh_brief() to get fresh agent research",
+        company,
+    )
     if not company:
         return default
     if company in COMPANY_APPLICATION_LIMITS:

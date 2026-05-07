@@ -45,8 +45,35 @@
 <div class="card">
     <div class="card-header">
         <h2>{{ selected_company }} · {{ target_jobs|length }} 个职位</h2>
+        {% if limit_answer %}
+        <span class="meta">
+            投递限额估计: <strong>{{ limit_answer.limit }}</strong>
+            {# W15.17 — 颜色 + 提示展示 source attribution #}
+            {% if limit_answer.source == 'brief_high_confidence' %}
+            <span class="pill low" title="{{ limit_answer.notes }}">✓ Agent 已核实</span>
+            {% elif limit_answer.source == 'brief_low_confidence' %}
+            <span class="pill medium" title="{{ limit_answer.notes }}">⚠ Agent 数据不足</span>
+            {% elif limit_answer.source == 'community_estimate' %}
+            <span class="pill medium" title="{{ limit_answer.notes }}">⚠ 社区流传估计 (非官方)</span>
+            {% else %}
+            <span class="pill high" title="{{ limit_answer.notes }}">⚠ 未知, 默认猜测</span>
+            {% endif %}
+        </span>
+        {% else %}
         <span class="meta">已知投递限额: {{ target_limit }}</span>
+        {% endif %}
     </div>
+
+    {% if limit_answer and limit_answer.is_research_recommended %}
+    <div class="empty" style="padding: 0.625rem 0.875rem; background: var(--warning-soft);
+                                border-left: 3px solid var(--warning); margin-bottom: 0.875rem;">
+        <strong style="font-size: 0.85rem;">💡 这个数字不太可靠 — </strong>
+        <span class="small">{{ limit_answer.notes }}</span>
+        <br><span class="small muted">
+            (后续版本会加 "让 agent 现搜 4 条 2026 年来源刷新" 按钮 — W15.18+ 路上)
+        </span>
+    </div>
+    {% endif %}
 
     <p class="muted small" style="margin-top: -0.5rem;">
         勾选要比较的职位（≥ 2 个），SKILL 会输出"先投 X / 备选 Y / 跳过 Z"的决策表。

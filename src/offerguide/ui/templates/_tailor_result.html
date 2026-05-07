@@ -143,6 +143,89 @@
             {% endif %}
         </div>
         {% endif %}
+
+        {# W15.17 — inserted_claims with prep_plan
+           "把简历微调从虚假变成真学习" — 每个新插入的 claim 都带学习清单 #}
+        {% if tailored.inserted_claims %}
+        <div class="card" style="border-left: 4px solid var(--warning);">
+            <div class="card-header">
+                <h2 style="font-size: 1.05rem;">📚 你需要准备的事 ({{ tailored.inserted_claims|length }} 条)</h2>
+                <span class="meta">每条都是 agent 加进简历但 master 里 0 痕迹的 claim — 配 5-7 天学习清单</span>
+            </div>
+            <div class="muted small" style="margin-bottom: 0.875rem; line-height: 1.55;">
+                <strong>为什么要这个?</strong> Agent 给你简历加了 RAG / Attention 这些关键词,
+                如果你面试被问到答不上, 当场翻车. 这里每条都给你 5-7 天可执行的准备方案 —
+                <strong>把"虚假"变成"真学习"</strong>.
+            </div>
+            {% for ic in tailored.inserted_claims %}
+            <details style="margin-bottom: 0.625rem; padding: 0.75rem 0.875rem;
+                              background: var(--bg-subtle); border-radius: var(--radius-sm);"
+                     {% if ic.source_kind == 'completely_new' %}open{% endif %}>
+                <summary style="cursor: pointer; font-weight: 600;">
+                    {% if ic.source_kind == 'completely_new' %}
+                    <span class="pill high" style="font-size: 0.7rem;">⚠ 全新</span>
+                    {% elif ic.source_kind == 'supported_by_project' %}
+                    <span class="pill medium" style="font-size: 0.7rem;">○ 项目蕴含</span>
+                    {% else %}
+                    <span class="pill low" style="font-size: 0.7rem;">✓ 简历有支撑</span>
+                    {% endif %}
+                    <span style="margin-left: 0.5rem;">{{ ic.claim[:80] }}</span>
+                </summary>
+                <div style="padding: 0.625rem 0; line-height: 1.6;">
+                    <div style="margin-bottom: 0.5rem;">
+                        <strong style="font-size: 0.85rem;">📍 在简历哪儿:</strong>
+                        <span class="small">{{ ic.section }}</span>
+                    </div>
+                    <div style="margin-bottom: 0.5rem;">
+                        <strong style="font-size: 0.85rem;">💡 为什么加:</strong>
+                        <span class="small">{{ ic.why_inserted }}</span>
+                    </div>
+                    {% if ic.prep_plan %}
+                    <div style="border-top: 1px solid var(--border-soft); padding-top: 0.625rem;
+                                 margin-top: 0.625rem;">
+                        <strong style="font-size: 0.9rem;">📅 学习清单
+                            ({{ ic.prep_plan.days_needed }} 天)</strong>
+
+                        {% if ic.prep_plan.actions %}
+                        <div style="margin-top: 0.375rem;">
+                            <strong style="font-size: 0.8rem; color: var(--text-muted);">行动步骤:</strong>
+                            <ul style="margin: 0.25rem 0; padding-left: 1.5rem; font-size: 0.85rem;">
+                                {% for a in ic.prep_plan.actions %}<li>{{ a }}</li>{% endfor %}
+                            </ul>
+                        </div>
+                        {% endif %}
+
+                        {% if ic.prep_plan.key_papers_or_demos %}
+                        <div style="margin-top: 0.5rem;">
+                            <strong style="font-size: 0.8rem; color: var(--text-muted);">关键资料:</strong>
+                            <ul style="margin: 0.25rem 0; padding-left: 1.5rem; font-size: 0.85rem;">
+                                {% for p in ic.prep_plan.key_papers_or_demos %}<li>{{ p }}</li>{% endfor %}
+                            </ul>
+                        </div>
+                        {% endif %}
+
+                        {% if ic.prep_plan.interview_questions_to_prep %}
+                        <div style="margin-top: 0.5rem;">
+                            <strong style="font-size: 0.8rem; color: var(--text-muted);">面试可能问的 5 道题:</strong>
+                            <ul style="margin: 0.25rem 0; padding-left: 1.5rem; font-size: 0.85rem;">
+                                {% for q in ic.prep_plan.interview_questions_to_prep %}<li>{{ q }}</li>{% endfor %}
+                            </ul>
+                        </div>
+                        {% endif %}
+
+                        {% if ic.prep_plan.fallback_if_unprepared %}
+                        <div style="margin-top: 0.625rem; padding: 0.5rem 0.625rem;
+                                     background: var(--warning-soft); border-radius: 4px; font-size: 0.8rem;">
+                            <strong>万一还没准备好:</strong> {{ ic.prep_plan.fallback_if_unprepared }}
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                </div>
+            </details>
+            {% endfor %}
+        </div>
+        {% endif %}
     </div>
 </div>
 {% endif %}

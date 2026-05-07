@@ -299,15 +299,51 @@ def list_briefs(store: Store, *, limit: int = 50) -> list[BriefRow]:
     return out
 
 
+@dataclass(frozen=True)
+class AppLimitAnswer:
+    """W15.17 (correct fix #2) — "what's company X's app limit" with
+    explicit source attribution so callers can render honest UI.
+
+    Replaces the lossy ``(int, str)`` tuple from effective_app_limit().
+    The point: when source is 'community_estimate' or 'unknown', the
+    caller should **invite the agent to research** rather than print a
+    confident number — that's the W15.17 哲学修正 #2.
+    """
+
+    limit: int
+    """Best-guess application slot count. Always usable as a default;
+    accuracy depends on ``source``."""
+
+    source: str
+    """One of:
+    - 'brief_high_confidence' — agent's recent observations, ≥0.7 conf
+    - 'brief_low_confidence'  — brief exists but agent isn't sure
+    - 'community_estimate'    — fallback hardcoded table (网传, 非官方)
+    - 'default_fallback'      — unknown company, used 3 as guess
+    """
+
+    confidence: float
+    """0.0-1.0. Render as opacity / "我有 X% 把握" badge in UI."""
+
+    is_research_recommended: bool
+    """True → caller should offer a "让 agent 现搜 4 条 2026 来源刷新"
+    button. Set on community_estimate / default_fallback / low-confidence
+    brief — i.e. anything not based on agent's actual observations."""
+
+    notes: str
+    """1-sentence explanation for the user (NOT for logs). Goes into the
+    UI tooltip / badge text."""
+
+
 def effective_app_limit(
     store: Store, company: str, *, hardcoded_default: int = 3
 ) -> tuple[int, str]:
-    """Resolve "what's the application limit at this company" with the
-    agent's brief overriding the hardcoded table when confident.
+    """**Deprecated** since W15.17 — use :func:`app_limit_with_attribution`.
 
-    Returns (limit, source) where source is one of:
-    - "brief" — the agent's recent brief said so
-    - "hardcoded" — fell back to COMPANY_APPLICATION_LIMITS / default
+    Kept for backward compat: returns the same answer as before (brief value
+    only when confidence ≥ 0.6, else falls back to hardcoded). New code
+    should call ``app_limit_with_attribution`` directly to get rich source
+    attribution and ``is_research_recommended`` flags.
     """
     from .skills.compare_jobs.helpers import lookup_application_limit
 
@@ -319,3 +355,74 @@ def effective_app_limit(
     ):
         return row.brief.current_app_limit, "brief"
     return lookup_application_limit(company, default=hardcoded_default), "hardcoded"
+
+
+def app_limit_with_attribution(
+    store: Store, company: str, *, default: int = 3,
+) -> AppLimitAnswer:
+    """Resolve company's app limit with full source attribution (W15.17).
+
+    Diagnosis report §正确修法 2: 一岗多投这种动态信息**永远不该 hardcoded**.
+    Hardcoded table stays as last-resort fallback for graceful degradation
+    when LLM is unavailable, but **callers should surface the uncertainty**
+    via ``is_research_recommended`` and let the user trigger a refresh that
+    runs Tavily + LLM synthesis (see ``refresh_brief``).
+    """
+    from .skills.compare_jobs.helpers import (
+        COMPANY_APPLICATION_LIMITS,
+        lookup_application_limit,
+    )
+
+    row = get_brief(store, company)
+    if row and row.brief.current_app_limit is not None:
+        if row.brief.confidence >= 0.7:
+            return AppLimitAnswer(
+                limit=row.brief.current_app_limit,
+                source="brief_high_confidence",
+                confidence=row.brief.confidence,
+                is_research_recommended=False,
+                notes=(
+                    f"Agent 基于 {row.update_count} 次观察, 置信度 "
+                    f"{row.brief.confidence:.0%}"
+                ),
+            )
+        # Brief exists but low confidence — surface need for refresh
+        return AppLimitAnswer(
+            limit=row.brief.current_app_limit,
+            source="brief_low_confidence",
+            confidence=row.brief.confidence,
+            is_research_recommended=True,
+            notes=(
+                f"Agent 数据不足 (置信度 {row.brief.confidence:.0%}). "
+                "建议让 agent 重新搜一下"
+            ),
+        )
+
+    # No brief — fall back to community-estimate hardcoded table
+    in_table = (
+        company in COMPANY_APPLICATION_LIMITS
+        or any(k in company for k in COMPANY_APPLICATION_LIMITS)
+    )
+    if in_table:
+        return AppLimitAnswer(
+            limit=lookup_application_limit(company, default=default),
+            source="community_estimate",
+            confidence=0.3,
+            is_research_recommended=True,
+            notes=(
+                "社区流传估计 (网传, 非官方文档). 政策每年变, 各 BG 不一. "
+                "建议让 agent 现搜 4 条 2026 来源核实"
+            ),
+        )
+
+    # Fully unknown
+    return AppLimitAnswer(
+        limit=default,
+        source="default_fallback",
+        confidence=0.1,
+        is_research_recommended=True,
+        notes=(
+            f"未知公司, 默认假定 {default}. "
+            "强烈建议先让 agent 调研这家的实际限额"
+        ),
+    )

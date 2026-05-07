@@ -1477,6 +1477,92 @@ class TestReviewFixes:
         assert "保留 .docx 段落格式" in resp.text or "保 .docx" in resp.text or "保留 " in resp.text
         assert "不重写" in resp.text or "wording / order / emphasis" in resp.text
 
+    # ── W15.17 正确修法 2: app_limit_with_attribution 返结构化 source 信息
+    def test_app_limit_attribution_default_fallback(self, tmp_store):
+        from offerguide.briefs import app_limit_with_attribution
+        # 完全未知公司 → default_fallback
+        ans = app_limit_with_attribution(tmp_store, "随便一个不知道的公司", default=3)
+        assert ans.source == "default_fallback"
+        assert ans.is_research_recommended is True
+        assert ans.confidence < 0.5
+        assert "未知" in ans.notes or "默认" in ans.notes
+
+    def test_app_limit_attribution_community_estimate(self, tmp_store):
+        from offerguide.briefs import app_limit_with_attribution
+        # 字节在 hardcoded 表里 → community_estimate
+        ans = app_limit_with_attribution(tmp_store, "字节跳动")
+        assert ans.source == "community_estimate"
+        assert ans.is_research_recommended is True  # 应该建议 agent 现搜
+        assert ans.limit == 2
+        assert "社区" in ans.notes or "网传" in ans.notes
+
+    def test_app_limit_attribution_high_confidence_brief(self, tmp_store):
+        """Brief w/ confidence ≥ 0.7 → 不建议 research."""
+        import json as _json
+
+        from offerguide.briefs import app_limit_with_attribution
+
+        # Inject a high-confidence brief directly
+        with tmp_store.connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS company_briefs ("
+                "  company TEXT PRIMARY KEY, brief_json TEXT NOT NULL, "
+                "  last_updated_at REAL, update_count INTEGER DEFAULT 1)"
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO company_briefs "
+                "  (company, brief_json, last_updated_at, update_count) "
+                "VALUES (?, ?, julianday('now'), 5)",
+                ("某独角兽 AI", _json.dumps({
+                    "summary": "agent 已观察 5 次",
+                    "current_app_limit": 4,
+                    "interview_style": "重 Agent / RAG 落地题",
+                    "recent_signals": ["多次 retrieval miss"],
+                    "hiring_trend": "expanding",
+                    "confidence": 0.85,
+                })),
+            )
+        ans = app_limit_with_attribution(tmp_store, "某独角兽 AI")
+        assert ans.source == "brief_high_confidence"
+        assert ans.is_research_recommended is False  # 不需要 refresh
+        assert ans.limit == 4
+        assert ans.confidence == 0.85
+
+    def test_lookup_application_limit_logs_deprecation(self, caplog):
+        import logging as _log
+
+        from offerguide.skills.compare_jobs.helpers import lookup_application_limit
+        with caplog.at_level(_log.DEBUG, logger="offerguide.skills.compare_jobs.helpers"):
+            lookup_application_limit("字节跳动")
+        # 应该有 deprecation hint 日志 (encourages calling new API)
+        assert any("community-estimate" in r.message or "fallback" in r.message
+                   for r in caplog.records)
+
+    # ── W15.17 正确修法 1: tailor_resume SKILL.md schema 升级到 v0.2.0
+    def test_tailor_skill_v02_has_inserted_claims(self):
+        """tailor_resume SKILL.md 应该 v0.2.0 + inserted_claims 字段."""
+        from pathlib import Path
+        skill_path = Path(__file__).parent.parent / "src/offerguide/skills/tailor_resume/SKILL.md"
+        text = skill_path.read_text(encoding="utf-8")
+        assert "version: 0.2.0" in text
+        assert "inserted_claims" in text
+        # schema 必备字段
+        assert "source_kind" in text
+        assert "completely_new" in text  # 三档之一
+        assert "prep_plan" in text
+        assert "interview_questions_to_prep" in text
+        assert "fallback_if_unprepared" in text
+
+    def test_tailor_template_renders_inserted_claims(self):
+        """_tailor_result.html 应该有 inserted_claims 渲染块."""
+        from pathlib import Path
+        tpl = Path(__file__).parent.parent / "src/offerguide/ui/templates/_tailor_result.html"
+        text = tpl.read_text(encoding="utf-8")
+        assert "inserted_claims" in text
+        assert "你需要准备的事" in text
+        assert "学习清单" in text
+        assert "万一还没准备好" in text
+
     # ── Smell 6: dead code removed (no `_ = tools` statement at top level)
     def test_loop_module_no_dead_imports(self):
         from offerguide.harness import loop as loop_mod
