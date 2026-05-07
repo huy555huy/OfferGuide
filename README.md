@@ -43,19 +43,26 @@ uv run --extra ui python -m offerguide.ui.web
 
 ## Why this, and not another auto-applier
 
-业内的 AI 求职 agent ([AIHawk](https://github.com/feder-cr/Jobs_Applier_AI_Agent_AIHawk) 29.7k★、
+业内的 AI 求职 agent ([AIHawk](https://github.com/feder-cr/Jobs_Applier_AI_Agent_AIHawk) 原 29.6k★ — **作者 2026/4 已归档**、
 [ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot)、
-[get_jobs](https://github.com/loks666/get_jobs) 6.8k★ Java) **全是自动投递派**。
-但数据显示自动投递是死路：
+[get_jobs](https://github.com/loks666/get_jobs) 6.8k★ Java — **2024 末停更**) **全是自动投递派**。
+数据显示这条路在走死：
 
-- **97% 公司用 AI 驱动 ATS** 过滤简历（[来源](https://boterview.com/a/ai-recruitment-statistics)）
-- **49% 自动 dismiss AI 写的简历**（[来源](https://www.gettailor.ai/blog/ai-resume-detection)）
-- LazyApply Trustpilot **2.1 星 / 52% 最低分**；某用户投 14000 份只收到几百个 skills-mismatch 拒信
+- 头部自动投递工具陆续退场：AIHawk 归档、get_jobs 停更、LazyApply 拿 Trustpilot **2.1 星 / 52% 最低分**
   （[来源](https://www.trustpilot.com/review/lazyapply.com)）
+- **海外** 简历 ATS 使用率 ~97%（[来源](https://boterview.com/a/ai-recruitment-statistics)），
+  **国内** 大厂调研估测 60-70%（无权威公开数据，主要走"AI 初筛建议 + HR 终判"模式）
+- 海外 ATS 数据：**49% 自动 dismiss AI 写的整篇简历**（[来源](https://www.gettailor.ai/blog/ai-resume-detection)）
+  ——国内同等数据未见公开，但定向微调 vs 整篇重写的差距在中文 docx 上同样存在
 
 OfferGuide 反方向走：**不点投递**，做真正提高 reply rate 的事——精准匹配、定向微调
-（不重写）、投后跟踪、面试备战——并用用户自己的 dogfood 数据通过 GEPA **自进化**
-agent 的 SKILL prompt。
+（保留 docx 段落 style，**只改 wording / order / emphasis**, 不写未发生的经历）、投后跟踪、
+面试备战——并用用户自己的 dogfood 数据通过 GEPA **自进化** agent 的 SKILL prompt。
+
+> 几个数字要诚实标注: README 里关于"国内字节硬限 2 / 阿里 3 个意向"等 comparison
+> 决策依据，**多数是社区流传说法不是官方文档**。OfferGuide 把这些标记为
+> "estimated, source: community"（详见 `effective_app_limit()`），用户自己的真实
+> 面经会逐步覆盖这些猜测。简历定稿前会用真 dogfood 数据替换 [TBD] 占位。
 
 ---
 

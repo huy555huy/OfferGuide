@@ -321,7 +321,8 @@ class TestHomeAmbientRedesign:
                 " julianday('now'), julianday('now'))"
             )
         resp = client.get("/")
-        assert "Agent 当前在想" in resp.text
+        # W15.16 — copy de-jargonized: "当前在想" → "上次跑完说"
+        assert "Agent 上次跑完说" in resp.text or "Agent 当前在想" in resp.text
         assert "我看了 state, 决定 lay low" in resp.text
 
     def test_mission_control_demoted_to_collapsed(self, app_client):

@@ -81,7 +81,8 @@ class TestNavBadges:
         )
         resp = client.get("/")
         assert 'nav-badge high' in resp.text  # warning class
-        assert 'off-track' in resp.text  # tooltip
+        # W15.16 — tooltip changed from "off-track" English → "偏离轨道" 中文
+        assert ('off-track' in resp.text or '偏离轨道' in resp.text)
 
     def test_agent_critic_badge_color_coded(self, app_client):
         client, store = app_client

@@ -190,10 +190,11 @@
     {% else %}
     <div class="empty">
         <div class="empty-icon">📓</div>
-        <div class="empty-title">agent 还没写过自我观察</div>
+        <div class="empty-title">agent 还没写过反思笔记</div>
         <div class="empty-hint">
-            agent 跑 5+ 次后, 它会调 <code>meta_reflect</code> 把"我发现自己反复 X" 写到这里。<br>
-            是 agent 学习 ABOUT agent 自己的笔记 — 跟 user_facts (关于你) 不同。
+            Agent 跑几次之后, 它会反思自己的判断模式 ("我经常推这类岗位但 user 都拒了"),
+            把发现写在这里. 跟"对你的了解 (user_facts)" 是两回事 —
+            这个是 agent 关于自己的笔记.
         </div>
     </div>
     {% endif %}

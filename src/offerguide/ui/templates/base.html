@@ -147,6 +147,11 @@
         .nav-more[open] summary {
             background: var(--bg-subtle); color: var(--text);
         }
+        /* W15.16 — show "active" state on dropdown summary when one of its
+           children pages is the current tab. */
+        .nav-more summary.active {
+            background: var(--primary-soft); color: var(--primary-hover);
+        }
         .nav-more-panel {
             position: absolute; top: calc(100% + 4px); right: 0;
             background: var(--bg-elev);
@@ -610,41 +615,67 @@
     <header class="topbar">
         <div class="brand"><span class="dot"></span> OfferGuide</div>
         <nav>
-            <a href="/"             class="{% if active_tab == 'home' %}active{% endif %}">今日</a>
-            <a href="/agent"        class="{% if active_tab == 'agent' %}active{% endif %}">
+            {# W15.16 — 5 主 tab + 分组 dropdown (cite: docs/agent_diagnosis_2026-05-07.md §1.2)
+               原 19 个 nav 入口大幅简化为 "今日 / 投递 / 面试 / 简历 / Agent" 5 主 + 设置 dropdown #}
+            <a href="/" class="{% if active_tab == 'home' %}active{% endif %}">今日</a>
+
+            {# 投递: 看板 / 记录 / 跟踪 / 漏斗 #}
+            <details class="nav-more">
+                <summary class="{% if active_tab in ('pipeline','applications','jobs','funnel') %}active{% endif %}">📤 投递</summary>
+                <div class="nav-more-panel">
+                    <a href="/jobs"         class="{% if active_tab == 'jobs' %}active{% endif %}">📋 跟踪中</a>
+                    <a href="/pipeline"     class="{% if active_tab == 'pipeline' %}active{% endif %}">投递看板</a>
+                    <a href="/applications" class="{% if active_tab == 'applications' %}active{% endif %}">投递记录</a>
+                    <a href="/funnel"       class="{% if active_tab == 'funnel' %}active{% endif %}">📊 漏斗</a>
+                </div>
+            </details>
+
+            {# 面试: 面经 / 模拟 / 复盘 / 故事 #}
+            <details class="nav-more">
+                <summary class="{% if active_tab in ('interviews','mock','reflect','stories') %}active{% endif %}">🎤 面试</summary>
+                <div class="nav-more-panel">
+                    <a href="/interviews" class="{% if active_tab == 'interviews' %}active{% endif %}">面经库</a>
+                    <a href="/mock"       class="{% if active_tab == 'mock' %}active{% endif %}">模拟面试</a>
+                    <a href="/reflect"    class="{% if active_tab == 'reflect' %}active{% endif %}">面试复盘</a>
+                    <a href="/stories"    class="{% if active_tab == 'stories' %}active{% endif %}">故事库</a>
+                </div>
+            </details>
+
+            {# 简历: 微调 + 项目库 #}
+            <details class="nav-more">
+                <summary class="{% if active_tab in ('tailor','portfolio') %}active{% endif %}">📝 简历</summary>
+                <div class="nav-more-panel">
+                    <a href="/tailor"    class="{% if active_tab == 'tailor' %}active{% endif %}">简历微调 (保 docx 格式)</a>
+                    <a href="/portfolio" class="{% if active_tab == 'portfolio' %}active{% endif %}">📦 项目库</a>
+                </div>
+            </details>
+
+            <a href="/agent" class="{% if active_tab == 'agent' %}active{% endif %}">
                 🤖 Agent
                 {% if nav and nav.last_critic is not none %}
                 <span class="nav-badge {% if nav.last_critic >= 0.7 %}low{% elif nav.last_critic >= 0.4 %}middle{% else %}high{% endif %}">{{ "%.2f"|format(nav.last_critic) }}</span>
                 {% endif %}
             </a>
-            <a href="/goals"        class="{% if active_tab == 'goals' %}active{% endif %}">
-                🎯 Goals
-                {% if nav and nav.goals_off_track > 0 %}
-                <span class="nav-badge high" title="{{ nav.goals_off_track }} 个 goal off-track">⚠ {{ nav.goals_off_track }}</span>
-                {% endif %}
-            </a>
-            <a href="/pipeline"     class="{% if active_tab == 'pipeline' %}active{% endif %}">投递看板</a>
-            <a href="/applications" class="{% if active_tab == 'applications' %}active{% endif %}">投递记录</a>
+
+            {# 设置: Goals / Inbox / 进化 / 对比 / 系统状态 / Debug #}
             <details class="nav-more">
-                <summary>更多</summary>
+                <summary class="{% if active_tab in ('goals','inbox','evolution','compare','dashboard','debug') %}active{% endif %}">⚙ 设置</summary>
                 <div class="nav-more-panel">
-                    <a href="/tailor"     class="{% if active_tab == 'tailor' %}active{% endif %}">简历微调</a>
-                    <a href="/mock"       class="{% if active_tab == 'mock' %}active{% endif %}">模拟面试</a>
-                    <a href="/compare"    class="{% if active_tab == 'compare' %}active{% endif %}">岗位对比</a>
-                    <a href="/interviews" class="{% if active_tab == 'interviews' %}active{% endif %}">面经库</a>
-                    <a href="/stories"    class="{% if active_tab == 'stories' %}active{% endif %}">故事库</a>
-                    <a href="/reflect"    class="{% if active_tab == 'reflect' %}active{% endif %}">面试复盘</a>
-                    <a href="/inbox"      class="{% if active_tab == 'inbox' %}active{% endif %}">
+                    <a href="/goals" class="{% if active_tab == 'goals' %}active{% endif %}">
+                        🎯 目标
+                        {% if nav and nav.goals_off_track > 0 %}
+                        <span class="nav-badge high" title="{{ nav.goals_off_track }} 个目标偏离轨道">⚠ {{ nav.goals_off_track }}</span>
+                        {% endif %}
+                    </a>
+                    <a href="/inbox" class="{% if active_tab == 'inbox' %}active{% endif %}">
                         待办收件箱
                         {% if nav and nav.inbox_pending > 0 %}
                         <span class="nav-badge medium">{{ nav.inbox_pending }}</span>
                         {% endif %}
                     </a>
-                    <a href="/funnel"     class="{% if active_tab == 'funnel' %}active{% endif %}">📊 漏斗</a>
-                    <a href="/evolution"  class="{% if active_tab == 'evolution' %}active{% endif %}">🧬 进化</a>
-                    <a href="/portfolio"  class="{% if active_tab == 'portfolio' %}active{% endif %}">📦 Portfolio</a>
+                    <a href="/evolution"  class="{% if active_tab == 'evolution' %}active{% endif %}">🧬 SKILL 进化</a>
+                    <a href="/compare"    class="{% if active_tab == 'compare' %}active{% endif %}">岗位对比</a>
                     <a href="/dashboard"  class="{% if active_tab == 'dashboard' %}active{% endif %}">系统状态</a>
-                    <a href="/jobs"       class="{% if active_tab == 'jobs' %}active{% endif %}">📋 跟踪中</a>
                     <a href="/debug"      class="{% if active_tab == 'debug' %}active{% endif %}">⚙ Debug</a>
                 </div>
             </details>

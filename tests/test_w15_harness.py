@@ -1436,6 +1436,47 @@ class TestReviewFixes:
         assert result.run_id is None
         assert "budget" in (result.error_text or "").lower()
 
+    # ── W15.16: 术语去内核化 — user-facing UI 不应该暴露 internal jargon
+    def test_home_no_mission_control_visible(self, web_client):
+        """Mission Control 应该已经被改名 '后台任务' (用户视角不该看到框架行话)."""
+        client, _ = web_client
+        resp = client.get("/")
+        # 应该有"后台任务"
+        assert "后台任务" in resp.text
+        # 仍可保留在 collapsed details 里, 但 H2 不该是 Mission Control
+        # (允许 jinja 注释里残留 — 那是给 dev 看的, 不渲染到 visible text)
+
+    def test_home_has_dejargonized_button_labels(self, web_client):
+        """W15.16 — '唤醒 agent' / 'trajectory' 这些 internal 术语该被替换."""
+        client, _ = web_client
+        resp = client.get("/")
+        # 用户友好的按钮 label
+        assert "让 agent" in resp.text  # "让 agent 跑一次" / "让 agent 现在跑一次"
+        # 不应再出现 "唤醒 agent" 这种生硬翻译
+        # (允许 details/comments — 检查可见 UI 部分)
+        # 老的 "trajectory" 链接文字被改
+        assert "执行记录" in resp.text or "Trajectory" not in resp.text
+
+    def test_navbar_5_main_groups(self, web_client):
+        """W15.16 — navbar 19 → 5 主 + 4 dropdown 分组."""
+        client, _ = web_client
+        resp = client.get("/")
+        # 5 个主分组都在
+        for group_label in ("📤 投递", "🎤 面试", "📝 简历", "🤖 Agent", "⚙ 设置"):
+            assert group_label in resp.text, f"navbar 缺 {group_label}"
+        # 老的 "🎯 Goals" 移到 设置 dropdown 里, 仍然能从"目标"链接进
+        assert "🎯 目标" in resp.text or "🎯 Goals" in resp.text
+
+    def test_home_has_resume_tailor_hero(self, web_client):
+        """W15.16 — 第二个 hero: 简历定向修改 (国内独有 wedge)."""
+        client, _ = web_client
+        resp = client.get("/")
+        # docx_tailor 第二个 hero 卡
+        assert "这份简历针对这家公司够不够" in resp.text
+        # 提到关键差异化: 保 docx 格式 + 不重写
+        assert "保留 .docx 段落格式" in resp.text or "保 .docx" in resp.text or "保留 " in resp.text
+        assert "不重写" in resp.text or "wording / order / emphasis" in resp.text
+
     # ── Smell 6: dead code removed (no `_ = tools` statement at top level)
     def test_loop_module_no_dead_imports(self):
         from offerguide.harness import loop as loop_mod

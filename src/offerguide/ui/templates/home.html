@@ -158,6 +158,26 @@
     <div id="evaluate-result" style="display: none; margin-top: 0.875rem;"></div>
 </div>
 
+{# ─────────── W15.16 Hero #2 — 简历定向微调 (保 docx 格式, 国内独有) ─────────── #}
+
+<div class="card" style="background: var(--bg-elev); border-left: 4px solid var(--success); border-width: 1px 1px 1px 4px;">
+    <div class="card-header">
+        <h2 style="font-family: var(--font-serif); font-size: 1.25rem;">📝 这份简历针对这家公司够不够?</h2>
+        <span class="meta">粘 JD + 上传简历 → 9 段定向修改建议 (保留 .docx 段落格式, 不重写)</span>
+    </div>
+    {% if profile_loaded %}
+    <div class="small muted" style="margin-bottom: 0.625rem;">
+        ✓ 已加载你的简历 ({{ profile_chars }} 字). 直接粘 JD →
+        <a href="/tailor" class="btn ghost" style="display: inline-block; margin-left: 0.25rem;">去 /tailor 定向修改 →</a>
+    </div>
+    {% else %}
+    <div class="small muted" style="margin-bottom: 0.625rem;">
+        ⚠ 还没配置简历. 在 .env 里设 <code>OFFERGUIDE_RESUME_PDF</code> (支持 .pdf / .docx) 后重启即可.
+        <br>定向修改 = 只动 wording / order / emphasis, 不写未发生的经历, 保 docx 段落 style 给 ATS 看.
+    </div>
+    {% endif %}
+</div>
+
 {# ─────────── 💬 Chat input — generic agent 对话 (次要入口) ─────────── #}
 
 <details class="card" style="background: var(--bg-elev); margin-bottom: 1rem;">
@@ -165,7 +185,7 @@
         💬 跟 agent 说话 (通用对话, 30-90s) — 点开
     </summary>
     <div class="card-header" style="margin-top: 0.5rem;">
-        <span class="meta">输入会唤醒 agent, 它会看 worldview + 自己决定怎么帮你</span>
+        <span class="meta">Agent 会先看它对你的了解再决定怎么帮你</span>
     </div>
     <form id="agent-chat-form" onsubmit="return submitAgentChat(event)">
         <textarea id="agent-chat-input" rows="2" required
@@ -191,11 +211,11 @@
 {# ─────────── W15: 🧠 Agent's worldview summary ─────────── #}
 
 {% if worldview_summary %}
-<div class="card" style="background: var(--bg-elev); border-left: 4px solid var(--success);">
-    <div class="card-header">
-        <h2 style="font-family: var(--font-serif);">🧠 Agent 现在对你的理解</h2>
-        <span class="meta">来自 .offerguide/worldview/ — agent 自己维护的 markdown 文件</span>
-    </div>
+<details class="card" style="background: var(--bg-elev); border-left: 4px solid var(--success);">
+    <summary style="cursor: pointer; padding: 0.25rem 0;">
+        <h2 style="display: inline; font-family: var(--font-serif); font-size: 1.05rem; margin: 0;">🧠 Agent 对你的了解 (点开看详情)</h2>
+        <span class="muted small" style="margin-left: 0.5rem;">— Agent 自己整理的笔记, 你可以审 / 改</span>
+    </summary>
     {% set wv_files = ['MEMORY.md', 'candidate.md', 'tracked-jobs.md', 'upcoming-events.md'] %}
     {% for fname in wv_files %}
         {% if fname in worldview_summary and worldview_summary[fname].strip() %}
@@ -213,9 +233,9 @@
         {% endif %}
     {% endfor %}
     {% if not worldview_summary %}
-    <div class="small muted">worldview 还是空的 — agent 第一次 wake 后会自己 ask_user 拿基础信息.</div>
+    <div class="small muted">还是空的 — agent 第一次跑完后会自己问你要基础信息.</div>
     {% endif %}
-</div>
+</details>
 {% endif %}
 
 {# ─────────── W15: ⚡ Agent 最近做了啥 (harness_runs) ─────────── #}
@@ -226,10 +246,16 @@
         <h3 style="font-family: var(--font-serif); margin: 0; font-size: 1rem;">⚡ Agent 最近 5 次 wake</h3>
         <a href="/debug" class="muted small">详细看 /debug →</a>
     </div>
+    {% set trigger_labels = {
+        "cron": "定时巡检",
+        "user_input": "你说话",
+        "scheduled": "定时任务",
+        "event": "事件触发",
+    } %}
     {% for r in harness_runs_recent %}
     <div style="display: flex; gap: 0.625rem; padding: 0.375rem 0; border-bottom: 1px solid var(--border-soft); font-size: 0.82rem; align-items: flex-start;">
         <span class="pill {% if r.status == 'ok' %}low{% elif r.status == 'error' %}high{% else %}medium{% endif %}" style="min-width: 50px; text-align: center;">{{ r.status }}</span>
-        <code style="color: var(--primary); min-width: 110px;">{{ r.trigger_kind }}</code>
+        <span style="color: var(--primary); min-width: 110px; font-size: 0.85rem;">{{ trigger_labels.get(r.trigger_kind, r.trigger_kind) }}</span>
         <div style="flex: 1; color: var(--text-muted); font-size: 0.8rem;">
             {{ r.iterations }} 步 · ${{ "%.4f"|format(r.cost_usd) }}
             {% if r.final_text %}<br>{{ r.final_text[:140] }}{% endif %}
@@ -244,7 +270,7 @@
 {% if latest_run %}
 <div class="card" style="background: var(--bg-elev); border-left: 4px solid var(--primary);">
     <div class="card-header">
-        <h2 style="font-family: var(--font-serif);">🤖 Agent 当前在想…</h2>
+        <h2 style="font-family: var(--font-serif);">🤖 Agent 上次跑完说</h2>
         <span class="meta">
             {% if latest_run.started_at %}
                 {% set hours_ago = ((latest_run.started_at|float) - (latest_run.started_at|float)) %}
@@ -257,18 +283,18 @@
     <div style="font-size: 0.92rem; line-height: 1.7; white-space: pre-wrap;">{{ (latest_run.final_answer or '(空)')[:1500] }}</div>
     <div class="actions" style="margin-top: 0.75rem;">
         <button class="btn secondary" onclick="triggerDaemon('wake_agent', this)" data-loading-text="agent 思考中... 30-60s">
-            ▶ 立刻再唤醒 agent
+            ▶ 让 agent 现在跑一次
         </button>
-        <a class="btn ghost" href="/agent/runs/{{ latest_run.id }}">看完整 trajectory →</a>
+        <a class="btn ghost" href="/agent/runs/{{ latest_run.id }}">看完整执行记录 →</a>
     </div>
 </div>
 {% else %}
 <div class="card" style="background: var(--primary-soft); border-color: var(--primary);">
     <h2 style="margin: 0 0 0.5rem; font-family: var(--font-serif); font-size: 1rem;">🤖 Agent 还没跑过</h2>
-    <div class="small">心跳每小时叫 agent 一次, 它看 state 自己决定干啥. 现在手动唤醒一次试试:</div>
+    <div class="small">Agent 每小时巡检一次, 自己决定要不要做事. 也可以现在手动跑一次:</div>
     <div class="actions" style="margin-top: 0.625rem;">
         <button class="btn" onclick="triggerDaemon('wake_agent', this)" data-loading-text="agent 思考中... 30-60s" {% if not runtime_ready %}disabled{% endif %}>
-            ▶ 唤醒 agent
+            ▶ 让 agent 跑一次
         </button>
     </div>
 </div>
@@ -281,7 +307,7 @@
    reading "agent 在想啥 / 推了啥 / 问了啥" above. #}
 <details style="margin-bottom: 1rem;">
     <summary class="muted small" style="cursor: pointer; padding: 0.5rem;">
-        ⚙ Mission Control (debug — 看 daemon 状态 / 手动 trigger)
+        ⚙ 后台任务 (开发者视角 — 看定时任务状态 / 手动触发)
     </summary>
     <div style="margin-top: 0.5rem;">
 
@@ -345,7 +371,7 @@
 </style>
 
 <div class="mc">
-    <h2>🛰 Mission Control — agent 后台正在做的事</h2>
+    <h2>🛰 后台任务 — agent 在做的事</h2>
     {% if not runtime_ready %}
     <div class="empty" style="padding: 1rem;">
         <div class="empty-title">Scheduler 没启动</div>
@@ -816,7 +842,7 @@ async function submitAgentChat(ev) {
                 (tools ? `\n\n工具调用:\n  · ${tools}` : '');
             result.style.display = 'block';
             input.value = '';
-            status.textContent = '✓ 完成 — 刷新看 worldview 变化';
+            status.textContent = '✓ 完成 — 刷新看 agent 是否更新了笔记';
             setTimeout(() => location.reload(), 2000);
         } else {
             const err = await r.text();
