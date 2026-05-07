@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..llm import LLMError
+from ..llm import BudgetExceeded, LLMError, enforce_daily_budget
 from . import _schema
 from .context import ContextManager, SystemFacts
 from .tools import ALL_TOOL_SCHEMAS, HarnessDeps, dispatch
@@ -155,6 +155,18 @@ def run(
 
     # Ensure harness tables exist (idempotent)
     _schema.init_harness_schema(deps.store)
+
+    # W15.15 — daily budget guard. Cheap (1 SQL aggregate); refuses to
+    # start a run if today's LLM spend already exceeded the cap.
+    try:
+        enforce_daily_budget(deps.store)
+    except BudgetExceeded as e:
+        log.warning("loop: refusing run, %s", e)
+        return RunResult(
+            run_id=None, iterations=0, final_text="",
+            tool_call_log=[], cost_usd=0.0, latency_ms=0,
+            finish_reason="budget_exceeded", error_text=str(e),
+        )
 
     # Insert harness_runs row early so tools can reference deps.current_run_id
     run_id = _start_run(deps, trigger)

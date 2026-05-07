@@ -1310,6 +1310,132 @@ class TestReviewFixes:
         assert "算法实习" in r2.text
         assert "评估过 / 待决" in r2.text
 
+    # ── W15.15: cache_hit_tokens parsing (DeepSeek + Anthropic formats)
+    def test_cache_split_parses_deepseek_format(self):
+        from offerguide.llm.client import _parse_cache_split
+        usage = {
+            "prompt_tokens": 1000,
+            "prompt_cache_hit_tokens": 800,
+            "prompt_cache_miss_tokens": 200,
+        }
+        hit, miss = _parse_cache_split(usage, 1000)
+        assert hit == 800
+        assert miss == 200
+
+    def test_cache_split_parses_anthropic_format(self):
+        from offerguide.llm.client import _parse_cache_split
+        usage = {
+            "input_tokens": 200,
+            "cache_read_input_tokens": 800,
+            "cache_creation_input_tokens": 0,
+        }
+        # prompt_tokens = 1000 (sum)
+        hit, miss = _parse_cache_split(usage, 1000)
+        assert hit == 800
+        assert miss == 200
+
+    def test_cache_split_falls_back_to_no_cache(self):
+        """Old proxy / OpenAI without cache info — assume all miss."""
+        from offerguide.llm.client import _parse_cache_split
+        usage = {"prompt_tokens": 500, "completion_tokens": 100}
+        hit, miss = _parse_cache_split(usage, 500)
+        assert hit == 0
+        assert miss == 500
+
+    def test_estimate_cost_with_cache_hit_cheaper(self):
+        """Cache-hit tokens should be charged at the cheaper rate."""
+        from offerguide.llm.pricing import estimate_cost_usd
+        # 1000 tokens, no cache hit
+        no_cache = estimate_cost_usd(
+            model="deepseek-v4-flash",
+            prompt_tokens=1000, completion_tokens=0,
+            cache_hit_tokens=0,
+        )
+        # 1000 tokens, all cache hit
+        all_cache = estimate_cost_usd(
+            model="deepseek-v4-flash",
+            prompt_tokens=1000, completion_tokens=0,
+            cache_hit_tokens=1000,
+        )
+        # Cache-hit price should be ~10% of no-cache
+        assert all_cache < no_cache
+        assert all_cache <= no_cache * 0.2  # at most 20% (we set ratio at 10%)
+
+    # ── W15.15: daily budget guardrail
+    def test_budget_under_cap_passes(self, tmp_store):
+        from offerguide.llm.budget import enforce_daily_budget
+        # Fresh store, no spend → should not raise
+        enforce_daily_budget(tmp_store, cap_usd=5.0)  # no exception
+
+    def test_budget_over_cap_raises(self, tmp_store):
+        from offerguide.llm.budget import BudgetExceeded, enforce_daily_budget
+        # Inject a huge harness_run cost
+        with tmp_store.connect() as conn:
+            conn.execute(
+                "INSERT INTO harness_runs(trigger_kind, started_at, cost_usd) "
+                "VALUES ('cron', julianday('now'), 99.99)"
+            )
+        with pytest.raises(BudgetExceeded) as excinfo:
+            enforce_daily_budget(tmp_store, cap_usd=5.0)
+        assert excinfo.value.today_spent_usd >= 99.0
+        assert excinfo.value.cap_usd == 5.0
+
+    def test_budget_disabled_when_cap_zero(self, tmp_store):
+        from offerguide.llm.budget import enforce_daily_budget
+        # Inject huge cost
+        with tmp_store.connect() as conn:
+            conn.execute(
+                "INSERT INTO harness_runs(trigger_kind, started_at, cost_usd) "
+                "VALUES ('cron', julianday('now'), 999.99)"
+            )
+        # cap=0 → disabled, should not raise
+        enforce_daily_budget(tmp_store, cap_usd=0.0)
+
+    def test_budget_includes_skill_runs_too(self, tmp_store):
+        from offerguide.llm.budget import get_today_spend_usd
+        with tmp_store.connect() as conn:
+            conn.execute(
+                "INSERT INTO skill_runs(skill_name, skill_version, input_hash, "
+                "  input_json, output_json, cost_usd) "
+                "VALUES ('score_match', 'v1', 'h', '{}', '{}', 1.50)"
+            )
+            conn.execute(
+                "INSERT INTO harness_runs(trigger_kind, started_at, cost_usd) "
+                "VALUES ('cron', julianday('now'), 0.30)"
+            )
+        spent = get_today_spend_usd(tmp_store)
+        assert abs(spent - 1.80) < 0.01
+
+    def test_loop_returns_budget_exceeded_finish_reason(self, tmp_store, tmp_worldview):
+        """Harness loop refuses to start when over budget."""
+        from offerguide.harness.loop import run as harness_run
+        from offerguide.harness.triggers import make_cron_heartbeat
+        with tmp_store.connect() as conn:
+            conn.execute(
+                "INSERT INTO harness_runs(trigger_kind, started_at, cost_usd) "
+                "VALUES ('cron', julianday('now'), 99.99)"
+            )
+        deps = HarnessDeps(
+            settings=Settings(deepseek_api_key="x", default_model="stub"),
+            store=tmp_store,
+            memory_store=MemoryStore(root=tmp_worldview),
+            llm=StubLLM(),  # type: ignore[arg-type]
+        )
+        # Set a low cap via env
+        import os as _os
+        prev = _os.environ.get("OFFERGUIDE_DAILY_BUDGET_USD")
+        _os.environ["OFFERGUIDE_DAILY_BUDGET_USD"] = "5.0"
+        try:
+            result = harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        finally:
+            if prev is None:
+                _os.environ.pop("OFFERGUIDE_DAILY_BUDGET_USD", None)
+            else:
+                _os.environ["OFFERGUIDE_DAILY_BUDGET_USD"] = prev
+        assert result.finish_reason == "budget_exceeded"
+        assert result.run_id is None
+        assert "budget" in (result.error_text or "").lower()
+
     # ── Smell 6: dead code removed (no `_ = tools` statement at top level)
     def test_loop_module_no_dead_imports(self):
         from offerguide.harness import loop as loop_mod

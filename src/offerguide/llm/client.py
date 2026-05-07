@@ -90,6 +90,39 @@ def _parse_tool_arguments(args_raw: str) -> dict[str, Any]:
     return found[-1]
 
 
+def _parse_cache_split(usage: dict[str, Any], prompt_tokens: int) -> tuple[int, int]:
+    """Extract (cache_hit_tokens, cache_miss_tokens) from a usage dict.
+
+    Handles both vendor formats (W15.15):
+    - **DeepSeek** (OpenAI-compat): ``prompt_cache_hit_tokens`` /
+      ``prompt_cache_miss_tokens``. Sum equals ``prompt_tokens``.
+    - **Anthropic** (Claude API): ``cache_read_input_tokens`` (= hit) /
+      ``cache_creation_input_tokens`` (= write — billed at 1.25x normal,
+      we treat as miss for simplicity since it's not cache-saved). Plus
+      regular ``input_tokens`` for the rest. ``prompt_tokens`` aggregates
+      all three for some proxies.
+
+    Returns:
+        (hit, miss) where hit + miss <= prompt_tokens. If the API
+        doesn't expose cache info (e.g. older proxy / OpenAI), returns
+        (0, prompt_tokens).
+    """
+    # DeepSeek format
+    hit = usage.get("prompt_cache_hit_tokens")
+    miss = usage.get("prompt_cache_miss_tokens")
+    if isinstance(hit, int) and isinstance(miss, int):
+        return (int(hit), int(miss))
+
+    # Anthropic format
+    a_hit = usage.get("cache_read_input_tokens", 0)
+    if isinstance(a_hit, int) and a_hit > 0:
+        m = max(0, prompt_tokens - a_hit)
+        return (int(a_hit), m)
+
+    # Unknown format — assume no cache hits, all miss
+    return (0, prompt_tokens)
+
+
 def _strip_md_codefence(s: str) -> str:
     """Strip ```...``` and ```json...``` fences from an LLM response.
 
@@ -186,6 +219,13 @@ class LLMResponse:
     """OpenAI-spec finish_reason: 'stop' | 'tool_calls' | 'length' | ...
     Useful for the agent loop to detect ``length`` (context cap hit) vs a
     clean stop."""
+    # W15.15 — cache observability. Both DeepSeek (auto prefix cache) and
+    # Anthropic (cache_control mark) report hit/miss split in usage.
+    # We parse + store so /debug can show cache hit ratio + accurate cost.
+    cache_hit_tokens: int = 0
+    """Subset of ``prompt_tokens`` served from cache (cheaper)."""
+    cache_miss_tokens: int = 0
+    """Subset of ``prompt_tokens`` that wasn't in cache (full price)."""
 
 
 class LLMClient:
@@ -275,15 +315,23 @@ class LLMClient:
         usage = payload.get("usage", {})
         prompt_tokens = int(usage.get("prompt_tokens", 0))
         completion_tokens = int(usage.get("completion_tokens", 0))
+        cache_hit_tokens, cache_miss_tokens = _parse_cache_split(usage, prompt_tokens)
         actual_model = payload.get("model", body["model"])
         return LLMResponse(
             content=content,
             model=actual_model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            cost_usd=_estimate_cost(model=actual_model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens),
+            cost_usd=_estimate_cost(
+                model=actual_model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cache_hit_tokens=cache_hit_tokens,
+            ),
             latency_ms=latency_ms,
             raw=payload,
+            cache_hit_tokens=cache_hit_tokens,
+            cache_miss_tokens=cache_miss_tokens,
         )
 
     def chat_with_tools(
@@ -409,17 +457,25 @@ class LLMClient:
         usage = payload.get("usage", {})
         prompt_tokens = int(usage.get("prompt_tokens", 0))
         completion_tokens = int(usage.get("completion_tokens", 0))
+        cache_hit_tokens, cache_miss_tokens = _parse_cache_split(usage, prompt_tokens)
         actual_model = payload.get("model", body["model"])
         return LLMResponse(
             content=content,
             model=actual_model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            cost_usd=_estimate_cost(model=actual_model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens),
+            cost_usd=_estimate_cost(
+                model=actual_model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cache_hit_tokens=cache_hit_tokens,
+            ),
             latency_ms=latency_ms,
             raw=payload,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
+            cache_hit_tokens=cache_hit_tokens,
+            cache_miss_tokens=cache_miss_tokens,
         )
 
     def close(self) -> None:

@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from ..llm import BudgetExceeded, enforce_daily_budget
 from .tools import HarnessDeps, _record_event_row, _strip_html_to_text
 
 if TYPE_CHECKING:
@@ -105,6 +106,17 @@ def evaluate_job(
     if not raw:
         result.user_facing_error = "请粘贴 JD 链接或文本"
         result.fetch_status = "error"
+        return result
+
+    # W15.15 — daily budget guard. evaluate flow is cheaper than full agent
+    # loop ($0.02 vs $0.10) but still enforce — cumulative paste-spam can
+    # add up.
+    try:
+        enforce_daily_budget(deps.store)
+    except BudgetExceeded as e:
+        result.user_facing_error = str(e)
+        result.fetch_status = "error"
+        log.warning("evaluate: refusing, %s", e)
         return result
 
     # ── Step 1: fetch + ingest ─────────────────────────────────────

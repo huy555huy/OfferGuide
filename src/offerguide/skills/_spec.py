@@ -8,6 +8,18 @@ any agent runtime code.
 Field naming follows Hermes' on-disk format (so a Hermes skill can be loaded
 verbatim) plus three OfferGuide-specific extensions for the self-evolution loop:
 `inputs`, `output_schema`, `evolved_at` / `parent_version`.
+
+W15.15 — **Anthropic Agent Skills Open Standard compatibility**:
+The required frontmatter fields (`name` + `description`) match the 2026-01
+Anthropic Skills spec. Our additional fields (version, tags, triggers,
+inputs, output_schema) are silently ignored by Anthropic loaders, so the
+same SKILL files can be:
+- Used by our internal SkillRuntime (full feature set)
+- Loaded as Claude Code / Codex plugins (just name + description)
+- Migrated to Managed Agents memory (frontmatter preserved)
+
+No code changes needed for compatibility — the format was already aligned.
+See ``tests/test_w15_skills_compat.py`` for the regression check.
 """
 
 from __future__ import annotations
