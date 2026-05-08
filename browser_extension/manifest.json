@@ -1,13 +1,15 @@
 {
   "manifest_version": 3,
   "name": "OfferGuide Boss 助手",
-  "version": "0.1.0",
-  "description": "从 Boss直聘 JD 页面提取岗位信息，一键发送到 OfferGuide 本地 Copilot。不自动采集——点击扩展图标才提取。",
+  "version": "0.2.0",
+  "description": "BOSS直聘 JD 详情 + 推荐列表 一键 sync 到 OfferGuide. 不自动采集，点击扩展图标才提取。",
 
   "permissions": ["activeTab", "scripting"],
   "host_permissions": [
     "http://localhost:*/*",
-    "http://127.0.0.1:*/*"
+    "http://127.0.0.1:*/*",
+    "https://www.zhipin.com/*",
+    "https://zhipin.com/*"
   ],
 
   "action": {

@@ -3458,11 +3458,111 @@ def create_app(
         is_new, job_id = scout.ingest(store, rj)
         return {"is_new": is_new, "job_id": job_id}
 
+    @app.post("/api/extension/bulk_ingest", response_class=JSONResponse)
+    def extension_bulk_ingest(payload: ExtensionListPayload) -> dict:
+        """W15.18 — accept BOSS 推荐列表 from extension. Bulk ingest N jobs.
+
+        用户在 BOSS 自己刷岗位 → 扩展抓推荐列表 → 一键 sync 整页 N 个岗位
+        到 OfferGuide. Agent 拿到后自动 score / 排序 / 主动通知.
+
+        这是 W15.17 用户反馈"没自动找岗位项目就没用"的回应 — 因为国内
+        BOSS/牛客 反爬严重不能 zero-touch crawl, 走"用户开 BOSS 我帮 sync"
+        的合法路径 (用户自己账号, 自己看到的页面).
+
+        每个 item 行 description 是空的 (列表页不展开 JD 全文), 只入
+        title/company/salary/location/tags. 后续用户点感兴趣的可去 JD 详情
+        页用 /api/extension/ingest 补 description.
+        """
+        items = payload.items or []
+        if not items:
+            raise HTTPException(400, "items 不能为空")
+        if len(items) > 200:
+            raise HTTPException(400, f"items 太多 ({len(items)}, max 200)")
+
+        inserted = 0
+        duplicate = 0
+        new_job_ids: list[int] = []
+        skipped_reasons: list[str] = []
+
+        for item in items:
+            if not (item.title and item.company):
+                skipped_reasons.append(
+                    f"缺 title/company: {item.title!r} / {item.company!r}"
+                )
+                continue
+            # description 在列表模式是空的, 用 title + company + tags 当 raw_text
+            # 这样 dedup 还能 work (scout.ingest 用 url + content_hash)
+            raw_text_parts = [
+                f"# {item.title}",
+                f"公司: {item.company}",
+            ]
+            if item.salary:
+                raw_text_parts.append(f"薪资: {item.salary}")
+            if item.location:
+                raw_text_parts.append(f"地点: {item.location}")
+            if item.tags:
+                raw_text_parts.append("标签: " + ", ".join(item.tags))
+            raw_text_parts.append(
+                "(从 BOSS 推荐列表抓的, 详情未展开 — 后续点 JD 详情可补全)"
+            )
+            raw_text = "\n".join(raw_text_parts)
+
+            extras: dict = {"from_list_capture": True}
+            if item.salary:
+                extras["salary"] = item.salary
+            if item.tags:
+                extras["tags"] = item.tags
+
+            rj = RawJob(
+                source="boss_extension_list",
+                source_id=_extract_boss_id(item.url) if item.url else None,
+                url=item.url or None,
+                title=item.title,
+                company=item.company,
+                location=item.location,
+                raw_text=raw_text,
+                extras=extras,
+            )
+            try:
+                is_new, job_id = scout.ingest(store, rj)
+            except Exception as e:
+                skipped_reasons.append(f"{item.company}/{item.title}: {e}")
+                continue
+            if is_new:
+                inserted += 1
+                new_job_ids.append(job_id)
+            else:
+                duplicate += 1
+
+        # Fire harness event so agent's next wake notices new jobs to score
+        try:
+            from ..harness import fire_event
+            if inserted > 0:
+                fire_event(
+                    store,
+                    event_kind="user_paste_jd",  # 借用现有 event kind
+                    detail={
+                        "note": f"BOSS 推荐列表 sync — {inserted} 新 + {duplicate} 重复",
+                        "from_extension": True,
+                        "page_url": payload.page_url,
+                    },
+                )
+        except Exception:
+            pass  # event firing is nice-to-have; ingest must succeed
+
+        return {
+            "inserted": inserted,
+            "duplicate": duplicate,
+            "total": len(items),
+            "job_ids": new_job_ids[:30],
+            "skipped_reasons": skipped_reasons[:5],
+        }
+
     return app
 
 
 class ExtensionJDPayload(BaseModel):
-    """Request body from the Boss browser extension."""
+    """Request body from the Boss browser extension (单个 JD 详情)."""
 
     url: str | None = None
     title: str = "(untitled)"
@@ -3471,6 +3571,26 @@ class ExtensionJDPayload(BaseModel):
     salary: str | None = None
     description: str
     tags: list[str] = []
+
+
+class ExtensionListItem(BaseModel):
+    """W15.18 — 1 个岗位卡片 (从 BOSS 推荐列表抓的)."""
+
+    url: str | None = None
+    title: str
+    company: str
+    location: str | None = None
+    salary: str | None = None
+    tags: list[str] = []
+    description: str = ""  # 列表页通常没展开, 默认空
+
+
+class ExtensionListPayload(BaseModel):
+    """W15.18 — 整页推荐列表的批量 ingest payload."""
+
+    page_url: str | None = None
+    items: list[ExtensionListItem]
+    captured_at: str | None = None
 
 
 class EmailClassifyPayload(BaseModel):

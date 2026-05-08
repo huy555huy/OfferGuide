@@ -1563,6 +1563,99 @@ class TestReviewFixes:
         assert "学习清单" in text
         assert "万一还没准备好" in text
 
+    # ── W15.18: BOSS 推荐列表 bulk_ingest endpoint
+    def test_bulk_ingest_2_jobs(self, web_client):
+        """Extension v0.2 推荐列表模式 — 一次传 N 个岗位."""
+        client, store = web_client
+        resp = client.post("/api/extension/bulk_ingest", json={
+            "page_url": "https://www.zhipin.com/web/geek/recommend",
+            "items": [
+                {
+                    "url": "https://www.zhipin.com/job_detail/abc123.html",
+                    "title": "AI Agent 实习",
+                    "company": "字节跳动",
+                    "location": "北京",
+                    "salary": "300-500/天",
+                    "tags": ["LLM", "Agent", "Python"],
+                },
+                {
+                    "url": "https://www.zhipin.com/job_detail/def456.html",
+                    "title": "NLP 算法工程师 (实习)",
+                    "company": "阿里巴巴",
+                    "location": "杭州",
+                    "salary": "350/天",
+                    "tags": ["BERT", "PyTorch"],
+                },
+            ],
+            "captured_at": "2026-05-09T10:00:00Z",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert data["inserted"] == 2
+        assert data["duplicate"] == 0
+        assert len(data["job_ids"]) == 2
+
+    def test_bulk_ingest_dedup(self, web_client):
+        """同样 URL 第二次发送 → duplicate 不重复入库."""
+        client, _ = web_client
+        item = {
+            "url": "https://www.zhipin.com/job_detail/dup.html",
+            "title": "重复岗位",
+            "company": "测试公司",
+        }
+        # 第一次
+        r1 = client.post("/api/extension/bulk_ingest",
+                          json={"items": [item]})
+        assert r1.status_code == 200
+        assert r1.json()["inserted"] == 1
+        # 第二次
+        r2 = client.post("/api/extension/bulk_ingest",
+                          json={"items": [item]})
+        assert r2.status_code == 200
+        assert r2.json()["inserted"] == 0
+        assert r2.json()["duplicate"] == 1
+
+    def test_bulk_ingest_empty_400(self, web_client):
+        client, _ = web_client
+        resp = client.post("/api/extension/bulk_ingest", json={"items": []})
+        assert resp.status_code == 400
+
+    def test_bulk_ingest_skips_invalid_items(self, web_client):
+        """没 title 或 company 的 item → 跳过, 但不让整批失败."""
+        client, _ = web_client
+        resp = client.post("/api/extension/bulk_ingest", json={
+            "items": [
+                {"title": "好的岗位", "company": "公司 A"},
+                {"title": "", "company": "公司 B"},  # missing title
+                {"title": "缺公司", "company": ""},  # missing company
+                {"title": "好的岗位 2", "company": "公司 C"},
+            ],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 4
+        assert data["inserted"] == 2
+        assert len(data["skipped_reasons"]) >= 2
+
+    def test_bulk_ingest_fires_harness_event(self, web_client):
+        """成功 ingest 后 fire harness_event, agent 下次 wake 能看到."""
+        client, store = web_client
+        client.post("/api/extension/bulk_ingest", json={
+            "items": [{"title": "测试岗", "company": "测试公司",
+                       "url": "https://www.zhipin.com/job_detail/xxx.html"}],
+        })
+        # 应该有一条 harness_events
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT kind, source, note FROM harness_events "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        assert row is not None
+        assert row[0] == "user_paste_jd"  # 借用现有 event kind
+        assert row[1] == "user"
+        assert "BOSS" in (row[2] or "")
+
     # ── Smell 6: dead code removed (no `_ = tools` statement at top level)
     def test_loop_module_no_dead_imports(self):
         from offerguide.harness import loop as loop_mod

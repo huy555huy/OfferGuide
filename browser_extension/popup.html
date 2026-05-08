@@ -7,20 +7,49 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    width: 380px; min-height: 200px;
+    width: 400px; min-height: 200px;
     font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
     font-size: 13px; color: #333; padding: 12px;
   }
-  h1 { font-size: 15px; margin-bottom: 8px; }
-  .status { padding: 6px 8px; border-radius: 4px; margin-bottom: 10px; font-size: 12px; }
+  h1 {
+    font-size: 15px; margin-bottom: 8px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .mode-pill {
+    display: inline-block; padding: 2px 8px;
+    border-radius: 999px; font-size: 11px;
+    background: #fbf0e8; color: #cc785c;
+  }
+  .status { padding: 6px 8px; border-radius: 4px; margin-bottom: 10px; font-size: 12px; line-height: 1.45; }
   .status.info  { background: #e8f4fd; color: #1a73e8; }
   .status.ok    { background: #e6f4ea; color: #137333; }
   .status.err   { background: #fce8e6; color: #c5221f; }
   .status.warn  { background: #fef7e0; color: #b06000; }
+
+  /* JD 详情模式 */
   .field { margin-bottom: 6px; }
   .field label { font-weight: 600; display: block; font-size: 11px; color: #666; margin-bottom: 2px; }
   .field .val { padding: 4px 6px; background: #f8f8f8; border-radius: 3px; min-height: 20px;
     max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+
+  /* 列表模式 */
+  .list-wrap {
+    max-height: 320px; overflow-y: auto;
+    border: 1px solid #e0e0e0; border-radius: 4px;
+    padding: 4px;
+  }
+  .list-item {
+    padding: 6px 8px; border-bottom: 1px solid #efefef;
+    font-size: 12px; line-height: 1.4;
+  }
+  .list-item:last-child { border-bottom: none; }
+  .list-item .title { font-weight: 600; margin-bottom: 2px; }
+  .list-item .meta { color: #666; font-size: 11px; }
+  .list-summary {
+    padding: 6px 8px; background: #fff8e1; border-radius: 3px;
+    margin-bottom: 8px; font-size: 12px; color: #b06000;
+  }
+
   .actions { margin-top: 10px; display: flex; gap: 8px; }
   button {
     flex: 1; padding: 8px; border: none; border-radius: 4px; cursor: pointer;
@@ -34,16 +63,23 @@
 </style>
 </head>
 <body>
-  <h1>OfferGuide Boss 助手</h1>
+  <h1>OfferGuide <span id="mode-pill" class="mode-pill hidden"></span></h1>
   <div id="status" class="status info">检测中…</div>
 
-  <div id="fields" class="hidden">
+  <!-- 模式 1: JD 详情页 (单个岗位) -->
+  <div id="fields-detail" class="hidden">
     <div class="field"><label>岗位</label><div class="val" id="f-title"></div></div>
     <div class="field"><label>公司</label><div class="val" id="f-company"></div></div>
     <div class="field"><label>薪资</label><div class="val" id="f-salary"></div></div>
     <div class="field"><label>地点</label><div class="val" id="f-location"></div></div>
     <div class="field"><label>描述 (前 300 字)</label><div class="val" id="f-desc"></div></div>
     <div class="field"><label>标签</label><div class="val" id="f-tags"></div></div>
+  </div>
+
+  <!-- 模式 2: 推荐列表 (多个岗位) — W15.18 -->
+  <div id="fields-list" class="hidden">
+    <div id="list-summary" class="list-summary"></div>
+    <div id="list-items" class="list-wrap"></div>
   </div>
 
   <div class="actions">
