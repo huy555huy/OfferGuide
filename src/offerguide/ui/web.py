@@ -803,6 +803,128 @@ def create_app(
             ),
         )
 
+    @app.get("/recommended", response_class=HTMLResponse)
+    def recommended_view(request: Request) -> Any:
+        """W15.21 — ranked "go click these" feed.
+
+        真"找好岗位给用户去点". 之前的 /jobs 只是 tracking; 这页是
+        decision support — 把所有 ingest 但还没投的 jobs, 按已有 score
+        排好序, 给一个"在 BOSS 打开"按钮 + 一键写开场白入口.
+
+        日上限提示也在顶部 (BOSS 免费用户 ~80 条/天).
+        """
+        with store.connect() as conn:
+            rows = conn.execute(
+                "SELECT j.id, j.title, j.company, j.location, j.url, "
+                "       j.source, j.fetched_at, "
+                "       COALESCE(a.status, 'new') as app_status "
+                "FROM jobs j "
+                "LEFT JOIN applications a ON a.job_id = j.id "
+                "WHERE a.status IS NULL "
+                "   OR a.status IN ('considered', 'evaluated') "
+                "ORDER BY j.fetched_at DESC "
+                "LIMIT 200"
+            ).fetchall()
+
+            candidates: list[dict[str, Any]] = []
+            for r in rows:
+                job_id, title, company, location, url, source, _fetched_at, app_status = r
+                # Look up latest score_match for this job
+                sr = conn.execute(
+                    "SELECT id, output_json, cost_usd FROM skill_runs "
+                    "WHERE skill_name = 'score_match' "
+                    "  AND json_extract(input_json, '$.job_title') = ? "
+                    "  AND json_extract(input_json, '$.job_company') = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (title, company),
+                ).fetchone()
+                score: float | None = None
+                reasoning = ""
+                gaps: list[str] = []
+                sr_id = None
+                if sr:
+                    sr_id = sr[0]
+                    try:
+                        out = json.loads(sr[1])
+                        sv = out.get("score")
+                        if sv is not None:
+                            score = float(sv)
+                        reasoning = (out.get("reasoning") or "")[:240]
+                        raw_gaps = out.get("key_gaps") or []
+                        if isinstance(raw_gaps, list):
+                            gaps = [str(g)[:80] for g in raw_gaps[:3]]
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        pass
+
+                # Score color buckets (match content_script convention)
+                color = "gray"
+                verdict = "未评分"
+                if score is not None:
+                    if score >= 75:
+                        color, verdict = "green", "值得投"
+                    elif score >= 55:
+                        color, verdict = "yellow", "可以试"
+                    else:
+                        color, verdict = "red", "性价比低"
+
+                candidates.append({
+                    "job_id": int(job_id), "title": title or "(未命名)",
+                    "company": company or "(未知公司)",
+                    "location": location or "",
+                    "url": url, "source": source or "",
+                    "app_status": app_status, "score": score,
+                    "reasoning": reasoning, "gaps": gaps,
+                    "color": color, "verdict": verdict,
+                    "score_run_id": sr_id,
+                    "has_score": score is not None,
+                })
+
+            # Daily chat budget — count today's greeting_drafted events as proxy
+            # (harness_events.created_at is julianday REAL, not datetime).
+            # Table is created lazily by init_harness_schema; treat absence as 0.
+            today_chats = 0
+            try:
+                today_chats_row = conn.execute(
+                    "SELECT COUNT(*) FROM harness_events "
+                    "WHERE kind = 'greeting_drafted' "
+                    "  AND created_at >= julianday('now', 'start of day')"
+                ).fetchone()
+                today_chats = int(today_chats_row[0]) if today_chats_row else 0
+            except Exception:
+                pass
+
+        # Sort: scored first by score desc, then unscored by recency
+        scored = sorted(
+            (c for c in candidates if c["has_score"]),
+            key=lambda c: c["score"] or 0.0, reverse=True,
+        )
+        unscored = [c for c in candidates if not c["has_score"]]
+        feed = scored[:50] + unscored[:30]
+
+        # Bucket counts (for the top tile row)
+        green_n = sum(1 for c in scored if c["color"] == "green")
+        yellow_n = sum(1 for c in scored if c["color"] == "yellow")
+        red_n = sum(1 for c in scored if c["color"] == "red")
+
+        return templates.TemplateResponse(
+            request, "recommended.html",
+            _ctx(
+                request,
+                candidates=feed,
+                total_pool=len(candidates),
+                scored_count=len(scored),
+                unscored_count=len(unscored),
+                green_count=green_n,
+                yellow_count=yellow_n,
+                red_count=red_n,
+                today_chats=today_chats,
+                chat_daily_cap=80,
+                chat_warn_threshold=70,
+                runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
+                active_tab="recommended",
+            ),
+        )
+
     @app.get("/metrics", response_class=HTMLResponse)
     def metrics_view(request: Request) -> Any:
         """W15.19 — Dogfood metrics dashboard.
@@ -3910,8 +4032,8 @@ def create_app(
         try:
             with store.connect() as conn:
                 conn.execute(
-                    "INSERT INTO events (kind, job_id, note, created_at) "
-                    "VALUES (?, ?, ?, datetime('now'))",
+                    "INSERT INTO harness_events (kind, job_id, note, source) "
+                    "VALUES (?, ?, ?, 'extension')",
                     (
                         "greeting_drafted",
                         job_id if isinstance(job_id, int) else None,
@@ -3927,6 +4049,62 @@ def create_app(
             "length": len(text),
             "tip": "已生成. content_script 会写到剪贴板, 粘到 BOSS 沟通框, 改改抬头再发.",
             "cost_usd": round(resp.cost_usd or 0.0, 5),
+        })
+
+    @app.post("/api/extension/probe_dom", response_class=JSONResponse)
+    async def extension_probe_dom(request: Request) -> Any:
+        """W15.21 — DOM 校准探针. 用户在 BOSS 沟通框打开时点 content_script
+        浮窗里的"🔍 抓 DOM"按钮, 把当前页面 + 沟通框区域 outerHTML 发回这里
+        存档, 之后我们靠这些样本写出真正的 selector chain.
+
+        这是元方法: 我没法在没有真账号的情况下凭空猜 BOSS 的 React 组件
+        class 名 (它们是 hash 化的, 每次发版可能变). 让用户帮我抓真样本.
+
+        Body: {url, snippet_kind: 'chat_box'|'job_card'|'send_button',
+               outer_html: str, captured_at: ISO}
+        """
+        body = await request.json()
+        url = (body.get("url") or "")[:500]
+        kind = (body.get("snippet_kind") or "unknown")[:80]
+        html = (body.get("outer_html") or "")
+        if not html:
+            return _ext_response(400, {"error": "outer_html 不能为空"})
+        if len(html) > 200_000:
+            return _ext_response(400, {"error": "html 太大 (max 200KB)"})
+
+        # Save under .offerguide/probes/ for later inspection
+        from pathlib import Path
+        probe_dir = Path(".offerguide/probes")
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        from datetime import UTC
+        from datetime import datetime as _dt
+        stamp = _dt.now(UTC).strftime("%Y%m%d_%H%M%S")
+        fname = f"{stamp}_{kind}.html"
+        try:
+            (probe_dir / fname).write_text(
+                f"<!-- url: {url} | kind: {kind} | captured_at: {body.get('captured_at')} -->\n"
+                + html,
+                encoding="utf-8",
+            )
+        except OSError as e:
+            return _ext_response(500, {"error": f"写文件失败: {e}"})
+
+        # Also record an event for trail
+        try:
+            with store.connect() as conn:
+                conn.execute(
+                    "INSERT INTO harness_events (kind, note, source) "
+                    "VALUES (?, ?, 'extension')",
+                    ("dom_probe", f"BOSS DOM probe ({kind}, {len(html)} bytes) → {fname}"),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+        return _ext_response(200, {
+            "saved_as": fname,
+            "bytes": len(html),
+            "tip": "感谢帮忙抓样本! 后续 W15.22 会用这些校准 selector",
         })
 
     return app

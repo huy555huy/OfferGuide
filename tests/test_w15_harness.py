@@ -1740,6 +1740,150 @@ class TestReviewFixes:
         resp = client.post("/api/extension/greeting", json={"job_id": 999_999})
         assert resp.status_code in (400, 404)
 
+    # ── W15.21: ranked recommendations + DOM probe + chat content_script
+    def test_recommended_page_renders_empty(self, web_client):
+        client, _ = web_client
+        resp = client.get("/recommended")
+        assert resp.status_code == 200
+        assert "待点列表" in resp.text
+        assert "BOSS 沟通" in resp.text  # daily budget bar
+        assert "还没评估过任何岗位" in resp.text
+
+    def test_recommended_page_with_jobs_no_score(self, web_client):
+        client, store = web_client
+        # Insert 2 jobs without score_match runs
+        with store.connect() as conn:
+            for i, (t, c) in enumerate([("AI 实习", "字节"), ("NLP 实习", "阿里")]):
+                conn.execute(
+                    "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    ("manual", t, c, "x" * 200, f"hash_rec_{i}"),
+                )
+            conn.commit()
+        resp = client.get("/recommended")
+        assert resp.status_code == 200
+        assert "AI 实习" in resp.text
+        assert "NLP 实习" in resp.text
+        # Should appear in the "未评分" group
+        assert "未评分" in resp.text or "还没评分" in resp.text
+
+    def test_recommended_orders_by_score_desc(self, web_client):
+        client, store = web_client
+        # Insert 3 jobs + 3 score_match runs with different scores
+        with store.connect() as conn:
+            for i, (t, c, score) in enumerate([
+                ("低分岗", "公司C", 40),
+                ("高分岗", "公司A", 88),
+                ("中分岗", "公司B", 65),
+            ]):
+                conn.execute(
+                    "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    ("manual", t, c, "x" * 200, f"hash_ord_{i}"),
+                )
+                conn.execute(
+                    "INSERT INTO skill_runs (skill_name, skill_version, "
+                    "input_hash, input_json, output_json, cost_usd) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        "score_match", "0.1.0", f"h_ord_{i}",
+                        _json.dumps({"job_title": t, "job_company": c}),
+                        _json.dumps({"score": score, "reasoning": f"score is {score}", "key_gaps": ["gap_a"]}),
+                        0.001,
+                    ),
+                )
+            conn.commit()
+        resp = client.get("/recommended")
+        assert resp.status_code == 200
+        # 高分岗 should appear before 低分岗 in the rendered HTML
+        text = resp.text
+        idx_high = text.find("高分岗")
+        idx_mid = text.find("中分岗")
+        idx_low = text.find("低分岗")
+        assert idx_high > 0 and idx_mid > 0 and idx_low > 0
+        assert idx_high < idx_mid < idx_low, "高分应该排在最前面"
+        # Bucket count tile
+        assert "值得投" in text
+        assert "可以试" in text
+
+    def test_recommended_excludes_already_applied(self, web_client):
+        """已 'applied' 的岗位不出现在待点列表."""
+        client, store = web_client
+        with store.connect() as conn:
+            conn.execute(
+                "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("manual", "已投岗位", "已投公司", "x" * 200, "hash_applied_1"),
+            )
+            job_id = conn.execute(
+                "SELECT id FROM jobs WHERE title = '已投岗位'"
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO applications (job_id, status, applied_at) "
+                "VALUES (?, 'applied', julianday('now'))",
+                (job_id,),
+            )
+            conn.commit()
+        resp = client.get("/recommended")
+        assert resp.status_code == 200
+        assert "已投岗位" not in resp.text
+
+    def test_recommended_daily_budget_shows(self, web_client):
+        client, store = web_client
+        from offerguide.harness import _schema as hs
+        hs.init_harness_schema(store)
+        # Insert 5 greeting_drafted events today
+        with store.connect() as conn:
+            for _ in range(5):
+                conn.execute(
+                    "INSERT INTO harness_events (kind, note, source) "
+                    "VALUES ('greeting_drafted', 'test', 'extension')"
+                )
+            conn.commit()
+        resp = client.get("/recommended")
+        assert resp.status_code == 200
+        # Should show "5 / 80"
+        assert "5 / 80" in resp.text or "5/80" in resp.text.replace(" ", "")
+
+    def test_probe_dom_endpoint_saves_file(self, web_client, tmp_path):
+        import os
+        client, _ = web_client
+        # Run from a tmp cwd so .offerguide/probes/ goes there
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            resp = client.post("/api/extension/probe_dom", json={
+                "url": "https://www.zhipin.com/web/chat/123",
+                "snippet_kind": "chat_box",
+                "outer_html": "<div class='chat-im-wrap'><textarea/><button>发送</button></div>",
+                "captured_at": "2026-05-10T10:00:00Z",
+            })
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["bytes"] > 10
+            assert "saved_as" in data
+            saved = tmp_path / ".offerguide/probes" / data["saved_as"]
+            assert saved.exists()
+            content = saved.read_text(encoding="utf-8")
+            assert "chat-im-wrap" in content
+            assert "captured_at" in content  # header
+        finally:
+            os.chdir(old_cwd)
+
+    def test_probe_dom_empty_html_400(self, web_client):
+        client, _ = web_client
+        resp = client.post("/api/extension/probe_dom", json={
+            "url": "https://www.zhipin.com/web/chat/x", "outer_html": "",
+        })
+        assert resp.status_code == 400
+
+    def test_navbar_includes_recommended_link(self, web_client):
+        client, _ = web_client
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "/recommended" in resp.text
+        assert "待点列表" in resp.text
+
     def test_extension_manifest_v030_has_content_script(self):
         """Manifest 0.3.0 wires content_script_jd.js for JD detail pages."""
         import json

@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide · 待点列表{% endblock %}
+{% block content %}
+
+<style>
+.rec-tile-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 0.625rem;
+    margin-bottom: 1rem;
+}
+.rec-tile {
+    background: var(--bg-elev);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    padding: 0.625rem 0.875rem;
+}
+.rec-tile .label {
+    font-size: 0.72rem; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.04em;
+    margin-bottom: 0.25rem;
+}
+.rec-tile .value {
+    font-family: var(--font-serif); font-size: 1.5rem; font-weight: 700; line-height: 1;
+}
+.rec-tile.green .value  { color: var(--success); }
+.rec-tile.yellow .value { color: var(--warning); }
+.rec-tile.red .value    { color: var(--danger); }
+.rec-tile.gray .value   { color: var(--text-muted); }
+
+.budget-bar {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.625rem 0.875rem;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+    display: flex; align-items: center; gap: 0.625rem;
+}
+.budget-bar.warn { border-color: var(--warning); background: var(--warning-soft, #fef7e0); }
+.budget-bar.danger { border-color: var(--danger); background: #fce8e6; }
+.budget-bar .meter {
+    flex: 1; height: 8px; background: #eee; border-radius: 999px; overflow: hidden;
+}
+.budget-bar .meter .fill { height: 100%; background: var(--primary); }
+.budget-bar.warn .meter .fill { background: var(--warning); }
+.budget-bar.danger .meter .fill { background: var(--danger); }
+
+.rec-card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.875rem 1rem;
+    margin-bottom: 0.625rem;
+    display: grid;
+    grid-template-columns: 70px 1fr auto;
+    gap: 0.875rem;
+    align-items: center;
+    transition: border-color 0.12s;
+}
+.rec-card:hover { border-color: var(--primary); }
+.rec-card .score-block {
+    text-align: center;
+}
+.rec-card .score-block .num {
+    font-family: var(--font-serif); font-size: 1.875rem; font-weight: 700;
+    line-height: 1;
+}
+.rec-card .score-block .num.green  { color: var(--success); }
+.rec-card .score-block .num.yellow { color: var(--warning); }
+.rec-card .score-block .num.red    { color: var(--danger); }
+.rec-card .score-block .num.gray   { color: var(--text-muted); }
+.rec-card .score-block .lab {
+    font-size: 0.7rem; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.04em;
+    margin-top: 0.125rem;
+}
+.rec-card h3 {
+    margin: 0 0 0.25rem; font-family: var(--font-serif);
+    font-size: 1.0rem; font-weight: 600;
+}
+.rec-card .meta {
+    font-size: 0.78rem; color: var(--text-muted);
+    margin-bottom: 0.25rem;
+}
+.rec-card .gap-line {
+    font-size: 0.78rem; color: var(--text-secondary);
+    margin-top: 0.25rem; line-height: 1.45;
+}
+.rec-card .gap-line .gap-tag {
+    display: inline-block;
+    background: var(--bg-subtle); border-radius: 3px;
+    padding: 1px 6px; margin-right: 4px; margin-top: 2px;
+    font-size: 0.72rem; color: var(--text-muted);
+}
+.rec-card .actions {
+    display: flex; flex-direction: column; gap: 0.375rem;
+    align-items: flex-end;
+}
+.rec-card .actions a, .rec-card .actions button {
+    font-size: 0.78rem; padding: 0.375rem 0.625rem;
+    border-radius: 4px; border: 1px solid var(--border);
+    background: var(--bg-elev); color: var(--text); cursor: pointer;
+    text-decoration: none; white-space: nowrap;
+}
+.rec-card .actions a.primary {
+    background: var(--primary); color: #fff; border-color: var(--primary);
+}
+.rec-card .actions a.primary:hover { background: var(--primary-hover, #b8654a); }
+
+.divider-line {
+    margin: 1.25rem 0 0.625rem;
+    padding-bottom: 0.25rem;
+    border-bottom: 1px dotted var(--border);
+    font-size: 0.85rem; color: var(--text-muted);
+    font-weight: 600;
+}
+</style>
+
+<div class="card">
+    <h1 style="font-family: var(--font-serif); margin: 0 0 0.375rem;">🎯 待点列表</h1>
+    <div class="muted small">
+        Agent 已经评分排好序的岗位 — <strong>挨个点 "去 BOSS 投" → 看一眼 → 觉得行就在 BOSS 立即沟通</strong>.
+        浏览 BOSS JD 时浮窗会自动写开场白; 你审核后粘到沟通框, 自己点发送.
+    </div>
+</div>
+
+{# ─────────── 顶部分桶 tile ─────────── #}
+
+<div class="rec-tile-row">
+    <div class="rec-tile green">
+        <div class="label">值得投 (≥75)</div>
+        <div class="value">{{ green_count }}</div>
+    </div>
+    <div class="rec-tile yellow">
+        <div class="label">可以试 (55-74)</div>
+        <div class="value">{{ yellow_count }}</div>
+    </div>
+    <div class="rec-tile red">
+        <div class="label">性价比低 (&lt;55)</div>
+        <div class="value">{{ red_count }}</div>
+    </div>
+    <div class="rec-tile gray">
+        <div class="label">未评分</div>
+        <div class="value">{{ unscored_count }}</div>
+    </div>
+</div>
+
+{# ─────────── 日上限 budget ─────────── #}
+
+{% set budget_class = 'danger' if today_chats >= chat_daily_cap else ('warn' if today_chats >= chat_warn_threshold else '') %}
+<div class="budget-bar {{ budget_class }}">
+    <span><strong>今日 BOSS 沟通: {{ today_chats }} / {{ chat_daily_cap }}</strong></span>
+    <div class="meter">
+        <div class="fill" style="width: {{ ((today_chats / chat_daily_cap * 100) | round(0, 'common')) if chat_daily_cap else 0 }}%;"></div>
+    </div>
+    {% if today_chats >= chat_daily_cap %}
+    <span class="muted small">⚠ 已到上限, BOSS 今天不让发了, 明早 6 点重置</span>
+    {% elif today_chats >= chat_warn_threshold %}
+    <span class="muted small">⚠ 接近上限, 留点配额给明天的高分岗</span>
+    {% else %}
+    <span class="muted small">基于 OfferGuide 写的开场白计数 (实际 BOSS 计数可能略不同)</span>
+    {% endif %}
+</div>
+
+{% if not candidates %}
+<div class="card empty" style="padding: 2rem; text-align: center;">
+    <div class="empty-title" style="margin-bottom: 0.5rem;">📭 还没评估过任何岗位</div>
+    <div class="empty-hint" style="line-height: 1.7;">
+        2 种方式给 OfferGuide 喂岗位:<br>
+        1. 装 Chrome 扩展 → 开 BOSS 推荐页 → 点扩展图标 → 一键 sync 整页<br>
+        2. 在 <a href="/">首页</a> 粘单个 JD 链接 / 文本
+    </div>
+</div>
+{% else %}
+
+{% set scored_done = namespace(flag=False) %}
+{% for c in candidates %}
+    {% if not c.has_score and not scored_done.flag %}
+        {% set scored_done.flag = True %}
+        <div class="divider-line">↓ 还没评分的 (没评分前不知道该不该投, 等 agent wake 评)</div>
+    {% endif %}
+    <div class="rec-card" data-job-id="{{ c.job_id }}">
+        <div class="score-block">
+            {% if c.has_score %}
+            <div class="num {{ c.color }}">{{ c.score | round(0, 'common') | int }}</div>
+            <div class="lab">{{ c.verdict }}</div>
+            {% else %}
+            <div class="num gray">—</div>
+            <div class="lab">未评分</div>
+            {% endif %}
+        </div>
+        <div>
+            <h3>{{ c.title }} <span class="muted small" style="font-weight: 400;">@ {{ c.company }}</span></h3>
+            <div class="meta">
+                {% if c.location %}{{ c.location }} · {% endif %}
+                source: {{ c.source }}
+                {% if c.app_status and c.app_status != 'new' %}
+                · <span class="muted small">{{ c.app_status }}</span>
+                {% endif %}
+            </div>
+            {% if c.gaps %}
+            <div class="gap-line">
+                <span class="muted small">关键 gap:</span>
+                {% for g in c.gaps %}<span class="gap-tag">{{ g }}</span>{% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        <div class="actions">
+            {% if c.url %}
+            <a href="{{ c.url }}" target="_blank" rel="noopener" class="primary">在 BOSS 打开 →</a>
+            {% else %}
+            <span class="muted small">无链接</span>
+            {% endif %}
+            <a href="/jobs">看跟踪</a>
+        </div>
+    </div>
+{% endfor %}
+
+{% if total_pool > candidates | length %}
+<div class="muted small" style="text-align: center; margin-top: 1rem;">
+    · 候选池共 {{ total_pool }} 个, 这页展示 {{ candidates | length }} (top scored 50 + 最近未评 30)
+</div>
+{% endif %}
+
+{% endif %}
+
+{% endblock %}

@@ -619,10 +619,11 @@
                原 19 个 nav 入口大幅简化为 "今日 / 投递 / 面试 / 简历 / Agent" 5 主 + 设置 dropdown #}
             <a href="/" class="{% if active_tab == 'home' %}active{% endif %}">今日</a>
 
-            {# 投递: 看板 / 记录 / 跟踪 / 漏斗 #}
+            {# 投递: 推荐 / 看板 / 记录 / 跟踪 / 漏斗 #}
             <details class="nav-more">
-                <summary class="{% if active_tab in ('pipeline','applications','jobs','funnel') %}active{% endif %}">📤 投递</summary>
+                <summary class="{% if active_tab in ('recommended','pipeline','applications','jobs','funnel') %}active{% endif %}">📤 投递</summary>
                 <div class="nav-more-panel">
+                    <a href="/recommended"  class="{% if active_tab == 'recommended' %}active{% endif %}">🎯 待点列表</a>
                     <a href="/jobs"         class="{% if active_tab == 'jobs' %}active{% endif %}">📋 跟踪中</a>
                     <a href="/pipeline"     class="{% if active_tab == 'pipeline' %}active{% endif %}">投递看板</a>
                     <a href="/applications" class="{% if active_tab == 'applications' %}active{% endif %}">投递记录</a>

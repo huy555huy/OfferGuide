@@ -20,7 +20,9 @@
     {
       "matches": [
         "https://www.zhipin.com/job_detail/*",
-        "https://zhipin.com/job_detail/*"
+        "https://zhipin.com/job_detail/*",
+        "https://www.zhipin.com/web/chat/*",
+        "https://zhipin.com/web/chat/*"
       ],
       "js": ["content_script_jd.js"],
       "run_at": "document_idle"

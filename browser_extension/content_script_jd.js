@@ -137,6 +137,7 @@ function buildHostShell() {
     .greet-box{margin-top:8px;padding:8px;background:#f6f3ee;border-radius:5px;
       font-size:12px;line-height:1.5;white-space:pre-wrap;color:#333;
       max-height:200px;overflow-y:auto}
+    .probe-block{margin-top:12px;padding-top:10px;border-top:1px dashed #e0d8c8}
     .muted{color:#888;font-size:11px}
     a{color:#1a73e8;text-decoration:none}a:hover{text-decoration:underline}
   `;
@@ -188,10 +189,20 @@ function renderScore(root, data) {
     ${gapsHtml}
     <div class="actions">
       <button class="primary" id="og-greet">📋 写开场白</button>
-      <button class="secondary" id="og-open">看完整分析</button>
+      <button class="secondary" id="og-open">待点列表</button>
     </div>
     <div id="og-greet-status"></div>
     <div id="og-greet-box"></div>
+    <div class="probe-block">
+      <div class="muted" style="font-size:11px;line-height:1.5">
+        🔧 帮 OfferGuide 升级: 你打开 BOSS 沟通框后, 点下面按钮抓一次 DOM →
+        我们后续就能自动填开场白到沟通框 (现在还是手粘).
+      </div>
+      <button class="secondary" id="og-probe" style="margin-top:6px;width:100%">
+        🔍 抓沟通框 DOM
+      </button>
+      <div id="og-probe-status"></div>
+    </div>
   `;
 
   // Wire actions
@@ -199,12 +210,81 @@ function renderScore(root, data) {
     runGreeting(root, data.job_id);
   });
   root.getElementById("og-open").addEventListener("click", () => {
-    if (data.job_id) {
-      window.open(API_BASE + "/jobs", "_blank");
-    } else {
-      window.open(API_BASE + "/", "_blank");
-    }
+    window.open(API_BASE + "/recommended", "_blank");
   });
+  root.getElementById("og-probe").addEventListener("click", () => {
+    runProbe(root);
+  });
+}
+
+async function runProbe(root) {
+  const statusEl = root.getElementById("og-probe-status");
+  const btn = root.getElementById("og-probe");
+  btn.disabled = true;
+  statusEl.innerHTML = `<div class="status info">正在找沟通框…</div>`;
+
+  // Try a wide selector net for the chat input area (BOSS uses several)
+  const chatSelectors = [
+    ".chat-record", ".chat-im-wrap", ".dialog-im",
+    "[class*='chat-conversation']", "[class*='chat-input']",
+    ".chat-textarea", "textarea[placeholder*='请输入']",
+    ".chat-send-area", ".message-controller",
+  ];
+
+  let snippet = null;
+  let kind = "chat_box";
+  for (const sel of chatSelectors) {
+    const el = document.querySelector(sel);
+    if (el) {
+      // Walk up to find a meaningful container (not just the input alone)
+      let host = el.closest(".chat-im-wrap, .dialog-wrap, [class*='chat']") || el.parentElement || el;
+      snippet = host.outerHTML.slice(0, 100_000);
+      break;
+    }
+  }
+  if (!snippet) {
+    // Fallback: check if there's any visible chat-like element on page
+    const possibleChat = document.querySelector("[class*='chat'],[class*='dialog'],[class*='im-']");
+    if (possibleChat) {
+      snippet = possibleChat.outerHTML.slice(0, 100_000);
+      kind = "chat_unknown";
+    }
+  }
+  if (!snippet) {
+    statusEl.innerHTML =
+      `<div class="status err">没找到沟通框 — 先在 BOSS 点"立即沟通"打开聊天, 再点这里</div>`;
+    btn.disabled = false;
+    return;
+  }
+
+  try {
+    const resp = await fetch(API_BASE + "/api/extension/probe_dom", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: window.location.href,
+        snippet_kind: kind,
+        outer_html: snippet,
+        captured_at: new Date().toISOString(),
+      }),
+    });
+    if (!resp.ok) {
+      const txt = await resp.text();
+      statusEl.innerHTML =
+        `<div class="status err">上传失败 (${resp.status}): ${escapeHtml(txt.slice(0, 80))}</div>`;
+      btn.disabled = false;
+      return;
+    }
+    const data = await resp.json();
+    statusEl.innerHTML =
+      `<div class="status ok">✓ 已抓 ${Math.round(snippet.length/1024)}KB → ${escapeHtml(data.saved_as || "")}</div>`;
+    btn.textContent = "🔄 再抓一次";
+    btn.disabled = false;
+  } catch (err) {
+    statusEl.innerHTML =
+      `<div class="status err">连接失败: ${escapeHtml(err.message)}</div>`;
+    btn.disabled = false;
+  }
 }
 
 function renderError(root, msg, hint) {
@@ -269,14 +349,45 @@ function escapeHtml(s) {
 
 // ── main ────────────────────────────────────────────────────────────
 
+function renderProbeOnly(root) {
+  const content = root.getElementById("og-content");
+  content.innerHTML = `
+    <div class="row">
+      <div class="muted" style="font-size:12px;line-height:1.5">
+        💬 检测到沟通页. OfferGuide 还不会自动填开场白进去 — DOM 选择器
+        没确认. 你帮我抓一次, 下版本就能自动填了.
+      </div>
+    </div>
+    <div class="probe-block" style="margin-top:8px;padding-top:0;border-top:none">
+      <button class="primary" id="og-probe" style="width:100%">🔍 抓沟通框 DOM 给 OfferGuide</button>
+      <div id="og-probe-status"></div>
+    </div>
+  `;
+  root.getElementById("og-probe").addEventListener("click", () => {
+    runProbe(root);
+  });
+}
+
 async function main() {
   // 防重复注入 (BOSS SPA 切页时这脚本可能跑多次)
   if (document.querySelector(`[${HOST_ATTR}]`)) return;
-  // URL 必须是 JD 详情页
-  if (!/\/job_detail\//.test(window.location.href)) return;
+
+  const url = window.location.href;
+  const isJD = /\/job_detail\//.test(url);
+  const isChat = /\/web\/chat\//.test(url);
+  if (!isJD && !isChat) return;
 
   // 等 1.2s 让 BOSS DOM 渲染完
   await new Promise(r => setTimeout(r, 1200));
+
+  // 沟通页: 只装 probe 浮窗, 不评分
+  if (isChat) {
+    const { host, root } = buildHostShell();
+    document.body.appendChild(host);
+    root.getElementById("og-close").addEventListener("click", () => host.remove());
+    renderProbeOnly(root);
+    return;
+  }
 
   const jd = extractBossJDInline();
   if (!jd.description || jd.description.length < 100) {
