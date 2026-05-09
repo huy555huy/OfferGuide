@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "OfferGuide Boss 助手",
-  "version": "0.2.0",
-  "description": "BOSS直聘 JD 详情 + 推荐列表 一键 sync 到 OfferGuide. 不自动采集，点击扩展图标才提取。",
+  "version": "0.3.0",
+  "description": "BOSS直聘 JD 自动评分 + 推荐列表 sync + 一键写开场白. 半自动求职助手, 不替你按发送.",
 
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "clipboardWrite"],
   "host_permissions": [
     "http://localhost:*/*",
     "http://127.0.0.1:*/*",
@@ -14,5 +14,16 @@
 
   "action": {
     "default_popup": "popup.html"
-  }
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.zhipin.com/job_detail/*",
+        "https://zhipin.com/job_detail/*"
+      ],
+      "js": ["content_script_jd.js"],
+      "run_at": "document_idle"
+    }
+  ]
 }

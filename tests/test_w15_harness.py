@@ -1702,6 +1702,65 @@ class TestReviewFixes:
         assert "LangChain" in text
         assert "Dogfood Log" in text or "dogfood" in text.lower()
 
+    # ── W15.20: 半自动 BOSS — content script 内联评分 + 一键开场白
+    def test_score_inline_no_resume_returns_400(self, web_client):
+        """No profile configured → 400 with actionable message, not 500."""
+        client, _ = web_client
+        resp = client.post("/api/extension/score_inline", json={
+            "url": "https://www.zhipin.com/job_detail/abc.html",
+            "title": "AI Agent 实习",
+            "company": "字节",
+            "description": "x" * 300,
+            "tags": [],
+        })
+        # web_client fixture has no profile + no API key → either 400 is fine
+        assert resp.status_code == 400
+        assert "key" in resp.text.lower() or "简历" in resp.text
+
+    def test_score_inline_empty_description_400(self, web_client):
+        client, _ = web_client
+        resp = client.post("/api/extension/score_inline", json={
+            "title": "x", "description": "  ", "tags": [],
+        })
+        assert resp.status_code == 400
+
+    def test_greeting_no_resume_returns_400(self, web_client):
+        client, _ = web_client
+        resp = client.post("/api/extension/greeting", json={
+            "jd_text": "Some long job description text here, etc.",
+            "title": "AI Agent 实习", "company": "字节",
+        })
+        assert resp.status_code == 400
+
+    def test_greeting_unknown_job_id_404(self, web_client):
+        """Even with profile/key issues, unknown job_id should be a clear case."""
+        client, _ = web_client
+        # When we have no key, we get "需要 LLM key" first — that's fine; this
+        # test just ensures the request shape validates and doesn't 500.
+        resp = client.post("/api/extension/greeting", json={"job_id": 999_999})
+        assert resp.status_code in (400, 404)
+
+    def test_extension_manifest_v030_has_content_script(self):
+        """Manifest 0.3.0 wires content_script_jd.js for JD detail pages."""
+        import json
+        from pathlib import Path
+        manifest_path = Path(__file__).parent.parent / "browser_extension/manifest.json"
+        m = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert m["version"].startswith("0.3")
+        assert "clipboardWrite" in m["permissions"]
+        cs = m.get("content_scripts", [])
+        assert len(cs) >= 1
+        jd_cs = cs[0]
+        assert any("job_detail" in p for p in jd_cs["matches"])
+        assert "content_script_jd.js" in jd_cs["js"]
+        # 文件存在
+        cs_file = Path(__file__).parent.parent / "browser_extension/content_script_jd.js"
+        assert cs_file.exists()
+        body = cs_file.read_text(encoding="utf-8")
+        assert "/api/extension/score_inline" in body
+        assert "/api/extension/greeting" in body
+        assert "navigator.clipboard" in body
+
     # ── Smell 6: dead code removed (no `_ = tools` statement at top level)
     def test_loop_module_no_dead_imports(self):
         from offerguide.harness import loop as loop_mod

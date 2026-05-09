@@ -304,15 +304,23 @@ python -m offerguide.evolution diff score_match
 python -m offerguide.evolution diff score_match --markdown > evolution.md
 ```
 
-### Boss browser extension
+### Boss browser extension (v0.3 — 半自动求职)
 
 ```bash
 # Chrome → chrome://extensions → 开发者模式 ON → 加载已解压的扩展程序
 #         指向本仓库的 browser_extension/ 目录
 ```
 
-打开 Boss直聘 JD 页面 → 点击 OfferGuide 扩展图标 → 自动从页面提取（无 content_script，**点了才提取**）
-→ 确认 → 发到本地 `http://localhost:8000/api/extension/ingest` → 入 jobs 表。
+3 个使用方式（**OfferGuide 不替你按发送，半自动**）：
+
+1. **JD 详情页自动评分** — 打开 BOSS `job_detail/...` 页面，content_script
+   自动抓 JD → 调 OfferGuide → 右上角浮窗显示 score + 关键 gap（3-8s）。
+2. **一键写开场白** — 浮窗里点 `📋 写开场白` → 5-10s 后开场白自动复制到剪贴板，
+   `Cmd+V` 到 BOSS 沟通框 → **自己审核 + 改抬头 → 自己点发送**。
+3. **推荐池一键 sync** — 在 BOSS 推荐 / 搜索列表页点扩展图标 → 整页 N 个岗位
+   bulk 入库 → agent 后台评分排序。
+
+后端必须先起着 (`python -m offerguide.ui.web`)，浮窗才有响应。
 
 ---
 

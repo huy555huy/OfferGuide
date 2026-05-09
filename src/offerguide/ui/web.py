@@ -3682,6 +3682,253 @@ def create_app(
             "skipped_reasons": skipped_reasons[:5],
         }
 
+    # ────────────────── W15.20 真半自动: 内联评分 + 一键开场白 ──────────────────
+    #
+    # 这两个 endpoint 是为 content script 设计的 — 用户在 BOSS 详情页浏览时
+    # OfferGuide 浮窗自动调 score_inline (3-8s) 给即时评分; 用户点"写开场白"
+    # 触发 greeting (5-10s) 把 200 字开场白写到剪贴板, 用户审核后粘到 BOSS
+    # 沟通框. **不自动发送** — 半自动 = 用户在环.
+
+    @app.post("/api/extension/score_inline", response_class=JSONResponse)
+    async def extension_score_inline(payload: ExtensionJDPayload) -> Any:
+        """W15.20 — content script 实时打分. 比 evaluate_job 更轻 (跳过 tailor).
+
+        典型场景: 用户在 BOSS JD 详情页, content_script 自动抓 JD 调这个,
+        3-8s 内拿到 score → 在页面右上角浮窗显示. 不阻塞用户浏览.
+
+        返回 slim payload (score + top 3 gap + 简短 verdict), 不返回完整
+        tailor (那是用户点"写开场白"时才需要).
+        """
+        if not settings.deepseek_api_key:
+            return _ext_response(400, {"error": "需要先配 LLM key"})
+        if runtime is None:
+            return _ext_response(400, {"error": "SkillRuntime 未初始化"})
+        if not (payload.description or "").strip():
+            return _ext_response(400, {"error": "JD 描述为空"})
+        if profile is None or not profile.raw_resume_text:
+            return _ext_response(400, {"error": "未配简历, 去 /profile 上传"})
+
+        from ..harness import (
+            HarnessDeps,
+            MemoryStore,
+            default_worldview_dir,
+        )
+        from ..harness import _schema as _hs
+        from ..harness.evaluate import _fetch_and_ingest, _invoke_skill, _safe_float
+        _hs.init_harness_schema(store)
+
+        deps = HarnessDeps(
+            settings=settings, store=store,
+            memory_store=MemoryStore(root=default_worldview_dir(settings)),
+            llm=LLMClient(
+                api_key=settings.deepseek_api_key,
+                base_url=settings.deepseek_base_url,
+                default_model=settings.default_model,
+            ),
+            runtime=runtime, skills=skills,
+            user_profile_text=profile.raw_resume_text,
+            notifier=notifier,
+        )
+
+        # Build raw text from extension payload
+        raw_parts = [payload.description]
+        if payload.title:
+            raw_parts.insert(0, f"# {payload.title}")
+        if payload.company:
+            raw_parts.append(f"公司: {payload.company}")
+        if payload.salary:
+            raw_parts.append(f"薪资: {payload.salary}")
+        if payload.tags:
+            raw_parts.append("标签: " + ", ".join(payload.tags))
+        raw_text = "\n".join(raw_parts).strip()
+
+        import asyncio as _asyncio
+        import time as _time
+        t0 = _time.monotonic()
+        try:
+            # Reuse evaluate's fetch+ingest using the JD text path
+            job_id, fetch_err = await _asyncio.to_thread(
+                _fetch_and_ingest, raw_text, deps,
+                company_hint=payload.company or "",
+                title_hint=payload.title or "",
+            )
+            if fetch_err:
+                return _ext_response(400, {"error": fetch_err})
+
+            # Run only score_match (skip tailor for speed)
+            score_spec = deps.find_skill("score_match")
+            if score_spec is None:
+                return _ext_response(500, {"error": "score_match SKILL 缺失"})
+
+            sr = await _asyncio.to_thread(
+                _invoke_skill, deps, score_spec,
+                inputs={
+                    "job_title": payload.title,
+                    "job_company": payload.company or "",
+                    "jd_text": payload.description[:4000],
+                    "candidate_resume": profile.raw_resume_text[:4000],
+                },
+            )
+            if sr is None or sr.parsed is None:
+                raw_str = sr.raw_text[:200] if sr else "(no response)"
+                return _ext_response(502, {
+                    "error": "score 解析失败",
+                    "job_id": job_id,
+                    "raw": raw_str,
+                })
+
+            p = sr.parsed
+            score_val = _safe_float(p.get("score"))
+            gaps = p.get("key_gaps") or []
+            strengths = p.get("strengths") or p.get("matched_skills") or []
+            if not isinstance(gaps, list):
+                gaps = []
+            if not isinstance(strengths, list):
+                strengths = []
+            top_gaps = [str(g)[:80] for g in gaps[:3]]
+            top_strengths = [str(s)[:80] for s in strengths[:3]]
+
+            # Color-coded verdict for the badge
+            if score_val is None:
+                verdict = "评分缺失"
+                color = "gray"
+            elif score_val >= 75:
+                verdict = "值得投"
+                color = "green"
+            elif score_val >= 55:
+                verdict = "可以试"
+                color = "yellow"
+            else:
+                verdict = "性价比低"
+                color = "red"
+
+            duration_ms = int((_time.monotonic() - t0) * 1000)
+            return _ext_response(200, {
+                "job_id": job_id,
+                "score": score_val,
+                "verdict": verdict,
+                "color": color,
+                "top_strengths": top_strengths,
+                "top_gaps": top_gaps,
+                "reasoning": (p.get("reasoning") or "")[:600],
+                "duration_ms": duration_ms,
+                "cost_usd": round(sr.cost_usd or 0.0, 5),
+            })
+        finally:
+            with contextlib.suppress(Exception):
+                if deps.llm:
+                    deps.llm.close()
+
+    @app.post("/api/extension/greeting", response_class=JSONResponse)
+    async def extension_greeting(request: Request) -> Any:
+        """W15.20 — 一键生成 BOSS 沟通开场白 (200 字内, 用户审核后粘贴).
+
+        Input: {job_id: int} 或 {jd_text, title, company} (前者更快, 后者
+        独立可用). 返回开场白纯文本, 由 content_script 写到用户剪贴板.
+
+        **不自动发送** — 用户必须自己粘到 BOSS 输入框 + 改抬头 + 点发送.
+        OfferGuide 只代写文案, 决策权在用户.
+        """
+        if not settings.deepseek_api_key:
+            return _ext_response(400, {"error": "需要先配 LLM key"})
+        if profile is None or not profile.raw_resume_text:
+            return _ext_response(400, {"error": "未配简历, 去 /profile 上传"})
+
+        body = await request.json()
+        job_id = body.get("job_id")
+        jd_text = (body.get("jd_text") or "").strip()
+        company = (body.get("company") or "").strip()
+        title = (body.get("title") or "").strip()
+
+        if job_id:
+            with store.connect() as conn:
+                row = conn.execute(
+                    "SELECT title, company, raw_text FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+            if row is None:
+                return _ext_response(404, {"error": f"job#{job_id} 不存在"})
+            title = title or (row[0] or "")
+            company = company or (row[1] or "")
+            jd_text = jd_text or (row[2] or "")
+
+        if not jd_text:
+            return _ext_response(400, {"error": "缺 jd_text 或 job_id"})
+
+        # 直接调 LLM, 不走 SKILL — 这是单点小任务
+        from ..llm import BudgetExceeded, enforce_daily_budget
+        try:
+            enforce_daily_budget(store)
+        except BudgetExceeded as e:
+            return _ext_response(429, {"error": str(e)})
+
+        prompt = (
+            "你是一个帮国内校招求职者写 BOSS 直聘开场白的助手. "
+            "目标: 让 HR 愿意打开简历, 不让人觉得是模板. "
+            "约束:\n"
+            "- 200 字以内 (含标点)\n"
+            "- 第一句别说'您好' — 直接点对方关注的事\n"
+            "- 中段 1 个具体能匹配 JD 的项目/经历点 (从候选简历挑最对口的)\n"
+            "- 末句 1 个轻问句 (不要『期待回复』『感谢』这种)\n"
+            "- 不写薪资 / 工作时间 / 是否能转正这些事 (太敏感, 第一条别问)\n"
+            "- 不要 emoji\n"
+            "- 全中文\n\n"
+            f"## 候选人简历 (摘选):\n{profile.raw_resume_text[:3000]}\n\n"
+            f"## 目标岗位\n职位: {title}\n公司: {company}\n"
+            f"JD:\n{jd_text[:2500]}\n\n"
+            "直接输出开场白正文, 不要任何前言/解释/markdown 标记."
+        )
+
+        llm = LLMClient(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            default_model=settings.default_model,
+        )
+        try:
+            import asyncio as _asyncio
+            resp = await _asyncio.to_thread(
+                llm.chat,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6,
+                extra={"max_tokens": 400},
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                llm.close()
+
+        text = (resp.content or "").strip()
+        # Trim if model added "好的, 这是开场白:" prefix
+        for prefix in ("开场白:", "开场白：", "正文:", "正文："):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+
+        # Hard cap at 240 chars (BOSS limit + buffer)
+        if len(text) > 240:
+            text = text[:237] + "..."
+
+        # Try to record it as an event for trail
+        try:
+            with store.connect() as conn:
+                conn.execute(
+                    "INSERT INTO events (kind, job_id, note, created_at) "
+                    "VALUES (?, ?, ?, datetime('now'))",
+                    (
+                        "greeting_drafted",
+                        job_id if isinstance(job_id, int) else None,
+                        f"BOSS 开场白 ({len(text)} 字), 由 extension 拉",
+                    ),
+                )
+                conn.commit()
+        except Exception:
+            pass  # event recording is nice-to-have
+
+        return _ext_response(200, {
+            "greeting": text,
+            "length": len(text),
+            "tip": "已生成. content_script 会写到剪贴板, 粘到 BOSS 沟通框, 改改抬头再发.",
+            "cost_usd": round(resp.cost_usd or 0.0, 5),
+        })
+
     return app
 
 
