@@ -533,27 +533,42 @@ def _exec_score_match(args: dict[str, Any], deps: HarnessDeps) -> str:
         return f"ERROR: job {job_id} not found"
     if not deps.user_profile_text:
         return "ERROR: no user resume loaded — set OFFERGUIDE_RESUME_PDF"
+    # W15.22 — verified against score_match SKILL.md (inputs: job_text + user_profile;
+    # output: probability/reasoning/dimensions/deal_breakers). Pre-W15.22 used
+    # `job_title/job_company/jd_text/candidate_resume` and `score/key_gaps` —
+    # all wrong, SkillRuntime raised ValueError → silently swallowed → no scores
+    # ever recorded since W14.
     inputs = {
-        "job_title": job.get("title", ""),
-        "job_company": job.get("company", ""),
-        "jd_text": job.get("raw_text", "")[:4000],
-        "candidate_resume": deps.user_profile_text[:4000],
+        "job_text": _format_jd_for_skill(job)[:4000],
+        "user_profile": deps.user_profile_text[:4000],
     }
     result = deps.runtime.invoke(spec, inputs)
     if result.parsed is None:
-        # Smell 3 fix: SKILL output failed JSON parse — show agent the raw
-        # text so it can self-correct (e.g. "model returned markdown code block")
         return (
             f"WARN score_match for job#{job_id}: SKILL output not valid JSON. "
             f"Raw output (first 500 chars):\n{result.raw_text[:500]}\n"
             f"(skill_run_id={result.skill_run_id})"
         )
     parsed = result.parsed
+    prob = parsed.get("probability")
+    # Record an event so /recommended can rank by this score later
+    try:
+        _record_event_row(
+            deps, kind="scored", job_id=job_id,
+            note=_json.dumps({
+                "probability": prob,
+                "skill_run_id": result.skill_run_id,
+                "deal_breakers": parsed.get("deal_breakers") or [],
+            }, ensure_ascii=False),
+        )
+    except Exception as e:
+        log.warning("score_match: record_event failed: %s", e)
     return (
         f"OK score_match for job#{job_id} ({job.get('company')} · {job.get('title')}):\n"
-        f"  score: {parsed.get('score', '?')}\n"
+        f"  probability: {prob}\n"
         f"  reasoning: {(parsed.get('reasoning') or '')[:300]}\n"
-        f"  key_gaps: {parsed.get('key_gaps', [])}\n"
+        f"  dimensions: {parsed.get('dimensions', {})}\n"
+        f"  deal_breakers: {parsed.get('deal_breakers', [])}\n"
         f"  (skill_run_id={result.skill_run_id} for GEPA feedback)"
     )
 
@@ -572,11 +587,14 @@ def _exec_tailor_advice(args: dict[str, Any], deps: HarnessDeps) -> str:
         return f"ERROR: job {job_id} not found"
     if not deps.user_profile_text:
         return "ERROR: no user resume loaded"
+    # W15.22 — verified against tailor_resume SKILL.md (inputs: master_resume,
+    # job_text, company, successful_profile_json). Pre-W15.22 passed
+    # job_title/jd_text/current_resume — all wrong.
     inputs = {
-        "job_title": job.get("title", ""),
+        "master_resume": deps.user_profile_text[:6000],
+        "job_text": _format_jd_for_skill(job)[:4000],
         "company": job.get("company", ""),
-        "jd_text": job.get("raw_text", "")[:4000],
-        "current_resume": deps.user_profile_text[:6000],
+        "successful_profile_json": "{}",  # no successful_profile pipeline yet → empty
     }
     result = deps.runtime.invoke(spec, inputs)
     if result.parsed is None:
@@ -604,12 +622,14 @@ def _exec_interview_prep(args: dict[str, Any], deps: HarnessDeps) -> str:
     job = _load_job(deps.store, job_id)
     if job is None:
         return f"ERROR: job {job_id} not found"
+    # W15.22 — verified against prepare_interview SKILL.md (inputs: company,
+    # job_text, user_profile, past_experiences). Pre-W15.22 passed
+    # job_title/jd_text/candidate_resume/round — all wrong.
     inputs = {
         "company": job.get("company", ""),
-        "job_title": job.get("title", ""),
-        "jd_text": job.get("raw_text", "")[:4000],
-        "candidate_resume": (deps.user_profile_text or "")[:4000],
-        "round": args.get("round", "未指定"),
+        "job_text": _format_jd_for_skill(job)[:4000],
+        "user_profile": (deps.user_profile_text or "")[:4000],
+        "past_experiences": (args.get("past_experiences") or "(无)"),
     }
     result = deps.runtime.invoke(spec, inputs)
     if result.parsed is None:
@@ -619,7 +639,7 @@ def _exec_interview_prep(args: dict[str, Any], deps: HarnessDeps) -> str:
             f"(skill_run_id={result.skill_run_id})"
         )
     return (
-        f"OK interview_prep for job#{job_id} (round: {inputs['round']}):\n"
+        f"OK interview_prep for job#{job_id} (round: {args.get('round', '?')}):\n"
         f"  {_json.dumps(result.parsed, ensure_ascii=False, indent=2)[:2000]}\n"
         f"  (skill_run_id={result.skill_run_id})"
     )
@@ -647,12 +667,18 @@ def _exec_reflect_outcome(args: dict[str, Any], deps: HarnessDeps) -> str:
         note=(args.get("user_notes") or ""),
     )
 
+    # W15.22 — verified against post_interview_reflection SKILL.md (inputs:
+    # company, prep_questions_json, actual_transcript). Pre-W15.22 passed
+    # job_title/outcome/user_notes/jd_text — all wrong (none of those are
+    # declared inputs). actual_transcript is built from outcome + user_notes
+    # since we don't have a real transcript without a real interview recorder.
+    transcript_parts = [f"## 面试结果: {outcome}"]
+    if args.get("user_notes"):
+        transcript_parts.append(f"## 用户复盘记录\n{args['user_notes']}")
     inputs = {
         "company": job.get("company", ""),
-        "job_title": job.get("title", ""),
-        "outcome": outcome,
-        "user_notes": args.get("user_notes", ""),
-        "jd_text": job.get("raw_text", "")[:3000],
+        "prep_questions_json": args.get("prep_questions_json") or "[]",
+        "actual_transcript": "\n\n".join(transcript_parts),
     }
     result = deps.runtime.invoke(spec, inputs)
     if result.parsed is None:
@@ -827,6 +853,27 @@ _DISPATCH_TABLE: dict[str, Callable[[dict[str, Any], HarnessDeps], str]] = {
 
 
 # ── helpers ────────────────────────────────────────────────────────────
+
+
+def _format_jd_for_skill(job: dict[str, Any]) -> str:
+    """Pack the structured job row back into one labeled text block.
+
+    SKILLs declare a single `job_text` input (per their SKILL.md); we used to
+    pass title/company/jd_text as separate keys, which the SkillRuntime then
+    silently rejected with ValueError. This helper is the canonical 'flatten
+    job row → SKILL job_text' bridge so all 4 score/tailor/interview/reflect
+    call sites stay consistent.
+    """
+    parts: list[str] = []
+    if job.get("title"):
+        parts.append(f"# {job['title']}")
+    if job.get("company"):
+        parts.append(f"公司: {job['company']}")
+    if job.get("location"):
+        parts.append(f"地点: {job['location']}")
+    if job.get("raw_text"):
+        parts.append(job["raw_text"])
+    return "\n".join(parts)
 
 
 def _load_job(store: Store, job_id: int) -> dict[str, Any] | None:

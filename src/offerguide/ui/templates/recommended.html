@@ -129,15 +129,15 @@
 
 <div class="rec-tile-row">
     <div class="rec-tile green">
-        <div class="label">值得投 (≥75)</div>
+        <div class="label">值得投 (≥30%)</div>
         <div class="value">{{ green_count }}</div>
     </div>
     <div class="rec-tile yellow">
-        <div class="label">可以试 (55-74)</div>
+        <div class="label">可以试 (15-30%)</div>
         <div class="value">{{ yellow_count }}</div>
     </div>
     <div class="rec-tile red">
-        <div class="label">性价比低 (&lt;55)</div>
+        <div class="label">性价比低 (&lt;15%)</div>
         <div class="value">{{ red_count }}</div>
     </div>
     <div class="rec-tile gray">
@@ -183,7 +183,7 @@
     <div class="rec-card" data-job-id="{{ c.job_id }}">
         <div class="score-block">
             {% if c.has_score %}
-            <div class="num {{ c.color }}">{{ c.score | round(0, 'common') | int }}</div>
+            <div class="num {{ c.color }}">{{ c.score | round(0, 'common') | int }}<span style="font-size:0.55em;font-weight:500">%</span></div>
             <div class="lab">{{ c.verdict }}</div>
             {% else %}
             <div class="num gray">—</div>

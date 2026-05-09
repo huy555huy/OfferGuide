@@ -27,6 +27,7 @@ markdown blob. Now: 10-20s for a structured card with action buttons.
 
 from __future__ import annotations
 
+import json
 import logging
 import re as _re
 from dataclasses import asdict, dataclass, field
@@ -35,7 +36,12 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ..llm import BudgetExceeded, enforce_daily_budget
-from .tools import HarnessDeps, _record_event_row, _strip_html_to_text
+from .tools import (
+    HarnessDeps,
+    _format_jd_for_skill,
+    _record_event_row,
+    _strip_html_to_text,
+)
 
 if TYPE_CHECKING:
     from ..skills import SkillResult, SkillSpec
@@ -151,6 +157,10 @@ def evaluate_job(
         log.warning("evaluate: record_event failed: %s", e)
 
     # ── Step 2: score_match ─────────────────────────────────────────
+    # W15.22 — verified inputs (job_text, user_profile) and output keys
+    # (probability, reasoning, dimensions, deal_breakers) per SKILL.md.
+    # Pre-W15.22 used job_title/jd_text/candidate_resume — all wrong, every
+    # call has silently raised ValueError since W14.
     if deps.runtime is None or not deps.user_profile_text:
         result.score_status = "skipped"
     else:
@@ -161,10 +171,8 @@ def evaluate_job(
             sr = _invoke_skill(
                 deps, score_spec,
                 inputs={
-                    "job_title": job_row["title"],
-                    "job_company": job_row["company"],
-                    "jd_text": (job_row.get("raw_text") or "")[:4000],
-                    "candidate_resume": deps.user_profile_text[:4000],
+                    "job_text": _format_jd_for_skill(job_row)[:4000],
+                    "user_profile": deps.user_profile_text[:4000],
                 },
             )
             if sr is None:
@@ -175,16 +183,33 @@ def evaluate_job(
                 result.score_skill_run_id = sr.skill_run_id
             else:
                 p = sr.parsed
-                result.score = _safe_float(p.get("score"))
+                # Convert 0-1 probability to 0-100 score for UI display
+                prob_raw = _safe_float(p.get("probability"))
+                result.score = (prob_raw * 100.0) if prob_raw is not None else None
                 result.score_reasoning = (p.get("reasoning") or "")[:1500]
-                gaps = p.get("key_gaps") or []
-                if isinstance(gaps, list):
-                    result.key_gaps = [str(g)[:200] for g in gaps[:8]]
+                # SKILL outputs deal_breakers (hard issues), not key_gaps
+                breakers = p.get("deal_breakers") or []
+                if isinstance(breakers, list):
+                    result.key_gaps = [str(g)[:200] for g in breakers[:8]]
                 result.score_skill_run_id = sr.skill_run_id
                 result.score_status = "ok"
                 result.cost_usd += sr.cost_usd or 0.0
+                # Record evaluation event so /recommended can rank by it later
+                try:
+                    _record_event_row(
+                        deps, kind="scored", job_id=job_id,
+                        note=json.dumps({
+                            "probability": prob_raw,
+                            "skill_run_id": sr.skill_run_id,
+                            "deal_breakers": breakers,
+                        }, ensure_ascii=False),
+                    )
+                except Exception as e:
+                    log.warning("evaluate: record scored event failed: %s", e)
 
     # ── Step 3: tailor_advice ────────────────────────────────────────
+    # W15.22 — verified inputs (master_resume, job_text, company,
+    # successful_profile_json). Pre-W15.22 used job_title/jd_text/current_resume.
     if deps.runtime is None or not deps.user_profile_text:
         result.tailor_status = "skipped"
     else:
@@ -195,10 +220,10 @@ def evaluate_job(
             sr = _invoke_skill(
                 deps, tailor_spec,
                 inputs={
-                    "job_title": job_row["title"],
-                    "company": job_row["company"],
-                    "jd_text": (job_row.get("raw_text") or "")[:4000],
-                    "current_resume": deps.user_profile_text[:6000],
+                    "master_resume": deps.user_profile_text[:6000],
+                    "job_text": _format_jd_for_skill(job_row)[:4000],
+                    "company": job_row["company"] or "",
+                    "successful_profile_json": "{}",  # no successful profile pipeline yet
                 },
             )
             if sr is None:

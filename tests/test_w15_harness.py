@@ -1769,27 +1769,35 @@ class TestReviewFixes:
 
     def test_recommended_orders_by_score_desc(self, web_client):
         client, store = web_client
-        # Insert 3 jobs + 3 score_match runs with different scores
+        from offerguide.harness import _schema as hs
+        hs.init_harness_schema(store)
+        # Insert 3 jobs + 3 harness_events of kind='scored' (W15.22 path:
+        # score is recorded as a harness_event after score_match runs, since
+        # SKILL input_json doesn't contain job_id).
         with store.connect() as conn:
-            for i, (t, c, score) in enumerate([
-                ("低分岗", "公司C", 40),
-                ("高分岗", "公司A", 88),
-                ("中分岗", "公司B", 65),
+            for i, (t, c, prob) in enumerate([
+                ("低分岗", "公司C", 0.10),
+                ("高分岗", "公司A", 0.45),
+                ("中分岗", "公司B", 0.22),
             ]):
                 conn.execute(
                     "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
                     "VALUES (?, ?, ?, ?, ?)",
                     ("manual", t, c, "x" * 200, f"hash_ord_{i}"),
                 )
+                jid = conn.execute(
+                    "SELECT id FROM jobs WHERE title=?", (t,),
+                ).fetchone()[0]
                 conn.execute(
-                    "INSERT INTO skill_runs (skill_name, skill_version, "
-                    "input_hash, input_json, output_json, cost_usd) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO harness_events (kind, job_id, note, source) "
+                    "VALUES (?, ?, ?, ?)",
                     (
-                        "score_match", "0.1.0", f"h_ord_{i}",
-                        _json.dumps({"job_title": t, "job_company": c}),
-                        _json.dumps({"score": score, "reasoning": f"score is {score}", "key_gaps": ["gap_a"]}),
-                        0.001,
+                        "scored", jid,
+                        _json.dumps({
+                            "probability": prob, "skill_run_id": 100 + i,
+                            "deal_breakers": [],
+                        }),
+                        "agent",
                     ),
                 )
             conn.commit()
@@ -1802,9 +1810,10 @@ class TestReviewFixes:
         idx_low = text.find("低分岗")
         assert idx_high > 0 and idx_mid > 0 and idx_low > 0
         assert idx_high < idx_mid < idx_low, "高分应该排在最前面"
-        # Bucket count tile
-        assert "值得投" in text
-        assert "可以试" in text
+        # New thresholds: ≥30% green, 15-30% yellow, <15% red
+        assert "值得投" in text  # 高分岗 (45%)
+        assert "可以试" in text  # 中分岗 (22%)
+        assert "性价比低" in text  # 低分岗 (10%)
 
     def test_recommended_excludes_already_applied(self, web_client):
         """已 'applied' 的岗位不出现在待点列表."""
@@ -1883,6 +1892,121 @@ class TestReviewFixes:
         assert resp.status_code == 200
         assert "/recommended" in resp.text
         assert "待点列表" in resp.text
+
+    # ── W15.22: SKILL field-name regression net
+    # Pre-W15.22 every score_match / tailor / interview_prep / reflect call
+    # raised ValueError in SkillRuntime canonicalize because we passed wrong
+    # input keys (job_title/jd_text/candidate_resume vs declared job_text/
+    # user_profile). Silently swallowed → no scores ever recorded since W14.
+    # This test lights up if a future call site reverts.
+
+    def test_skill_inputs_match_call_sites(self):
+        """For each SKILL we invoke from production, the input dict we build
+        must canonicalize without ValueError against the SKILL.md declaration.
+
+        Catches the W15.22 root bug: input field names drifting from SKILL.md.
+        """
+        from pathlib import Path
+
+        from offerguide.skills import discover_skills
+        from offerguide.skills._runtime import _canonicalize_inputs
+
+        skills_root = Path(__file__).parent.parent / "src/offerguide/skills"
+        skills_by_name = {s.name: s for s in discover_skills(skills_root)}
+
+        # Each entry: (SKILL name, sample inputs we'd pass at call site).
+        # Keep this list in sync with src/offerguide/harness/{tools,evaluate}.py
+        # and src/offerguide/ui/web.py extension/score_inline.
+        call_sites = [
+            ("score_match", {"job_text": "x" * 100, "user_profile": "y" * 100}),
+            ("tailor_resume", {
+                "master_resume": "x" * 100, "job_text": "y" * 100,
+                "company": "字节", "successful_profile_json": "{}",
+            }),
+            ("prepare_interview", {
+                "company": "字节", "job_text": "x" * 100,
+                "user_profile": "y" * 100, "past_experiences": "(无)",
+            }),
+            ("post_interview_reflection", {
+                "company": "字节", "prep_questions_json": "[]",
+                "actual_transcript": "面试结果: passed",
+            }),
+        ]
+
+        for skill_name, inputs in call_sites:
+            spec = skills_by_name.get(skill_name)
+            assert spec is not None, f"SKILL {skill_name} 没找到"
+            # Should NOT raise — if it does, a call site uses wrong keys
+            canon = _canonicalize_inputs(spec, inputs, strict=True)
+            assert set(canon.keys()) == set(spec.inputs), (
+                f"{skill_name}: canonicalize 没返回 declared 全集 — "
+                f"declared={spec.inputs}, got={list(canon.keys())}"
+            )
+
+    def test_score_match_records_scored_event(self, tmp_store, tmp_worldview):
+        """A successful score_match call should record a harness_events row of
+        kind='scored' with probability + skill_run_id in the JSON note. This is
+        what /recommended ranks by."""
+        from pathlib import Path
+
+        from offerguide.harness.tools import _exec_score_match
+        from offerguide.skills import discover_skills
+        from offerguide.skills._runtime import SkillRuntime
+
+        # Need a stub LLM that returns valid score_match JSON
+        skills_root = Path(__file__).parent.parent / "src/offerguide/skills"
+        skills = discover_skills(skills_root)
+
+        class FakeLLM:
+            def chat(self, messages, **kw):
+                from offerguide.llm import LLMResponse
+                return LLMResponse(
+                    content=_json.dumps({
+                        "probability": 0.42, "reasoning": "decent fit",
+                        "dimensions": {"tech": 0.6, "exp": 0.5, "company_tier": 0.4},
+                        "deal_breakers": [],
+                    }),
+                    model="stub", prompt_tokens=10, completion_tokens=10,
+                    cost_usd=0.0001,
+                )
+
+        runtime = SkillRuntime(llm=FakeLLM(), store=tmp_store)  # type: ignore[arg-type]
+
+        # Insert a job to score
+        with tmp_store.connect() as conn:
+            conn.execute(
+                "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
+                "VALUES ('manual', '测试岗', '测试公司', ?, 'h_score_evt')",
+                ("x" * 300,),
+            )
+            job_id = conn.execute(
+                "SELECT id FROM jobs WHERE title='测试岗'"
+            ).fetchone()[0]
+
+        deps = HarnessDeps(
+            settings=Settings(deepseek_api_key="x", default_model="stub"),
+            store=tmp_store,
+            memory_store=MemoryStore(root=tmp_worldview),
+            llm=FakeLLM(),  # type: ignore[arg-type]
+            runtime=runtime, skills=skills,
+            user_profile_text="resume content " * 50,
+        )
+
+        msg = _exec_score_match({"job_id": job_id}, deps)
+        assert "OK score_match" in msg, f"score_match returned: {msg}"
+        assert "0.42" in msg, "should mention probability 0.42"
+
+        # Should have recorded a 'scored' event
+        with tmp_store.connect() as conn:
+            ev = conn.execute(
+                "SELECT job_id, kind, note FROM harness_events "
+                "WHERE kind = 'scored' AND job_id = ?",
+                (job_id,),
+            ).fetchone()
+        assert ev is not None, "no harness_events row of kind='scored' recorded"
+        note = _json.loads(ev[2])
+        assert note["probability"] == 0.42
+        assert note["skill_run_id"] is not None
 
     def test_extension_manifest_v030_has_content_script(self):
         """Manifest 0.3.0 wires content_script_jd.js for JD detail pages."""

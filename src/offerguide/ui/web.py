@@ -826,43 +826,67 @@ def create_app(
                 "LIMIT 200"
             ).fetchall()
 
+            # W15.22 — Score lookup via harness_events kind='scored' (written
+            # by tools._exec_score_match + evaluate.py after a successful
+            # score_match run). Pre-W15.22 tried json_extract on input_json
+            # for nonexistent job_title/job_company keys → always empty.
+            # harness_events table may not exist in fresh fixtures — handle
+            # OperationalError gracefully.
+            scored_by_job: dict[int, dict[str, Any]] = {}
+            try:
+                score_rows = conn.execute(
+                    "SELECT job_id, "
+                    "       json_extract(note, '$.probability') as prob, "
+                    "       json_extract(note, '$.skill_run_id') as srid, "
+                    "       json_extract(note, '$.deal_breakers') as breakers "
+                    "FROM harness_events "
+                    "WHERE kind = 'scored' AND job_id IS NOT NULL "
+                    "ORDER BY id DESC"
+                ).fetchall()
+                for sr in score_rows:
+                    jid = int(sr[0])
+                    if jid in scored_by_job:
+                        continue  # keep the most recent (already iterated)
+                    prob = sr[1]
+                    if prob is None:
+                        continue
+                    breakers_raw = sr[3]
+                    breakers: list[str] = []
+                    if breakers_raw:
+                        try:
+                            parsed = json.loads(breakers_raw)
+                            if isinstance(parsed, list):
+                                breakers = [str(b)[:80] for b in parsed[:3]]
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    scored_by_job[jid] = {
+                        "probability": float(prob),
+                        "skill_run_id": sr[2],
+                        "deal_breakers": breakers,
+                    }
+            except Exception:
+                pass  # harness_events not initialized yet → no scores
+
             candidates: list[dict[str, Any]] = []
             for r in rows:
                 job_id, title, company, location, url, source, _fetched_at, app_status = r
-                # Look up latest score_match for this job
-                sr = conn.execute(
-                    "SELECT id, output_json, cost_usd FROM skill_runs "
-                    "WHERE skill_name = 'score_match' "
-                    "  AND json_extract(input_json, '$.job_title') = ? "
-                    "  AND json_extract(input_json, '$.job_company') = ? "
-                    "ORDER BY id DESC LIMIT 1",
-                    (title, company),
-                ).fetchone()
+                meta = scored_by_job.get(int(job_id))
+                # SKILL probability is 0-1; UI shows 0-100. Buckets per BOSS
+                # cold-apply baseline: <5% industry avg, so >30% = strong fit.
                 score: float | None = None
-                reasoning = ""
                 gaps: list[str] = []
                 sr_id = None
-                if sr:
-                    sr_id = sr[0]
-                    try:
-                        out = json.loads(sr[1])
-                        sv = out.get("score")
-                        if sv is not None:
-                            score = float(sv)
-                        reasoning = (out.get("reasoning") or "")[:240]
-                        raw_gaps = out.get("key_gaps") or []
-                        if isinstance(raw_gaps, list):
-                            gaps = [str(g)[:80] for g in raw_gaps[:3]]
-                    except (json.JSONDecodeError, ValueError, TypeError):
-                        pass
+                if meta:
+                    score = meta["probability"] * 100.0
+                    gaps = meta["deal_breakers"]
+                    sr_id = meta["skill_run_id"]
 
-                # Score color buckets (match content_script convention)
                 color = "gray"
                 verdict = "未评分"
                 if score is not None:
-                    if score >= 75:
+                    if score >= 30:
                         color, verdict = "green", "值得投"
-                    elif score >= 55:
+                    elif score >= 15:
                         color, verdict = "yellow", "可以试"
                     else:
                         color, verdict = "red", "性价比低"
@@ -873,7 +897,7 @@ def create_app(
                     "location": location or "",
                     "url": url, "source": source or "",
                     "app_status": app_status, "score": score,
-                    "reasoning": reasoning, "gaps": gaps,
+                    "reasoning": "", "gaps": gaps,
                     "color": color, "verdict": verdict,
                     "score_run_id": sr_id,
                     "has_score": score is not None,
@@ -3882,13 +3906,21 @@ def create_app(
             if score_spec is None:
                 return _ext_response(500, {"error": "score_match SKILL 缺失"})
 
+            # W15.22 — verified inputs/outputs against score_match SKILL.md
+            # (inputs: job_text, user_profile; outputs: probability, reasoning,
+            # dimensions, deal_breakers). Pre-W15.22 used wrong keys → ValueError
+            # → 502 every call.
+            from ..harness.tools import _format_jd_for_skill
+            job_row = {
+                "title": payload.title, "company": payload.company or "",
+                "location": payload.location or "",
+                "raw_text": payload.description,
+            }
             sr = await _asyncio.to_thread(
                 _invoke_skill, deps, score_spec,
                 inputs={
-                    "job_title": payload.title,
-                    "job_company": payload.company or "",
-                    "jd_text": payload.description[:4000],
-                    "candidate_resume": profile.raw_resume_text[:4000],
+                    "job_text": _format_jd_for_skill(job_row)[:4000],
+                    "user_profile": profile.raw_resume_text[:4000],
                 },
             )
             if sr is None or sr.parsed is None:
@@ -3900,24 +3932,35 @@ def create_app(
                 })
 
             p = sr.parsed
-            score_val = _safe_float(p.get("score"))
-            gaps = p.get("key_gaps") or []
-            strengths = p.get("strengths") or p.get("matched_skills") or []
-            if not isinstance(gaps, list):
-                gaps = []
-            if not isinstance(strengths, list):
-                strengths = []
-            top_gaps = [str(g)[:80] for g in gaps[:3]]
-            top_strengths = [str(s)[:80] for s in strengths[:3]]
+            # SKILL outputs probability ∈ [0, 1]; convert to 0-100 for UI.
+            prob_raw = _safe_float(p.get("probability"))
+            score_val = (prob_raw * 100.0) if prob_raw is not None else None
+            # SKILL outputs deal_breakers (hard-stop issues); use as top gaps.
+            breakers = p.get("deal_breakers") or []
+            if not isinstance(breakers, list):
+                breakers = []
+            top_gaps = [str(g)[:80] for g in breakers[:3]]
+            # No strengths field in SKILL output — derive from dimensions
+            dims = p.get("dimensions") or {}
+            top_strengths: list[str] = []
+            if isinstance(dims, dict):
+                for dim_name, dim_val in dims.items():
+                    try:
+                        if float(dim_val) >= 0.7:
+                            top_strengths.append(f"{dim_name}: {round(float(dim_val) * 100)}")
+                    except (TypeError, ValueError):
+                        continue
+                top_strengths = top_strengths[:3]
 
             # Color-coded verdict for the badge
             if score_val is None:
                 verdict = "评分缺失"
                 color = "gray"
-            elif score_val >= 75:
+            elif score_val >= 30:
+                # 30% reply rate = "强 fit" (BOSS 行业基线 < 5% for cold apply)
                 verdict = "值得投"
                 color = "green"
-            elif score_val >= 55:
+            elif score_val >= 15:
                 verdict = "可以试"
                 color = "yellow"
             else:
@@ -3927,12 +3970,14 @@ def create_app(
             duration_ms = int((_time.monotonic() - t0) * 1000)
             return _ext_response(200, {
                 "job_id": job_id,
-                "score": score_val,
+                "score": round(score_val, 1) if score_val is not None else None,
+                "probability": prob_raw,  # raw 0-1 for callers that want it
                 "verdict": verdict,
                 "color": color,
                 "top_strengths": top_strengths,
                 "top_gaps": top_gaps,
                 "reasoning": (p.get("reasoning") or "")[:600],
+                "dimensions": dims if isinstance(dims, dict) else {},
                 "duration_ms": duration_ms,
                 "cost_usd": round(sr.cost_usd or 0.0, 5),
             })
