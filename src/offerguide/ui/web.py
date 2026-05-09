@@ -803,6 +803,130 @@ def create_app(
             ),
         )
 
+    @app.get("/metrics", response_class=HTMLResponse)
+    def metrics_view(request: Request) -> Any:
+        """W15.19 — Dogfood metrics dashboard.
+
+        本周/累计 真实使用数据可视化 — 给"录视频 + 写专栏"用. 用户简历项目
+        最值钱那 1 行 ("我用它评估了 N 个 JD, 拿了 K 个面试") 就靠这页.
+
+        信号源:
+        - jobs.created_at → 评估的岗位数
+        - applications.status → 投递 / 面试 / offer 数
+        - skill_runs.cost_usd → 累计 cost
+        - harness_runs → agent wake 次数 + 成本
+        - inbox_items → agent 推荐数 / 接受率
+        """
+        with store.connect() as conn:
+            # Job evaluation (this week + all)
+            jobs_week = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE created_at >= julianday('now') - 7"
+            ).fetchone()[0]
+            jobs_all = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+
+            # Applications by status
+            apps_by_status = dict(conn.execute(
+                "SELECT status, COUNT(*) FROM applications GROUP BY status"
+            ).fetchall())
+
+            apps_total = sum(apps_by_status.values())
+            apps_applied = apps_by_status.get("applied", 0)
+            apps_interview = sum(apps_by_status.get(s, 0) for s in (
+                "1st_interview", "2nd_interview", "final_interview", "screening",
+            ))
+            apps_offer = apps_by_status.get("offer", 0)
+            apps_rejected = apps_by_status.get("rejected", 0)
+
+            # SKILL costs
+            skill_cost_week = float(conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0) FROM skill_runs "
+                "WHERE created_at >= julianday('now') - 7"
+            ).fetchone()[0] or 0)
+            skill_cost_all = float(conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0) FROM skill_runs"
+            ).fetchone()[0] or 0)
+            skill_runs_week = conn.execute(
+                "SELECT COUNT(*) FROM skill_runs WHERE created_at >= julianday('now') - 7"
+            ).fetchone()[0]
+
+            # Top SKILLs by call count
+            top_skills = conn.execute(
+                "SELECT skill_name, COUNT(*), COALESCE(SUM(cost_usd), 0) "
+                "FROM skill_runs WHERE created_at >= julianday('now') - 30 "
+                "GROUP BY skill_name ORDER BY COUNT(*) DESC LIMIT 8"
+            ).fetchall()
+
+            # Harness runs (agent wake) — this week
+            try:
+                harness_week = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(cost_usd), 0) "
+                    "FROM harness_runs WHERE started_at >= julianday('now') - 7"
+                ).fetchone()
+                harness_runs_week = int(harness_week[0] or 0)
+                harness_cost_week = float(harness_week[1] or 0)
+            except Exception:
+                harness_runs_week = 0
+                harness_cost_week = 0.0
+
+            # Inbox suggestions accept/reject rate
+            inbox_total = conn.execute(
+                "SELECT COUNT(*) FROM inbox_items WHERE kind = 'agent_suggestion'"
+            ).fetchone()[0]
+            inbox_approved = conn.execute(
+                "SELECT COUNT(*) FROM inbox_items "
+                "WHERE kind = 'agent_suggestion' AND status = 'approved'"
+            ).fetchone()[0]
+            inbox_rejected = conn.execute(
+                "SELECT COUNT(*) FROM inbox_items "
+                "WHERE kind = 'agent_suggestion' AND status = 'rejected'"
+            ).fetchone()[0]
+
+        # Compute reply rate (applied → any-event)
+        reply_rate = None
+        if apps_applied > 0:
+            replies = (
+                apps_by_status.get("hr_replied", 0)
+                + apps_by_status.get("screening", 0)
+                + apps_interview + apps_offer
+            )
+            reply_rate = replies / apps_applied
+
+        accept_rate = None
+        if inbox_approved + inbox_rejected > 0:
+            accept_rate = inbox_approved / (inbox_approved + inbox_rejected)
+
+        return templates.TemplateResponse(
+            request,
+            "metrics.html",
+            _ctx(
+                request,
+                jobs_week=jobs_week,
+                jobs_all=jobs_all,
+                apps_by_status=apps_by_status,
+                apps_total=apps_total,
+                apps_applied=apps_applied,
+                apps_interview=apps_interview,
+                apps_offer=apps_offer,
+                apps_rejected=apps_rejected,
+                reply_rate=reply_rate,
+                skill_cost_week=skill_cost_week,
+                skill_cost_all=skill_cost_all,
+                skill_runs_week=skill_runs_week,
+                top_skills=[
+                    {"name": r[0], "count": int(r[1]), "cost_usd": float(r[2])}
+                    for r in top_skills
+                ],
+                harness_runs_week=harness_runs_week,
+                harness_cost_week=harness_cost_week,
+                inbox_total=inbox_total,
+                inbox_approved=inbox_approved,
+                inbox_rejected=inbox_rejected,
+                accept_rate=accept_rate,
+                runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
+                active_tab="metrics",
+            ),
+        )
+
     @app.get("/debug", response_class=HTMLResponse)
     def debug_view(request: Request) -> Any:
         """W15.9 — Mission Control + harness telemetry debug view.

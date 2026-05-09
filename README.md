@@ -1,31 +1,83 @@
 # OfferGuide
 
-**国内校招 Ambient 求职 Copilot — agent 帮你精投决策、投后追踪、面试备战。**
+**国内校招 Ambient 求职 Agent — 反 auto-applier 路线, 做 search / draft / track, 决策留给你.**
 
-> 核心 1 步：粘 1 个 JD → 10-20s 出 [评分 / 关键 gap / 简历定向修改建议 /
-> 投不投建议]。点"已投"后, agent 7 天自动查回应, 不用你记。
+> **不是 LangChain wrapper, 不是 Manus 复刻, 不是 ChatGPT 代写简历**. 借鉴
+> Anthropic *Effective Harnesses for Long-Running Agents* + Cognition Devin
+> 的 ambient design, 国内校招特化, 自实现 Python harness 25k LOC.
+
+## 为什么是这个项目
+
+业内 AI 求职 agent 全在做"自动投递", 数据说这条路死了:
+
+- **AIHawk** (29.6k★) **2026/4 被作者归档**, 转商业化
+- **get_jobs** (6.8k★ Java) **2024 末停更** — 反爬军备升级跑赢脚本
+- **LazyApply** Trustpilot **2.1 星 / 52% 1 星**, 用户投 14000 份只收到几百个 skills-mismatch 拒信
+- **国内代投中介卖课 8999-12999** 被人民日报点名
+
+数据对比:
+- 自动投递 reply rate **< 2%**
+- 精投 reply rate **10-15%**
+- 国内字节一年只能投 2 次 — **false-positive 成本不可逆**
+
+OfferGuide 反方向走: **不替你点投递, 帮你投得更准**.
+
+## 3 个 design decision (跟同质 agent 项目的核心差异)
+
+### 1. 自实现 Anthropic-style harness, 拒绝 LangChain
+
+LangChain agents 是 reactive turn loops + chains, 短任务还行, 求职是长跑场景 — 7 天后回来查回应, agent 不能每次重头读 history. 所以:
+
+- **Single master loop** (no planner / executor / reflector chain — Anthropic 反对的 anti-pattern)
+- **File-based worldview markdown** — agent 自己 6-command memory tool 维护 `.offerguide/worldview/*.md`
+- **Agent 自决 schedule_next_wake** — 用户标"投了" → agent 自己 schedule(7d) 检查, 不用 cron
+
+### 2. 不替用户决策, 国内 false-positive 成本不可逆
+
+> "字节一年 2 次投递机会. 你瞎投一个就没了."
+
+所以 AI 用在 **search / draft / track**, decision 留给用户. 这是**风险工程判断** — false-positive 成本不可逆的场景, 不该把决策让给概率模型.
+
+### 3. 保 .docx 段落 style 简历微调 (国内 Word 网投独有)
+
+career-ops 是 markdown→PDF 重排 — 海外 Greenhouse / Lever 流程对.
+国内 ATS 看 .docx, 段落 style (Times New Roman / 字号 / 加粗) 全保留是必须. **国内没有第二个 OSS 项目做这件事**.
+
+加上 W15.17 的"InsertedClaim + prep_plan": agent 给你简历加的每个新 claim 都配 5-7 天学习清单 (论文 / demo / 5 道高频题 / fallback). **把"虚假"变"真学习"** — 面试被问到 RAG 时你真的会答, 因为 5 天前你读了 paper.
+
+## Status
+
+> **Technical spike, currently dogfooding** for my own 2026 暑期实习 search since **May 9, 2026**.
 >
-> 内核：W15 harness 极简骨架 + 模型 in-context 决策 + worldview markdown
-> 持久记忆 + GEPA SKILL 自进化（用户反馈 → 进化数据）。Anthropic 风格。
+> 第 1 周数据 (每周更新):
+> - 评估 JD: ___
+> - 投递: ___
+> - BOSS 回应 / 面试: ___
+> - 累计 LLM cost: $___
+>
+> 详见 [`docs/dogfood_log.md`](docs/dogfood_log.md). 完整面试准备包: [`docs/resume_pitch_kit.md`](docs/resume_pitch_kit.md).
 
 ## Quick start
 
+**已经在 conda env / venv 里**:
+
 ```bash
-git clone <repo> && cd offerguide
-uv sync --extra ui --extra autonomous
-
-# 配 .env (至少 LLM key + 简历路径)
-cp .env.example .env  # 填 OFFERGUIDE_LLM_API_KEY 和 OFFERGUIDE_RESUME_PDF
-
-# 一键体检 (装机问题立刻定位)
-uv run python scripts/doctor.py
-
-# 起服务
-uv run --extra ui python -m offerguide.ui.web
+python -m offerguide.ui.web
 # → http://127.0.0.1:8000
 ```
 
-→ home 顶部"🎯 这家公司值不值得投" 输入框 → 粘 1 个 JD → 看报告 → "✓ 已投".
+**全新机器**:
+
+```bash
+git clone https://github.com/huy555huy/OfferGuide.git && cd OfferGuide
+./install.sh        # 自动检测 conda / venv / uv, 用最少摩擦的路径装
+# .env 编辑: OFFERGUIDE_LLM_API_KEY="sk-..." + OFFERGUIDE_RESUME_PDF=".../简历.docx"
+python -m offerguide.ui.web
+```
+
+→ home 顶部 hero #1 "🎯 这家公司值不值得投" 粘 JD → 10-20s 出报告 + 简历建议.
+
+**Chrome 浏览器扩展** (BOSS 推荐池一键 sync): 加载 `browser_extension/` 到 `chrome://extensions/`.
 
 ![dashboard](docs/screenshots/dashboard.png)
 

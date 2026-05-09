@@ -1656,6 +1656,52 @@ class TestReviewFixes:
         assert row[1] == "user"
         assert "BOSS" in (row[2] or "")
 
+    # ── W15.19: /metrics dogfood dashboard
+    def test_metrics_page_renders_empty(self, web_client):
+        client, _ = web_client
+        resp = client.get("/metrics")
+        assert resp.status_code == 200
+        assert "Dogfood Metrics" in resp.text
+        assert "评估的岗位" in resp.text
+        assert "投递漏斗" in resp.text
+
+    def test_metrics_page_with_data(self, web_client):
+        client, store = web_client
+        # Inject a job + application + skill_run
+        with store.connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO jobs(source, url, title, company, raw_text, content_hash) "
+                "VALUES ('test', 'paste://m1', 't', 'co', 'x', 'h_metrics_1') RETURNING id"
+            )
+            job_id = int(cur.fetchone()[0])
+            conn.execute(
+                "INSERT INTO applications(job_id, status, applied_at) "
+                "VALUES (?, 'applied', julianday('now'))",
+                (job_id,),
+            )
+            conn.execute(
+                "INSERT INTO skill_runs(skill_name, skill_version, input_hash, "
+                "  input_json, output_json, cost_usd, latency_ms) "
+                "VALUES ('score_match', 'v1', 'h', '{}', '{}', 0.0123, 100)"
+            )
+        resp = client.get("/metrics")
+        assert resp.status_code == 200
+        # Should show the application in funnel
+        assert "已投" in resp.text
+        # Should include the skill in leaderboard
+        assert "score_match" in resp.text
+
+    def test_resume_pitch_kit_doc_exists(self):
+        """Ensure the pitch kit doc is committed (referenced by README)."""
+        from pathlib import Path
+        kit = Path(__file__).parent.parent / "docs/resume_pitch_kit.md"
+        assert kit.exists(), "docs/resume_pitch_kit.md missing — README links it"
+        text = kit.read_text(encoding="utf-8")
+        # Sanity: must include the 5 interview wedges + dogfood template
+        assert "面试" in text
+        assert "LangChain" in text
+        assert "Dogfood Log" in text or "dogfood" in text.lower()
+
     # ── Smell 6: dead code removed (no `_ = tools` statement at top level)
     def test_loop_module_no_dead_imports(self):
         from offerguide.harness import loop as loop_mod
