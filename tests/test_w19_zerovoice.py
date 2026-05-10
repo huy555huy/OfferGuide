@@ -183,6 +183,59 @@ class TestCrawlZerovoice:
         assert result.parsed_total == 6
         assert result.inserted == 2
 
+    def test_crawl_round_robin_distributes_across_companies(self, monkeypatch, store):
+        """W19+ bug fix audit: head-first cap caused 30/30 to all be 阿里巴巴
+        (READUE 第一段 124 个全是阿里, head 30 sticks to one company).
+        Round-robin spreads coverage."""
+        from offerguide.platforms import zerovoice as zv
+        # Synthetic README mimicking the real bug: 阿里 has 5 entries, others 1
+        big_alibaba_md = (
+            "## <h3 id=\"5\">阿里巴巴</h3>\n"
+            "|NO.|工作岗位|详细内容|\n|--|--|--|\n"
+            + "\n".join(
+                f"|{i}|阿里-AI 实习 {i}|[点击查看](https://campus-talent.alibaba.com/x{i})|"
+                for i in range(1, 6)
+            )
+            + "\n\n## <h3 id=\"1\">腾讯</h3>\n"
+            "|NO.|工作岗位|详细内容|\n|--|--|--|\n"
+            "|1|腾讯岗位|[点击查看](https://join.qq.com/x)|\n\n"
+            "## <h3 id=\"33\">商汤科技</h3>\n"
+            "|NO.|工作岗位|详细内容|\n|--|--|--|\n"
+            "|1|商汤岗位|[点击查看](https://app.mokahr.com/x)|\n"
+        )
+        monkeypatch.setattr(zv, "fetch_readme", lambda timeout_s=20.0: big_alibaba_md)
+        # Cap at 3 — head-first would give 3/3 阿里. Round-robin gives 1/each.
+        result = crawl_zerovoice(store, max_jobs=3)
+        assert result.inserted == 3
+        # The 3 ingested should span all 3 companies, not just 阿里
+        assert set(result.by_company.keys()) == {"阿里巴巴", "腾讯", "商汤科技"}
+        assert result.by_company["阿里巴巴"] == 1
+        assert result.by_company["腾讯"] == 1
+        assert result.by_company["商汤科技"] == 1
+
+    def test_round_robin_within_company_preserves_section_order(self, monkeypatch, store):
+        """Same company → take its section_no=1 first (README priority order)."""
+        from offerguide.platforms.zerovoice import ParsedJob, _round_robin_by_company
+        jobs = [
+            ParsedJob(company="A", title="A-1", url="https://a/1", section_no=1),
+            ParsedJob(company="A", title="A-2", url="https://a/2", section_no=2),
+            ParsedJob(company="A", title="A-3", url="https://a/3", section_no=3),
+            ParsedJob(company="B", title="B-1", url="https://b/1", section_no=1),
+        ]
+        # Cap = 4 — take all
+        out = _round_robin_by_company(jobs, 4)
+        # Round-robin: A-1, B-1, A-2, A-3
+        assert [(j.company, j.section_no) for j in out] == [
+            ("A", 1), ("B", 1), ("A", 2), ("A", 3),
+        ]
+
+    def test_round_robin_handles_cap_zero(self):
+        from offerguide.platforms.zerovoice import ParsedJob, _round_robin_by_company
+        out = _round_robin_by_company(
+            [ParsedJob("X", "x", "https://x", 1)], 0,
+        )
+        assert out == []
+
     def test_crawl_handles_fetch_failure_gracefully(self, monkeypatch, store):
         from offerguide.platforms import zerovoice as zv
 

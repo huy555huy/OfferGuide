@@ -207,6 +207,11 @@ def crawl_zerovoice(store: Any, *, max_jobs: int | None = None) -> FetchResult:
     `max_jobs` caps how many jobs to ingest this run — useful for not
     flooding the daemon's first cycle with 1000 entries that would all
     need score_match. None = no cap.
+
+    W19+ bug fix (verified by real audit): pre-bugfix used `parsed_jobs[:max_jobs]`
+    which took stable head order. Aliibaba has 124 entries at the top of
+    the README — head 30 = all 阿里巴巴, no diversity. Fixed by **round-robin
+    across companies** so cap distributes coverage.
     """
     from ..workers import scout
     result = FetchResult()
@@ -218,9 +223,8 @@ def crawl_zerovoice(store: Any, *, max_jobs: int | None = None) -> FetchResult:
 
     parsed_jobs = parse_readme(md)
     result.parsed_total = len(parsed_jobs)
-    if max_jobs is not None:
-        # Take a stable head (no shuffling) so re-runs hit same bucket
-        parsed_jobs = parsed_jobs[:max_jobs]
+    if max_jobs is not None and len(parsed_jobs) > max_jobs:
+        parsed_jobs = _round_robin_by_company(parsed_jobs, max_jobs)
 
     for pj in parsed_jobs:
         try:
@@ -237,3 +241,37 @@ def crawl_zerovoice(store: Any, *, max_jobs: int | None = None) -> FetchResult:
             result.errors.append(f"{pj.company}/{pj.title[:30]}: {type(e).__name__}: {e}")
 
     return result
+
+
+def _round_robin_by_company(
+    parsed_jobs: list[ParsedJob], cap: int,
+) -> list[ParsedJob]:
+    """Pick `cap` jobs but spread across companies (not head-first).
+
+    Algorithm: bucket by company, then in each pass take 1 job from each
+    bucket until cap reached. Within a company keeps the README's section
+    order (1, 2, 3, ...) so user sees prioritized jobs first.
+    """
+    if cap <= 0:
+        return []
+    buckets: dict[str, list[ParsedJob]] = {}
+    for pj in parsed_jobs:
+        buckets.setdefault(pj.company, []).append(pj)
+    # Sort each bucket by section_no to keep README priority within a company
+    for comp_jobs in buckets.values():
+        comp_jobs.sort(key=lambda p: p.section_no)
+    # Round-robin: pop one from each bucket per pass
+    out: list[ParsedJob] = []
+    company_order = list(buckets.keys())  # preserve README company order
+    while len(out) < cap:
+        picked_this_pass = False
+        for comp in company_order:
+            if not buckets[comp]:
+                continue
+            out.append(buckets[comp].pop(0))
+            picked_this_pass = True
+            if len(out) >= cap:
+                break
+        if not picked_this_pass:
+            break  # all buckets empty
+    return out
