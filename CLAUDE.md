@@ -107,10 +107,13 @@ agent[全自动找岗位, 多源] → /recommended[排好序] → 用户挑 →
   - **阿里**: 没找到直 API, 通过 0voice repo 间接拿到 124 个真
     campus-talent.alibaba.com ATS URL, SOURCE_LANDSCAPE 状态从
     unverified_js_shell → verified_via_aggregator
-- **agent_search seed_keywords 真去找 niche 公司了吗?** — W18 把 user
-  resume 抽出的 keyword 拼到 north_star, 但**还没 dogfood 验证**搜出来
-  的真是中小厂 (智谱/月之暗面/面壁等) 而不是又回到大厂. 看 /recommended
-  顶部 "X 家中小厂" 数才能真验证
+- ~~**agent_search seed_keywords 真去找 niche 公司了吗?**~~ — W19+ 已
+  dogfood 验证 (2026-05-11, 见 docs/dogfood_2026-05-11/agent_search_seed_keywords.md):
+  agent **真用了** seed_keywords, search queries 含 "DeepSeek/智谱/月之
+  暗面" niche 关键词, 但实际 ingest 中**中小厂只有 1/41** (麟鲤科技 via
+  wondercv). 真原因: niche AI 创业公司招聘页多 SPA / 反爬, web_search
+  路径效率低. 主力 niche 覆盖应靠 0voice 聚合 repo (W19+ 已接). agent_search
+  当补充源 (1-3 条/cycle), 不是主力流量.
 - ~~**application_plan 还没识别 baidu_intern / agent_search 源**~~ — W19+
   已做: 加了 host-based 大厂细化 (腾讯校招/社招/百度实习/百度校招/字节/
   阿里/美团/agent_search) 共 8 条具体投递路径, 每条含登录方式 + 内推码
