@@ -2029,6 +2029,95 @@ class TestReviewFixes:
         assert "/api/extension/greeting" in body
         assert "navigator.clipboard" in body
 
+    # ── W15.23: ambient discovery + apply-pack + post-apply-pack
+    def test_ambient_discovery_loop_imports_clean(self):
+        """The ambient loop module loads without side-effects."""
+        from offerguide.workers import ambient
+        assert hasattr(ambient, "_ambient_discovery_loop")
+        assert hasattr(ambient, "DEFAULT_CYCLE_INTERVAL_SECONDS")
+        assert ambient.DEFAULT_CYCLE_INTERVAL_SECONDS == 6 * 60 * 60
+
+    def test_ambient_unscored_picks_only_unscored_nowcoder_jobs(self, tmp_store):
+        """_load_unscored_nowcoder_ids excludes jobs with a 'scored' event."""
+        from offerguide.workers.ambient import _load_unscored_nowcoder_ids
+        with tmp_store.connect() as conn:
+            for i, src in enumerate(["nowcoder", "nowcoder", "manual"]):
+                conn.execute(
+                    "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (src, f"job_{i}", "公司", "x" * 200, f"h_amb_{i}"),
+                )
+            # Mark job 1 (nowcoder) as already scored
+            conn.execute(
+                "INSERT INTO harness_events (kind, job_id, note, source) "
+                "VALUES ('scored', 1, '{}', 'agent')"
+            )
+            conn.commit()
+        ids = _load_unscored_nowcoder_ids(tmp_store)
+        # Should include nowcoder job#2 (unscored), exclude nowcoder job#1 (scored)
+        # and exclude manual job#3 (wrong source)
+        assert 2 in ids
+        assert 1 not in ids
+        assert 3 not in ids
+
+    def test_apply_pack_404_for_unknown_job(self, web_client):
+        client, _ = web_client
+        resp = client.get("/jobs/999999/apply-pack")
+        assert resp.status_code == 404
+
+    def test_apply_pack_renders_no_llm_key(self, web_client):
+        """No LLM key → page renders with friendly error, not 500."""
+        client, store = web_client
+        with store.connect() as conn:
+            conn.execute(
+                "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
+                "VALUES ('manual', 'AI 实习', '字节', ?, 'h_apack')",
+                ("x" * 300,),
+            )
+            conn.commit()
+        jid = 1
+        resp = client.get(f"/jobs/{jid}/apply-pack")
+        assert resp.status_code == 200
+        # web_client fixture has no API key + no profile → some error message
+        assert "投递包" in resp.text  # page header still renders
+        assert ("LLM key" in resp.text
+                or "简历" in resp.text
+                or "SkillRuntime" in resp.text)
+
+    def test_post_apply_pack_404_for_unknown_job(self, web_client):
+        client, _ = web_client
+        resp = client.get("/jobs/999999/post-apply-pack")
+        assert resp.status_code == 404
+
+    def test_post_apply_pack_renders_no_llm_key(self, web_client):
+        client, store = web_client
+        with store.connect() as conn:
+            conn.execute(
+                "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
+                "VALUES ('manual', 'AI 实习', '字节', ?, 'h_papack')",
+                ("x" * 300,),
+            )
+            conn.commit()
+        resp = client.get("/jobs/1/post-apply-pack")
+        assert resp.status_code == 200
+        assert "投后备战包" in resp.text
+        assert "过往面经材料" in resp.text or "LLM key" in resp.text or "简历" in resp.text
+
+    def test_recommended_card_links_to_apply_pack(self, web_client):
+        """W15.23: '准备投递' button on /recommended cards links to apply-pack."""
+        client, store = web_client
+        with store.connect() as conn:
+            conn.execute(
+                "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
+                "VALUES ('manual', 'AI 实习', '字节', ?, 'h_rec_link')",
+                ("x" * 200,),
+            )
+            conn.commit()
+        resp = client.get("/recommended")
+        assert resp.status_code == 200
+        assert "/apply-pack" in resp.text
+        assert "准备投递" in resp.text
+
     # ── Smell 6: dead code removed (no `_ = tools` statement at top level)
     def test_loop_module_no_dead_imports(self):
         from offerguide.harness import loop as loop_mod

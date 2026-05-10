@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}投后备战 · {{ job.title }} @ {{ job.company }}{% endblock %}
+{% block content %}
+
+<style>
+.q-card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.875rem 1rem;
+    margin-bottom: 0.625rem;
+}
+.q-card .head {
+    display: flex; align-items: baseline; gap: 0.5rem;
+    margin-bottom: 0.375rem;
+}
+.q-card .question {
+    font-weight: 600; flex: 1;
+}
+.q-card .likelihood {
+    font-family: var(--font-mono); font-weight: 700; font-size: 1rem;
+}
+.q-card .likelihood.high   { color: var(--danger); }
+.q-card .likelihood.mid    { color: var(--warning); }
+.q-card .likelihood.low    { color: var(--text-muted); }
+.q-card .cat {
+    display: inline-block;
+    font-size: 0.7rem; padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--bg-subtle);
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+.q-card .rationale {
+    color: var(--text-muted); font-size: 0.82rem;
+    margin-top: 0.25rem; line-height: 1.45;
+}
+.section-card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.25rem;
+    margin-bottom: 0.875rem;
+}
+.section-card h2 {
+    font-family: var(--font-serif); font-size: 1.05rem; margin: 0 0 0.5rem;
+}
+.weak-list, .focus-list {
+    margin: 0; padding-left: 1.25rem;
+}
+.weak-list li { color: var(--danger); margin: 0.25rem 0; }
+.focus-list li { margin: 0.25rem 0; }
+.confidence-bar {
+    display: flex; align-items: center; gap: 0.5rem;
+    font-size: 0.78rem; color: var(--text-muted);
+    margin-top: 0.5rem;
+}
+</style>
+
+<div class="card">
+    <h1 style="font-family: var(--font-serif); margin: 0 0 0.375rem;">🎓 投后备战包: {{ job.title }}</h1>
+    <div class="muted small">
+        <strong>{{ job.company }}</strong>
+        {% if job.location %} · {{ job.location }}{% endif %}
+        · 已投 → 接下来等 HR 筛简历, 同时准备这家的面试.
+    </div>
+</div>
+
+{% if error %}
+<div class="card" style="background: #fce8e6; border-color: var(--danger);">
+    <strong>⚠ {{ error }}</strong>
+    {% if raw %}
+    <div style="background: var(--bg-subtle); padding: 0.625rem; margin-top: 0.5rem; border-radius: 4px; white-space: pre-wrap; font-size: 0.82rem;">{{ raw }}</div>
+    {% endif %}
+</div>
+{% elif pack %}
+
+<div class="section-card">
+    <h2>🏢 公司画像</h2>
+    <div style="line-height: 1.65;">{{ pack.company_snapshot }}</div>
+    <div class="confidence-bar">
+        过往面经材料: {{ past_experiences_chars }} 字
+        {% if past_experiences_chars == 0 %}<em>(没抓过面经, agent 用 JD + 公司常识猜的)</em>{% endif %}
+    </div>
+</div>
+
+{% if pack.expected_questions %}
+<div class="section-card">
+    <h2>📝 高频题预测 ({{ pack.expected_questions | length }} 题, 按概率排序)</h2>
+    {% for q in pack.expected_questions | sort(attribute='likelihood', reverse=true) %}
+    {% set lik_pct = (q.likelihood * 100) | round(0, 'common') | int %}
+    {% set lik_class = 'high' if q.likelihood >= 0.6 else ('mid' if q.likelihood >= 0.3 else 'low') %}
+    <div class="q-card">
+        <div class="head">
+            <span class="question">{{ q.question }}</span>
+            <span class="likelihood {{ lik_class }}">{{ lik_pct }}%</span>
+        </div>
+        <span class="cat">{{ q.category }}</span>
+        <div class="rationale">{{ q.rationale }}</div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if pack.prep_focus_areas %}
+<div class="section-card">
+    <h2>🎯 备战重点</h2>
+    <ul class="focus-list">
+        {% for f in pack.prep_focus_areas %}<li>{{ f }}</li>{% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+{% if pack.weak_spots %}
+<div class="section-card">
+    <h2>⚠ 你针对这岗的弱点 (诚实清单)</h2>
+    <ul class="weak-list">
+        {% for w in pack.weak_spots %}<li>{{ w }}</li>{% endfor %}
+    </ul>
+    <div class="muted small" style="margin-top: 0.5rem;">
+        别假装没问题 — HR 一问就露馅. 看哪条能 1-2 天补就补, 补不了的准备好"我现在没有但我打算如何补"的回答.
+    </div>
+</div>
+{% endif %}
+
+<div class="confidence-bar">
+    {% if duration_ms %}用时 {{ "%.1f"|format(duration_ms / 1000) }}s{% endif %}
+    {% if cost_usd %}· cost ${{ "%.4f"|format(cost_usd) }}{% endif %}
+    {% if skill_run_id %}· skill_run_id {{ skill_run_id }}{% endif %}
+</div>
+
+<div style="margin-top: 1rem; display: flex; gap: 0.625rem;">
+    <a href="/mock?company={{ job.company | urlencode }}" style="padding: 0.625rem 1rem; border-radius: 5px; background: var(--primary); color: #fff; text-decoration: none;">
+        🎤 开启模拟面试
+    </a>
+    <a href="/interviews?company={{ job.company | urlencode }}" style="padding: 0.625rem 1rem; border-radius: 5px; border: 1px solid var(--border); text-decoration: none; color: var(--text);">
+        📚 查面经库
+    </a>
+    <a href="/recommended" style="padding: 0.625rem 1rem; text-decoration: none; color: var(--text);">
+        ← 待点列表
+    </a>
+</div>
+
+{% endif %}
+
+{% endblock %}

@@ -207,12 +207,10 @@
             {% endif %}
         </div>
         <div class="actions">
+            <a href="/jobs/{{ c.job_id }}/apply-pack" class="primary">📋 准备投递</a>
             {% if c.url %}
-            <a href="{{ c.url }}" target="_blank" rel="noopener" class="primary">在 BOSS 打开 →</a>
-            {% else %}
-            <span class="muted small">无链接</span>
+            <a href="{{ c.url }}" target="_blank" rel="noopener">原 JD →</a>
             {% endif %}
-            <a href="/jobs">看跟踪</a>
         </div>
     </div>
 {% endfor %}

@@ -64,7 +64,44 @@ def create_app(
     notifier: Notifier | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with explicit dependencies (testable)."""
-    app = FastAPI(title="OfferGuide", docs_url=None, redoc_url=None)
+    # W15.23 — FastAPI lifespan: start the ambient discovery scheduler so
+    # nowcoder crawl runs on startup + every 6h. This is the "agent 全自动找
+    # 岗位" the user asked for — no manual paste, no user-clicked extension
+    # popup. crawl_nowcoder already exists (workers/scout.py) using the
+    # public sitemap chain — just hadn't been wired to startup until now.
+    import asyncio as _async_mod
+    import contextlib as _ctxlib
+
+    from ..workers.ambient import _ambient_discovery_loop
+
+    @_ctxlib.asynccontextmanager
+    async def _lifespan(app: FastAPI):
+        bg_task: _async_mod.Task[None] | None = None
+        # Disabled when api_key is empty (no point crawling without downstream
+        # score_match) or when env opt-out (tests don't want network).
+        if (settings.deepseek_api_key
+                and not getattr(settings, "disable_ambient_crawl", False)):
+            bg_task = _async_mod.create_task(
+                _ambient_discovery_loop(
+                    store=store, settings=settings,
+                    runtime=runtime, skills=skills,
+                    user_profile_text=(
+                        profile.raw_resume_text if profile else None
+                    ),
+                ),
+                name="offerguide_ambient_discovery",
+            )
+        try:
+            yield
+        finally:
+            if bg_task is not None:
+                bg_task.cancel()
+                with _ctxlib.suppress(BaseException):
+                    await bg_task
+
+    app = FastAPI(
+        title="OfferGuide", docs_url=None, redoc_url=None, lifespan=_lifespan,
+    )
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
     def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
@@ -801,6 +838,237 @@ def create_app(
                 runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
                 active_tab="jobs",
             ),
+        )
+
+    @app.get("/jobs/{job_id}/apply-pack", response_class=HTMLResponse)
+    async def apply_pack_view(job_id: int, request: Request) -> Any:
+        """W15.23 — 投递包页面.
+
+        给定一个 job_id, 跑 apply_assistant SKILL 出: 自我介绍话术 +
+        网申表单常见 QA + 投递策略 + pre-submit checklist + skip_reasons.
+        用户复制粘贴去官网/BOSS 投, 不用 OfferGuide 帮按发送.
+
+        SKILL 输入 verified W15.22: (company, role_focus, job_text, user_profile).
+        """
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT id, title, company, location, url, raw_text "
+                "FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"job#{job_id} 不存在")
+        job = {
+            "id": int(row[0]), "title": row[1] or "", "company": row[2] or "",
+            "location": row[3] or "", "url": row[4] or "",
+            "raw_text": row[5] or "",
+        }
+
+        if not settings.deepseek_api_key:
+            return templates.TemplateResponse(
+                request, "apply_pack.html",
+                _ctx(request, job=job, error="需要先配 LLM key", pack=None,
+                     active_tab="recommended"),
+            )
+        if profile is None or not profile.raw_resume_text:
+            return templates.TemplateResponse(
+                request, "apply_pack.html",
+                _ctx(request, job=job,
+                     error="未配简历, 去 /profile 上传后回来",
+                     pack=None, active_tab="recommended"),
+            )
+        if runtime is None:
+            return templates.TemplateResponse(
+                request, "apply_pack.html",
+                _ctx(request, job=job,
+                     error="SkillRuntime 未初始化", pack=None,
+                     active_tab="recommended"),
+            )
+        spec = next((s for s in skills if s.name == "apply_assistant"), None)
+        if spec is None:
+            return templates.TemplateResponse(
+                request, "apply_pack.html",
+                _ctx(request, job=job,
+                     error="apply_assistant SKILL 没注册", pack=None,
+                     active_tab="recommended"),
+            )
+
+        # Run apply_assistant SKILL with verified inputs (W15.22)
+        from ..harness.tools import _format_jd_for_skill
+        from ..llm import BudgetExceeded, enforce_daily_budget
+        try:
+            enforce_daily_budget(store)
+        except BudgetExceeded as e:
+            return templates.TemplateResponse(
+                request, "apply_pack.html",
+                _ctx(request, job=job, error=str(e), pack=None,
+                     active_tab="recommended"),
+            )
+
+        import asyncio as _asyncio
+        import time as _time
+        t0 = _time.monotonic()
+        try:
+            sr = await _asyncio.to_thread(
+                runtime.invoke, spec,
+                {
+                    "company": job["company"],
+                    "role_focus": job["title"],
+                    "job_text": _format_jd_for_skill(job)[:5000],
+                    "user_profile": profile.raw_resume_text[:5000],
+                },
+            )
+        except Exception as e:
+            log.exception("apply_pack: invoke failed: %s", e)
+            return templates.TemplateResponse(
+                request, "apply_pack.html",
+                _ctx(request, job=job,
+                     error=f"调用 SKILL 失败: {e}", pack=None,
+                     active_tab="recommended"),
+            )
+
+        duration_ms = int((_time.monotonic() - t0) * 1000)
+        if sr.parsed is None:
+            return templates.TemplateResponse(
+                request, "apply_pack.html",
+                _ctx(request, job=job,
+                     error=f"SKILL 输出非 JSON (skill_run_id={sr.skill_run_id})",
+                     raw=sr.raw_text[:1500], pack=None,
+                     active_tab="recommended"),
+            )
+
+        return templates.TemplateResponse(
+            request, "apply_pack.html",
+            _ctx(request, job=job, pack=sr.parsed,
+                 skill_run_id=sr.skill_run_id,
+                 duration_ms=duration_ms,
+                 cost_usd=round(sr.cost_usd or 0.0, 5),
+                 error=None, raw=None,
+                 active_tab="recommended"),
+        )
+
+    @app.get("/jobs/{job_id}/post-apply-pack", response_class=HTMLResponse)
+    async def post_apply_pack_view(job_id: int, request: Request) -> Any:
+        """W15.23 — 投后包页面 (用户点'我投了'后跳转过来).
+
+        跑 prepare_interview SKILL 出: 公司画像 + 高频题 (校准过的概率) +
+        备战重点 + 弱点. 也搜 interview_corpus 里的真实面经 (如果有抓过).
+
+        SKILL 输入 verified W15.22: (company, job_text, user_profile, past_experiences).
+        """
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT id, title, company, location, url, raw_text "
+                "FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"job#{job_id} 不存在")
+        job = {
+            "id": int(row[0]), "title": row[1] or "", "company": row[2] or "",
+            "location": row[3] or "", "url": row[4] or "",
+            "raw_text": row[5] or "",
+        }
+
+        # Pull past experiences from interview_corpus (if any)
+        past_experiences_text = ""
+        try:
+            from .. import interview_corpus
+            experiences = interview_corpus.fetch_for_company(
+                store, job["company"], limit=8,
+            )
+            if experiences:
+                past_experiences_text = interview_corpus.render_snippets(
+                    experiences, max_chars=4000,
+                )
+        except Exception as e:
+            log.debug("post_apply_pack: interview_corpus lookup failed: %s", e)
+
+        if not settings.deepseek_api_key:
+            return templates.TemplateResponse(
+                request, "post_apply_pack.html",
+                _ctx(request, job=job, error="需要先配 LLM key", pack=None,
+                     past_experiences_chars=len(past_experiences_text),
+                     active_tab="recommended"),
+            )
+        if profile is None or not profile.raw_resume_text:
+            return templates.TemplateResponse(
+                request, "post_apply_pack.html",
+                _ctx(request, job=job, error="未配简历", pack=None,
+                     past_experiences_chars=len(past_experiences_text),
+                     active_tab="recommended"),
+            )
+        if runtime is None:
+            return templates.TemplateResponse(
+                request, "post_apply_pack.html",
+                _ctx(request, job=job, error="SkillRuntime 未初始化", pack=None,
+                     past_experiences_chars=len(past_experiences_text),
+                     active_tab="recommended"),
+            )
+        spec = next((s for s in skills if s.name == "prepare_interview"), None)
+        if spec is None:
+            return templates.TemplateResponse(
+                request, "post_apply_pack.html",
+                _ctx(request, job=job,
+                     error="prepare_interview SKILL 没注册", pack=None,
+                     past_experiences_chars=len(past_experiences_text),
+                     active_tab="recommended"),
+            )
+
+        from ..harness.tools import _format_jd_for_skill
+        from ..llm import BudgetExceeded, enforce_daily_budget
+        try:
+            enforce_daily_budget(store)
+        except BudgetExceeded as e:
+            return templates.TemplateResponse(
+                request, "post_apply_pack.html",
+                _ctx(request, job=job, error=str(e), pack=None,
+                     past_experiences_chars=len(past_experiences_text),
+                     active_tab="recommended"),
+            )
+
+        import asyncio as _asyncio
+        import time as _time
+        t0 = _time.monotonic()
+        try:
+            sr = await _asyncio.to_thread(
+                runtime.invoke, spec,
+                {
+                    "company": job["company"],
+                    "job_text": _format_jd_for_skill(job)[:5000],
+                    "user_profile": profile.raw_resume_text[:5000],
+                    "past_experiences": past_experiences_text or "(无过往面经)",
+                },
+            )
+        except Exception as e:
+            log.exception("post_apply_pack: invoke failed: %s", e)
+            return templates.TemplateResponse(
+                request, "post_apply_pack.html",
+                _ctx(request, job=job, error=f"调用 SKILL 失败: {e}", pack=None,
+                     past_experiences_chars=len(past_experiences_text),
+                     active_tab="recommended"),
+            )
+
+        duration_ms = int((_time.monotonic() - t0) * 1000)
+        if sr.parsed is None:
+            return templates.TemplateResponse(
+                request, "post_apply_pack.html",
+                _ctx(request, job=job,
+                     error=f"SKILL 输出非 JSON (skill_run_id={sr.skill_run_id})",
+                     raw=sr.raw_text[:1500], pack=None,
+                     past_experiences_chars=len(past_experiences_text),
+                     active_tab="recommended"),
+            )
+
+        return templates.TemplateResponse(
+            request, "post_apply_pack.html",
+            _ctx(request, job=job, pack=sr.parsed,
+                 skill_run_id=sr.skill_run_id,
+                 duration_ms=duration_ms,
+                 cost_usd=round(sr.cost_usd or 0.0, 5),
+                 past_experiences_chars=len(past_experiences_text),
+                 error=None, raw=None,
+                 active_tab="recommended"),
         )
 
     @app.get("/recommended", response_class=HTMLResponse)

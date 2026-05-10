@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% block title %}投递包 · {{ job.title }} @ {{ job.company }}{% endblock %}
+{% block content %}
+
+<style>
+.pack-card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.25rem;
+    margin-bottom: 0.875rem;
+}
+.pack-card h2 {
+    font-family: var(--font-serif);
+    font-size: 1.05rem;
+    margin: 0 0 0.5rem;
+}
+.copy-block {
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    padding: 0.75rem 0.875rem;
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 0.875rem;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin-bottom: 0.5rem;
+}
+.copy-btn {
+    font-size: 0.78rem;
+    padding: 0.25rem 0.625rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-elev);
+    cursor: pointer;
+    margin-bottom: 0.875rem;
+}
+.copy-btn:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+.qa-item {
+    border-top: 1px solid var(--border-soft);
+    padding: 0.625rem 0;
+}
+.qa-item:first-of-type { border-top: none; padding-top: 0; }
+.qa-item .q {
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+}
+.qa-item .cat {
+    display: inline-block;
+    font-size: 0.7rem;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--bg-subtle);
+    color: var(--text-muted);
+    margin-left: 0.375rem;
+    text-transform: uppercase;
+}
+.qa-item .anti {
+    color: var(--danger);
+    font-size: 0.78rem;
+    margin-top: 0.375rem;
+}
+.checklist li { margin: 0.25rem 0; }
+.skip-banner {
+    background: #fce8e6;
+    border: 1px solid var(--danger);
+    border-radius: var(--radius-sm);
+    padding: 0.875rem 1rem;
+    margin-bottom: 1rem;
+}
+.actions-row {
+    display: flex; gap: 0.625rem; margin-top: 1rem;
+}
+.actions-row a, .actions-row form button {
+    padding: 0.625rem 1rem;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--bg-elev);
+    cursor: pointer;
+    text-decoration: none;
+    color: var(--text);
+    font-size: 0.875rem;
+}
+.actions-row .primary {
+    background: var(--primary); color: #fff; border-color: var(--primary);
+}
+.confidence-bar {
+    display: flex; align-items: center; gap: 0.5rem;
+    font-size: 0.78rem; color: var(--text-muted);
+}
+</style>
+
+<div class="card">
+    <h1 style="font-family: var(--font-serif); margin: 0 0 0.375rem;">📋 投递包: {{ job.title }}</h1>
+    <div class="muted small">
+        <strong>{{ job.company }}</strong>
+        {% if job.location %} · {{ job.location }}{% endif %}
+        {% if job.url %} · <a href="{{ job.url }}" target="_blank" rel="noopener">原 JD</a>{% endif %}
+    </div>
+</div>
+
+{% if error %}
+<div class="card" style="background: #fce8e6; border-color: var(--danger);">
+    <strong>⚠ {{ error }}</strong>
+    {% if raw %}
+    <div class="copy-block" style="margin-top: 0.75rem;">{{ raw }}</div>
+    {% endif %}
+</div>
+{% elif pack %}
+
+{% if pack.skip_reasons %}
+<div class="skip-banner">
+    <strong>🚫 这岗 OfferGuide 建议不投:</strong>
+    <ul style="margin: 0.5rem 0 0 1.25rem;">
+        {% for r in pack.skip_reasons %}<li>{{ r }}</li>{% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+<div class="pack-card">
+    <h2>💬 自我介绍话术
+        {% if pack.self_intro_snippet.platform_hint %}
+        <span class="muted small" style="font-size: 0.78rem; font-weight: 400;">
+            ({{ pack.self_intro_snippet.platform_hint }})
+        </span>
+        {% endif %}
+    </h2>
+    <div class="copy-block" id="intro-text">{{ pack.self_intro_snippet.text }}</div>
+    <button class="copy-btn" data-target="intro-text">📋 复制自我介绍</button>
+    <div class="muted small">
+        <em>为什么这么写:</em> {{ pack.self_intro_snippet.rationale }}
+    </div>
+</div>
+
+{% if pack.qa_templates %}
+<div class="pack-card">
+    <h2>📝 网申表单 QA 模板 ({{ pack.qa_templates | length }} 题)</h2>
+    {% for qa in pack.qa_templates %}
+    <div class="qa-item">
+        <div class="q">
+            Q: {{ qa.question }}
+            <span class="cat">{{ qa.category }}</span>
+            {% if qa.personalization_score %}
+            <span class="muted small" style="float: right; font-size: 0.7rem;">
+                personalization: {{ "%.2f"|format(qa.personalization_score) }}
+            </span>
+            {% endif %}
+        </div>
+        <div class="copy-block" id="qa-{{ loop.index }}">{{ qa.answer }}</div>
+        <button class="copy-btn" data-target="qa-{{ loop.index }}">📋 复制答案</button>
+        {% if qa.anti_patterns %}
+        <div class="anti">
+            <strong>别这样写:</strong>
+            <ul style="margin: 0.25rem 0 0 1rem;">
+                {% for ap in qa.anti_patterns %}<li>{{ ap }}</li>{% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if pack.submission_strategy %}
+<div class="pack-card">
+    <h2>🎯 投递策略</h2>
+    <ul class="checklist">
+        {% if pack.submission_strategy.best_time_window %}
+        <li><strong>最佳时间窗:</strong> {{ pack.submission_strategy.best_time_window }}</li>
+        {% endif %}
+        {% if pack.submission_strategy.expected_response_window_days is defined %}
+        <li><strong>预期回复窗口:</strong> {{ pack.submission_strategy.expected_response_window_days }} 天</li>
+        {% endif %}
+        {% if pack.submission_strategy.follow_up_plan %}
+        <li><strong>跟进计划:</strong> {{ pack.submission_strategy.follow_up_plan }}</li>
+        {% endif %}
+    </ul>
+    {% if pack.submission_strategy.platform_specific_tips %}
+    <div style="margin-top: 0.5rem;">
+        <strong>平台注意事项:</strong>
+        <ul style="margin: 0.25rem 0 0 1.25rem;">
+            {% for t in pack.submission_strategy.platform_specific_tips %}<li>{{ t }}</li>{% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if pack.pre_submit_checklist %}
+<div class="pack-card">
+    <h2>✅ 投前 checklist</h2>
+    <ul class="checklist">
+        {% for item in pack.pre_submit_checklist %}
+        <li><label><input type="checkbox"> {{ item }}</label></li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+<div class="confidence-bar">
+    {% if pack.confidence is defined %}
+    Agent 自信度: <strong>{{ "%.0f"|format(pack.confidence * 100) }}%</strong>
+    {% endif %}
+    {% if duration_ms %}· 用时 {{ "%.1f"|format(duration_ms / 1000) }}s{% endif %}
+    {% if cost_usd %}· cost ${{ "%.4f"|format(cost_usd) }}{% endif %}
+    {% if skill_run_id %}· skill_run_id {{ skill_run_id }}{% endif %}
+</div>
+
+<div class="actions-row">
+    {% if job.url %}
+    <a href="{{ job.url }}" target="_blank" rel="noopener" class="primary">
+        🚀 去官网投 →
+    </a>
+    {% endif %}
+    <form method="post" action="/api/jobs/{{ job.id }}/applied" style="margin: 0;">
+        <button type="submit">✅ 我投了 → 进备战包</button>
+    </form>
+    <a href="/recommended">← 返回待点列表</a>
+</div>
+
+<script>
+// Copy button handler
+document.querySelectorAll('.copy-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+        const target = document.getElementById(btn.dataset.target);
+        if (!target) return;
+        const text = target.textContent.trim();
+        try {
+            await navigator.clipboard.writeText(text);
+            const orig = btn.textContent;
+            btn.textContent = '✓ 已复制';
+            setTimeout(() => { btn.textContent = orig; }, 1500);
+        } catch (e) {
+            btn.textContent = '复制失败 — 手动选中';
+        }
+    });
+});
+// Form submit redirect to post-apply-pack
+document.querySelectorAll('form[action*="/applied"]').forEach(form => {
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const r = await fetch(form.action, {method: 'POST', headers: {'Content-Type': 'application/json'}});
+        if (r.ok) {
+            window.location.href = '/jobs/{{ job.id }}/post-apply-pack';
+        } else {
+            alert('标记失败: ' + r.status);
+        }
+    });
+});
+</script>
+
+{% endif %}
+
+{% endblock %}
