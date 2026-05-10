@@ -33,6 +33,42 @@ B. **环境/配置/前提条件 也是事实假设**.
      占用, 磁盘空间)** — 必须 `python -c` 或直接读才能说是事实
    - "**显然的事就是假设的温床**" — 越觉得显然越要 verify
 
+**最最狠的一条 (用户第 9 次骂后加, 元认知层)**:
+
+C. **grep 是反向工具 — 不能用 grep 做"X 是否存在" 的二值判断**.
+
+   grep 是 keyword match: 它告诉你 "**你假设的关键词**在不在", 而不是
+   "那东西真不真在". 一旦你假设的关键词错了 (而它经常错, 因为你不知道
+   真名), grep 给你**假阴性**, 然后你基于假阴性做"X 不存在" 的判断, 整
+   条决策链都偏.
+
+   真实例 (我自己犯的, 用户骂了我 2 次):
+   - grep `DEEPSEEK_API_KEY` 没匹配 → 我说"sandbox 没 key" → 真名叫
+     `OFFERGUIDE_LLM_API_KEY` → 用户骂
+   - grep `events` 表名没匹配 → 我假设表存在写 SQL → 真名叫
+     `harness_events` → SQL 失败 → 用户撞坑
+   - grep score_match 字段名 `job_title` 没匹配 → 我假设它就叫这个 →
+     真名叫 `job_text` → 4 个 SKILL 调用全 silent fail → 用户的 W15 
+     hero flow 一行 LLM 都没调成功过
+
+   **正确做法**: 判定 "X 是否存在" 时, 用**枚举式工具**, 不用搜索式工具:
+   - **Read 整个文件**, 不 grep 文件: `Read SKILL.md` 看真 inputs YAML
+   - **`cat .env | head`**, 不 grep 单个 key 名: 看真有哪些 keys
+   - **`SELECT name FROM sqlite_master`**, 不 grep `CREATE TABLE`: 列真
+     有的表
+   - **`python -c "from X import *; print(dir())"`**, 不 grep `from X
+     import Y`: 看真 export 哪些
+   - **`ls -la`**, 不 `find -name PATTERN`: 列目录全集
+   - **HTTP 真打 + 列响应字段**, 不 grep 文档: 看真 schema
+
+   口诀: **判定"不存在"前, 必须先看能枚举的全集. 没枚举就没"不存在"
+   这话.**
+
+   反模式 = "**针对性搜索 + 阴性结果 → 判定不存在**". 这条链每一步都
+   合理, 但前提 (我假设的关键词正确) 不真, 结论就错.
+
+   "显然的事是假设的温床" + "**搜索式 verify 是假设的放大器**".
+
 **违反时 = 对用户的伤害**: 用户已经压力大要找工作. 我每写一行假设的代码, 他都得花时间验证 / 报错 / 等下个版本修. **比不写还差.**
 
 **血淋淋的反面教材** (从 W14 起到 W15.22):
