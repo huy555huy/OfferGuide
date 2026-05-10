@@ -11,12 +11,9 @@ from offerguide.evolution.registry import (
     get_variant_by_version,
     insert_shadow_variant,
     promote_to_canary,
-    promote_to_live,
 )
 from offerguide.evolution.release import (
     DEFAULT_CANARY_TRAFFIC_PCT,
-    MIN_CANARY_SIGNALS,
-    ReleaseAction,
     run_release_cycle,
     run_release_cycle_for_skill,
 )
@@ -187,12 +184,14 @@ class TestRunReleaseCycle:
 
 class TestEvolutionUIRoute:
     def test_evolution_page_renders_empty(self, tmp_path):
+        from pathlib import Path
+
         from fastapi.testclient import TestClient
+
         from offerguide.config import Settings
         from offerguide.skills import discover_skills
         from offerguide.ui.notify import ConsoleNotifier
         from offerguide.ui.web import create_app
-        from pathlib import Path
 
         store = offerguide.Store(tmp_path / "evo_ui.db")
         store.init_schema()
@@ -211,13 +210,15 @@ class TestEvolutionUIRoute:
         assert "tailor_resume" in resp.text
 
     def test_evolution_release_cycle_endpoint(self, tmp_path):
+        from pathlib import Path
+
         from fastapi.testclient import TestClient
+
         from offerguide.config import Settings
         from offerguide.evolution.registry import insert_shadow_variant
         from offerguide.skills import discover_skills
         from offerguide.ui.notify import ConsoleNotifier
         from offerguide.ui.web import create_app
-        from pathlib import Path
 
         store = offerguide.Store(tmp_path / "evo_ui2.db")
         store.init_schema()

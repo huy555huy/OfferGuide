@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import pytest
+
 pytest.skip(
     "W13.1: agent/graph.py + agent/state.py removed (W4 LangGraph). Replaced by AgentLoop. "
     "TODO(W13-cleanup): rebuild equivalent prep_node coverage against AgentLoop trajectory.",

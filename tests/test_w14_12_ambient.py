@@ -16,7 +16,6 @@ The 3 pillars exercised here:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -416,9 +415,9 @@ class TestAutoScoreJobsDaemon:
         assert "missing" in out.get("skipped", "")
 
     def test_only_processes_jobs_above_min_text_length(self, tmp_path):
+        from offerguide.auto_pipeline import MIN_TEXT_FOR_AUTO_EVAL
         from offerguide.autonomous.jobs import auto_score_jobs
         from offerguide.autonomous.scheduler import JobContext
-        from offerguide.auto_pipeline import MIN_TEXT_FOR_AUTO_EVAL
 
         store = offerguide.Store(tmp_path / "asj.db")
         store.init_schema()
@@ -463,9 +462,9 @@ class TestAutoScoreJobsDaemon:
 
     def test_high_match_creates_intent_preview_suggestion(self, tmp_path):
         """High-score JD → enqueue agent_suggestion with Intent Preview body."""
+        from offerguide.auto_pipeline import MIN_TEXT_FOR_AUTO_EVAL
         from offerguide.autonomous.jobs import auto_score_jobs
         from offerguide.autonomous.scheduler import JobContext
-        from offerguide.auto_pipeline import MIN_TEXT_FOR_AUTO_EVAL
 
         store = offerguide.Store(tmp_path / "asj.db")
         store.init_schema()

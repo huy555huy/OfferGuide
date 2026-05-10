@@ -14,12 +14,9 @@ import offerguide
 from offerguide.evolution.registry import (
     bump_version,
     fail_variant,
-    get_canary_variants,
-    get_live_variant,
     get_shadow_variants,
     get_variant_by_version,
     insert_shadow_variant,
-    list_all_variants,
     promote_to_canary,
     promote_to_live,
     select_variant_for_invoke,

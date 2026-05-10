@@ -6,7 +6,6 @@ import pytest
 
 import offerguide
 from offerguide.evolution.fitness import (
-    EVOLUTION_THRESHOLD,
     MIN_SIGNALS_FOR_TRIGGER,
     compare_versions,
     compute_fitness,

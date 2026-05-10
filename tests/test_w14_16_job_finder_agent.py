@@ -10,9 +10,6 @@ each turn we check the agent called the right tool with the right args.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
 import offerguide

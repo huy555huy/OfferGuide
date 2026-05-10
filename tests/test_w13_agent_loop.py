@@ -578,7 +578,6 @@ class TestCriticSignalAutoWrite:
     def test_lookup_tools_dont_get_signals(self, populated_store):
         """read_job / read_user_resume are stateless lookups — no SKILL
         version to evolve, so they shouldn't appear in evolution_signals."""
-        from offerguide.evolution.signals import fetch_signals
 
         skills = discover_skills(SKILLS_ROOT)
         class _SkillStubLLM:

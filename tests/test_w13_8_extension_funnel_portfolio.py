@@ -230,7 +230,6 @@ class TestPromptCaching:
     def test_system_message_gets_cache_control_block(self, monkeypatch):
         """When chat_with_tools is called, the system message should be
         converted to a content-block list with cache_control marker."""
-        import httpx
         from offerguide.llm import LLMClient
 
         captured_body: dict = {}
@@ -268,7 +267,6 @@ class TestPromptCaching:
         assert sys_msg["content"][0]["cache_control"] == {"type": "ephemeral"}
 
     def test_cache_disabled_keeps_string_content(self, monkeypatch):
-        import httpx
         from offerguide.llm import LLMClient
 
         captured_body: dict = {}

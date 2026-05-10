@@ -18,7 +18,6 @@ import httpx
 
 from ._spec import RawJob
 
-
 DEFAULT_TIMEOUT_S = 15.0
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -143,7 +142,9 @@ def search_verified_official_jobs(
         if all_supported or key == "tencent":
             results.extend(search_tencent_jobs(keyword=keyword, limit=limit, client=own_client))
         if all_supported or key == "baidu":
+            # W17 — pull both校招 and 实习 (recruitType=GRADUATE / INTERN)
             results.append(search_baidu_campus_jobs(keyword=keyword, limit=limit, client=own_client))
+            results.append(search_baidu_intern_jobs(keyword=keyword, limit=limit, client=own_client))
         if key in SOURCE_LANDSCAPE and SOURCE_LANDSCAPE[key].status != "verified_public":
             st = SOURCE_LANDSCAPE[key]
             results.append(
@@ -442,8 +443,15 @@ def search_baidu_campus_jobs(
     keyword: str,
     limit: int,
     client: httpx.Client,
+    recruit_type: str = "GRADUATE",
 ) -> SourceSearchResult:
-    url = f"{BAIDU_CAMPUS_LIST_URL}?search={quote_plus(keyword)}"
+    """Search baidu campus. ``recruit_type``: 'GRADUATE' (校招/AIDU/管培生) OR
+    'INTERN' (暑期实习项目 + 日常实习项目). Verified empirically 2026-05-10.
+    """
+    qs = f"recruitType={recruit_type}"
+    if keyword:
+        qs += f"&search={quote_plus(keyword)}"
+    url = f"{BAIDU_CAMPUS_LIST_URL}?{qs}"
     try:
         resp = client.get(url, headers={"Referer": BAIDU_CAMPUS_LIST_URL})
         html = resp.text
@@ -452,17 +460,26 @@ def search_baidu_campus_jobs(
         jobs = parse_baidu_campus_jobs(html, evidence_url=url)[:limit]
     except Exception as e:
         return SourceSearchResult(
-            source="baidu_campus",
+            source="baidu_campus" if recruit_type == "GRADUATE" else "baidu_intern",
             status="error",
             evidence_url=url,
             note=f"SSR parse failed: {type(e).__name__}: {e}",
         )
     return SourceSearchResult(
-        source="baidu_campus",
+        source="baidu_campus" if recruit_type == "GRADUATE" else "baidu_intern",
         status="ok",
         evidence_url=url,
         jobs=jobs,
-        note="server-rendered window.__INITIAL_DATA__.listData.listDetailData",
+        note=f"SSR window.__INITIAL_DATA__ recruitType={recruit_type}",
+    )
+
+
+def search_baidu_intern_jobs(
+    *, keyword: str, limit: int, client: httpx.Client,
+) -> SourceSearchResult:
+    """W17 — 百度实习专用入口. recruitType=INTERN 拿暑期+日常实习项目."""
+    return search_baidu_campus_jobs(
+        keyword=keyword, limit=limit, client=client, recruit_type="INTERN",
     )
 
 
@@ -547,6 +564,10 @@ def raw_job_from_baidu_campus(
             "job_id": row.get("jobId"),
             "post_id": post_id,
             "recruit_type": recruit_type,
+            # W17 — flat project_type for recruit_type classifier (avoids
+            # nested raw_row digging from view layer).
+            "project_type": row.get("projectType") or "",
+            "post_type": row.get("postType") or "",
             "raw_row": row,
         },
     )

@@ -1082,25 +1082,34 @@ def create_app(
 
     @app.get("/recommended", response_class=HTMLResponse)
     def recommended_view(request: Request) -> Any:
-        """W15.21 — ranked "go click these" feed.
+        """W15.21 + W17 — ranked feed with recruit-type filter.
 
-        真"找好岗位给用户去点". 之前的 /jobs 只是 tracking; 这页是
-        decision support — 把所有 ingest 但还没投的 jobs, 按已有 score
-        排好序, 给一个"在 BOSS 打开"按钮 + 一键写开场白入口.
+        W17: 应届校招用户(2027 届统计专硕) 主流程要分清:
+        - **暑期实习** (5-9 月入职, 通常带转正) ← 5 月节奏的核心
+        - **日常实习** (任何时间, 不一定转正)
+        - **校招正式** (秋招主体, 9-10 月开)
+        - **社招** (社会招聘, 应届生不该投)
 
-        日上限提示也在顶部 (BOSS 免费用户 ~80 条/天).
+        Filter via ?type=summer|daily|fulltime|social|all (default: intern =
+        summer+daily, 5 月节奏的应届生默认看的就是这两个).
         """
+        from ..recruit_type import (
+            LABEL_ZH as RECRUIT_LABEL_ZH,
+        )
+        from ..recruit_type import (
+            classify_recruit_type,
+        )
         with store.connect() as conn:
             rows = conn.execute(
                 "SELECT j.id, j.title, j.company, j.location, j.url, "
-                "       j.source, j.fetched_at, "
+                "       j.source, j.fetched_at, j.extras_json, "
                 "       COALESCE(a.status, 'new') as app_status "
                 "FROM jobs j "
                 "LEFT JOIN applications a ON a.job_id = j.id "
                 "WHERE a.status IS NULL "
                 "   OR a.status IN ('considered', 'evaluated') "
                 "ORDER BY j.fetched_at DESC "
-                "LIMIT 200"
+                "LIMIT 400"
             ).fetchall()
 
             # W15.22 — Score lookup via harness_events kind='scored' (written
@@ -1146,8 +1155,17 @@ def create_app(
 
             candidates: list[dict[str, Any]] = []
             for r in rows:
-                job_id, title, company, location, url, source, _fetched_at, app_status = r
+                (
+                    job_id, title, company, location, url, source,
+                    _fetched_at, extras_json, app_status,
+                ) = r
                 meta = scored_by_job.get(int(job_id))
+                # W17 — classify recruit_type from real platform fields
+                recruit_type = classify_recruit_type({
+                    "source": source or "",
+                    "title": title or "",
+                    "extras_json": extras_json or "{}",
+                })
                 # SKILL probability is 0-1; UI shows 0-100. Buckets per BOSS
                 # cold-apply baseline: <5% industry avg, so >30% = strong fit.
                 score: float | None = None
@@ -1173,6 +1191,8 @@ def create_app(
                     "company": company or "(未知公司)",
                     "location": location or "",
                     "url": url, "source": source or "",
+                    "recruit_type": recruit_type,
+                    "recruit_type_label": RECRUIT_LABEL_ZH.get(recruit_type, recruit_type),
                     "application_plan": build_application_plan({
                         "source": source or "",
                         "url": url,
@@ -1201,15 +1221,48 @@ def create_app(
             except Exception:
                 pass
 
+        # W17 — recruit_type filter from query param. Default = intern (summer +
+        # daily) which matches 5 月节奏的应届校招生 (用户当前情况).
+        from ..recruit_type import (
+            ALL_TYPES,
+            CAMPUS_FULLTIME,
+            DAILY_INTERN,
+            SOCIAL,
+            SUMMER_INTERN,
+        )
+        # Aliases: ?type=summer | daily | intern | fulltime | social | all | unknown
+        filter_param = (request.query_params.get("type") or "intern").lower()
+        type_alias_map = {
+            "summer":   {SUMMER_INTERN},
+            "daily":    {DAILY_INTERN},
+            "intern":   {SUMMER_INTERN, DAILY_INTERN},
+            "fulltime": {CAMPUS_FULLTIME},
+            "social":   {SOCIAL},
+            "all":      set(ALL_TYPES),
+        }
+        # Also accept exact canonical labels
+        if filter_param in ALL_TYPES:
+            allowed_types = {filter_param}
+        else:
+            allowed_types = type_alias_map.get(filter_param, set(ALL_TYPES))
+
+        # Total pool by recruit_type — for filter buttons
+        recruit_counts: dict[str, int] = {t: 0 for t in ALL_TYPES}
+        for c in candidates:
+            recruit_counts[c["recruit_type"]] += 1
+
+        # Apply filter
+        filtered = [c for c in candidates if c["recruit_type"] in allowed_types]
+
         # Sort: scored first by score desc, then unscored by recency
         scored = sorted(
-            (c for c in candidates if c["has_score"]),
+            (c for c in filtered if c["has_score"]),
             key=lambda c: c["score"] or 0.0, reverse=True,
         )
-        unscored = [c for c in candidates if not c["has_score"]]
+        unscored = [c for c in filtered if not c["has_score"]]
         feed = scored[:50] + unscored[:30]
 
-        # Bucket counts (for the top tile row)
+        # Bucket counts (for the top tile row) — based on filtered set
         green_n = sum(1 for c in scored if c["color"] == "green")
         yellow_n = sum(1 for c in scored if c["color"] == "yellow")
         red_n = sum(1 for c in scored if c["color"] == "red")
@@ -1220,6 +1273,7 @@ def create_app(
                 request,
                 candidates=feed,
                 total_pool=len(candidates),
+                filtered_count=len(filtered),
                 scored_count=len(scored),
                 unscored_count=len(unscored),
                 green_count=green_n,
@@ -1229,6 +1283,10 @@ def create_app(
                 chat_daily_cap=80,
                 chat_warn_threshold=70,
                 runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
+                # W17 — recruit type filter state
+                active_filter=filter_param,
+                recruit_counts=recruit_counts,
+                recruit_type_labels=RECRUIT_LABEL_ZH,
                 active_tab="recommended",
             ),
         )

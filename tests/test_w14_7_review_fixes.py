@@ -12,12 +12,9 @@ import inspect
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
-
 import offerguide
 from offerguide import goals as _goals
 from offerguide.skills._runtime import _hash_invocation
-
 
 # ═══════════════════════════════════════════════════════════════════
 # P1 #1 — maintenance.refresh_company_corpus called a non-existent method
@@ -77,8 +74,8 @@ class TestRegenerateCompanyBriefReadsBriefField:
     def test_reads_through_brief_wrapper(self, monkeypatch, tmp_path):
         """BriefRow has the CompanyBrief in `.brief`; reading
         `result.confidence` directly used to AttributeError."""
-        from offerguide.agent import maintenance as m
         from offerguide import briefs as briefs_mod
+        from offerguide.agent import maintenance as m
 
         store = offerguide.Store(tmp_path / "x.db")
         store.init_schema()

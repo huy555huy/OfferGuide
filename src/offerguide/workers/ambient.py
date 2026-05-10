@@ -162,6 +162,7 @@ def _load_unscored_discovered_ids(store: Store, limit: int = 30) -> list[int]:
         "tencent_campus",
         "tencent_social",
         "baidu_campus",
+        "baidu_intern",  # W17 — recruitType=INTERN 拉的暑期+日常实习
     )
     placeholders = ",".join("?" * len(sources))
     with store.connect() as conn:

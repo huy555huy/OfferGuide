@@ -16,9 +16,6 @@ from offerguide.profile import UserProfile
 from offerguide.skills import SkillRuntime, discover_skills, load_skill
 from offerguide.skills.apply_assistant.helpers import (
     ApplyPackage,
-    QATemplate,
-    SelfIntroSnippet,
-    SubmissionStrategy,
 )
 from offerguide.ui.notify import ConsoleNotifier
 from offerguide.ui.web import create_app

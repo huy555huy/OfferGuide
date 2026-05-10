@@ -6,7 +6,6 @@ import pytest
 
 import offerguide
 from offerguide.evolution.signals import (
-    SignalRecord,
     fetch_signals,
     record_app_outcome,
     record_critic_signal,

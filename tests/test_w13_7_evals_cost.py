@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -10,14 +9,12 @@ import pytest
 import offerguide
 from offerguide.eval.runner import (
     EvalCase,
-    EvalReport,
     _score_case,
     load_cases,
-    run_eval,
 )
 from offerguide.llm import LLMResponse
 from offerguide.llm.pricing import estimate_cost_usd, is_known_model
-from offerguide.skills import SkillRuntime, SkillSpec, discover_skills
+from offerguide.skills import SkillRuntime, SkillSpec
 
 SKILLS_ROOT = Path(__file__).parent.parent / "src/offerguide/skills"
 

@@ -8,6 +8,7 @@ SKILL (Career-Ops + Resume-Matcher inspiration).
 from __future__ import annotations
 
 import pytest
+
 pytest.skip(
     "W13.1: evolution/adapters removed; SKILL behavior covered by W13.1 evolution tests + "
     "SKILL schema tests. TODO(W13-cleanup): extract non-adapter tests from this file.",

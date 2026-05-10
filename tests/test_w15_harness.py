@@ -1801,9 +1801,11 @@ class TestReviewFixes:
                     ),
                 )
             conn.commit()
-        resp = client.get("/recommended")
+        # W17 — default filter is ?type=intern; bare 'manual' jobs without
+        # recruit_type signals classify as 'unknown' and get filtered out.
+        # Use ?type=all to assert ordering across the full pool.
+        resp = client.get("/recommended?type=all")
         assert resp.status_code == 200
-        # 高分岗 should appear before 低分岗 in the rendered HTML
         text = resp.text
         idx_high = text.find("高分岗")
         idx_mid = text.find("中分岗")

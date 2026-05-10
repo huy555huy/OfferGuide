@@ -23,9 +23,7 @@ from offerguide.agent.loop import AgentLoop
 from offerguide.config import Settings
 from offerguide.llm import LLMResponse
 from offerguide.llm.client import ToolCall
-from offerguide.profile import UserProfile
 from offerguide.skills import SkillRuntime, discover_skills
-from offerguide.ui.notify import ConsoleNotifier
 
 SKILLS_ROOT = Path(__file__).parent.parent / "src/offerguide/skills"
 
@@ -297,8 +295,9 @@ class TestSSEQueueBounded:
     bound is caught."""
 
     def test_sse_queue_constructed_with_maxsize(self):
-        from offerguide.ui import web as web_mod
         import inspect
+
+        from offerguide.ui import web as web_mod
         src = inspect.getsource(web_mod)
         # The SSE handler must create a Queue with explicit maxsize
         assert "asyncio.Queue(maxsize=" in src, (
@@ -307,8 +306,9 @@ class TestSSEQueueBounded:
         )
 
     def test_sse_done_sentinel_protected_from_drop(self):
-        from offerguide.ui import web as web_mod
         import inspect
+
+        from offerguide.ui import web as web_mod
         src = inspect.getsource(web_mod)
         # When the queue is full, _done events get put back so the user
         # doesn't lose the run summary
