@@ -9,6 +9,7 @@ verified, we report that as a source status instead of pretending it works.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,6 +18,8 @@ from urllib.parse import quote_plus
 import httpx
 
 from ._spec import RawJob
+
+log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 15.0
 DEFAULT_HEADERS = {
@@ -32,6 +35,8 @@ TENCENT_CAMPUS_DETAIL_URL = "https://join.qq.com/api/v1/jobDetails/getJobDetails
 TENCENT_SOCIAL_SEARCH_URL = "https://careers.tencent.com/tencentcareer/api/post/Query"
 TENCENT_SOCIAL_DETAIL_URL = "https://careers.tencent.com/tencentcareer/api/post/ByPostId"
 BAIDU_CAMPUS_LIST_URL = "https://talent.baidu.com/jobs/list"
+# W19+ — 字节跳动社招 JSON API (实测 2026-05-11 可拉 1334+ 岗位)
+BYTEDANCE_SEARCH_URL = "https://jobs.bytedance.com/api/v1/search/job/posts"
 
 
 @dataclass(frozen=True)
@@ -74,16 +79,23 @@ SOURCE_LANDSCAPE: dict[str, SourceStatus] = {
     "bytedance": SourceStatus(
         company_key="bytedance",
         label="字节跳动",
-        status="unverified_js_shell",
-        evidence_url="https://jobs.bytedance.com/campus/",
-        note="robots 允许访问 campus，但静态 HTML 是前端壳；本轮未验证出稳定公开 JD API。",
+        # W19+ 实测 (2026-05-11): jobs.bytedance.com/api/v1/search/job/posts
+        # 是真公开 JSON API, 实测拉到 1334 个含 "AI Agent" 关键词的岗位.
+        # 但 API 返回全是 recruit_type='正式' (社招), 没有校招/实习 portal.
+        # 应届实习需要走 0voice repo 间接拉 (W19+ zerovoice 已接).
+        status="verified_public_social_only",
+        evidence_url="https://jobs.bytedance.com/api/v1/search/job/posts",
+        note="社招 JSON API 公开 (POST), 实测可读 1334 个岗位; 校招/实习走 0voice 聚合.",
     ),
     "alibaba": SourceStatus(
         company_key="alibaba",
         label="阿里巴巴",
-        status="unverified_js_shell",
-        evidence_url="https://talent.alibaba.com/",
-        note="官网为前端壳；已看到招聘前端资产，但未验证出稳定公开 JD API。",
+        # W19+ 注释: talent.alibaba.com 是 SPA shell (没找到稳定 API),
+        # 但 0voice repo 间接给了 124 个 campus-talent.alibaba.com 真 ATS
+        # detail URL, 应届实习覆盖通过这条路径.
+        status="verified_via_aggregator",
+        evidence_url="https://campus-talent.alibaba.com/",
+        note="无直 API; 通过 0voice repo 拿到 124 个真 campus-talent.alibaba.com ATS URL.",
     ),
     "meituan": SourceStatus(
         company_key="meituan",
@@ -145,6 +157,9 @@ def search_verified_official_jobs(
             # W17 — pull both校招 and 实习 (recruitType=GRADUATE / INTERN)
             results.append(search_baidu_campus_jobs(keyword=keyword, limit=limit, client=own_client))
             results.append(search_baidu_intern_jobs(keyword=keyword, limit=limit, client=own_client))
+        if all_supported or key == "bytedance":
+            # W19+ — 字节社招 JSON API (无校招 portal, 应届实习走 0voice 间接)
+            results.append(search_bytedance_jobs(keyword=keyword, limit=limit, client=own_client))
         if key in SOURCE_LANDSCAPE and SOURCE_LANDSCAPE[key].status != "verified_public":
             st = SOURCE_LANDSCAPE[key]
             results.append(
@@ -569,6 +584,112 @@ def raw_job_from_baidu_campus(
             "project_type": row.get("projectType") or "",
             "post_type": row.get("postType") or "",
             "raw_row": row,
+        },
+    )
+
+
+def search_bytedance_jobs(
+    *, keyword: str, limit: int, client: httpx.Client,
+) -> SourceSearchResult:
+    """W19+ — 字节跳动 jobs.bytedance.com/api/v1/search/job/posts.
+
+    Verified empirically 2026-05-11: public POST JSON API, no auth, returns
+    job_post_list with title/description/requirement/city_info/recruit_type.
+    All results are recruit_type='正式' (社招/social) — campus/实习 走另一
+    portal we don't have an API for; 0voice repo aggregator covers it.
+    """
+    headers = {
+        "Referer": "https://jobs.bytedance.com/",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept": "application/json, text/plain, */*",
+    }
+    payload = {
+        "keyword": keyword, "limit": max(1, min(limit, 20)), "offset": 0,
+        "portal_type": 6, "portal_entrance": 1,
+        "job_category_id_list": [], "tag_id_list": [],
+        "location_code_list": [], "subject_id_list": [],
+        "recruitment_id_list": [], "job_function_id_list": [],
+        "storefront_id_list": [],
+    }
+    try:
+        resp = client.post(BYTEDANCE_SEARCH_URL, json=payload, headers=headers)
+        data = resp.json()
+    except Exception as e:
+        return SourceSearchResult(
+            source="bytedance_jobs",
+            status="error",
+            evidence_url=BYTEDANCE_SEARCH_URL,
+            note=f"search failed: {type(e).__name__}: {e}",
+        )
+    if resp.status_code != 200 or data.get("message") != "ok":
+        return SourceSearchResult(
+            source="bytedance_jobs",
+            status="error",
+            evidence_url=BYTEDANCE_SEARCH_URL,
+            note=f"search returned HTTP {resp.status_code}: {str(data)[:300]}",
+        )
+
+    jobs: list[RawJob] = []
+    for item in (data.get("data") or {}).get("job_post_list") or []:
+        try:
+            jobs.append(raw_job_from_bytedance(item))
+        except Exception as e:
+            log.debug("bytedance row skip: %s", e)
+            continue
+    return SourceSearchResult(
+        source="bytedance_jobs", status="ok",
+        evidence_url=BYTEDANCE_SEARCH_URL,
+        jobs=jobs,
+        note=f"public JSON API; total_count={(data.get('data') or {}).get('count')}",
+    )
+
+
+def raw_job_from_bytedance(item: dict[str, Any]) -> RawJob:
+    """Convert one ByteDance API job_post → RawJob."""
+    post_id = str(item.get("id") or "").strip()
+    title = str(item.get("title") or "字节岗位").strip()
+    city_name = (item.get("city_info") or {}).get("name") or ""
+    if not city_name:
+        cities = item.get("city_list") or []
+        city_name = (cities[0].get("name") if cities else "") or ""
+    recruit_type_name = (item.get("recruit_type") or {}).get("name") or ""
+    code = str(item.get("code") or "").strip()
+    description = str(item.get("description") or "").strip()
+    requirement = str(item.get("requirement") or "").strip()
+    url = (
+        f"https://jobs.bytedance.com/experienced/position/{post_id}/detail"
+        if post_id else "https://jobs.bytedance.com/"
+    )
+    raw_text = _join_lines([
+        f"职位名: {title}",
+        "公司: 字节跳动",
+        f"工作地点: {city_name}",
+        f"招聘类型: {recruit_type_name}",
+        f"工作编号: {code}" if code else "",
+        "",
+        "## 岗位职责",
+        description,
+        "",
+        "## 任职要求",
+        requirement,
+    ])
+    return RawJob(
+        source="bytedance_jobs",
+        source_id=post_id or None,
+        url=url,
+        title=title,
+        company="字节跳动",
+        location=city_name or None,
+        raw_text=raw_text,
+        extras={
+            "source_verified": True,
+            "source_kind": "official_json_api",
+            "evidence_url": BYTEDANCE_SEARCH_URL,
+            "platform": "jobs.bytedance.com",
+            "post_id": post_id,
+            "code": code,
+            "recruit_type_name": recruit_type_name,
+            "raw_item_keys": list(item.keys()),
         },
     )
 

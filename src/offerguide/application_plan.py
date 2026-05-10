@@ -258,7 +258,11 @@ def _is_baidu(source: str, host: str) -> bool:
 
 
 def _is_bytedance(source: str, host: str) -> bool:
-    return source.startswith("bytedance") or "jobs.bytedance.com" in host
+    return (
+        source.startswith("bytedance")
+        or source == "bytedance_jobs"  # W19+ source name
+        or "jobs.bytedance.com" in host
+    )
 
 
 def _is_alibaba(source: str, host: str) -> bool:

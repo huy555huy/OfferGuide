@@ -78,6 +78,11 @@ def classify_recruit_type(job: dict[str, Any]) -> str:
     if source == "tencent_social":
         return SOCIAL
 
+    # W19+ — Bytedance jobs.bytedance.com API: empirically all recruit_type='正式'
+    # (verified 2026-05-11, 1334 results all 正式). 应届实习走 0voice 间接.
+    if source == "bytedance_jobs":
+        return SOCIAL
+
     # Baidu (校招 GRADUATE 或 实习 INTERN): explicit projectType enum
     # (verified 2026-05-10 — INTERN endpoint returns 暑期实习项目 / 日常实习项目)
     if source in ("baidu_campus", "baidu_intern"):

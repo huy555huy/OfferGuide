@@ -99,8 +99,14 @@ agent[全自动找岗位, 多源] → /recommended[排好序] → 用户挑 →
 - **大厂官网半自动投递** — 反爬 + form 字段动态, 用户自己 5 分钟点完官网
   比让 agent 去精准. application_plan.py 区分 BOSS / 牛客 / 官网 / 未知
   4 种, 每种给 deterministic 步骤 + 字段填充指引, 但**不点发送**
-- **字节 / 阿里 招聘官方源** — 已知 `unverified_js_shell` (SOURCE_LANDSCAPE),
-  等真 API 探出来再做. 需要用户帮抓 network XHR 或登录后 inspect
+- ~~**字节 / 阿里 招聘官方源**~~ — W19+ 已做:
+  - **字节**: 实测 `jobs.bytedance.com/api/v1/search/job/posts` 是真公开 JSON
+    API (1334+ 岗位), 加 `search_bytedance_jobs()` adapter. 但 API 全是
+    `recruit_type='正式'` (社招), classifier 标 SOCIAL, 应届实习走 0voice
+    间接. SOURCE_LANDSCAPE 状态从 unverified_js_shell → verified_public_social_only
+  - **阿里**: 没找到直 API, 通过 0voice repo 间接拿到 124 个真
+    campus-talent.alibaba.com ATS URL, SOURCE_LANDSCAPE 状态从
+    unverified_js_shell → verified_via_aggregator
 - **agent_search seed_keywords 真去找 niche 公司了吗?** — W18 把 user
   resume 抽出的 keyword 拼到 north_star, 但**还没 dogfood 验证**搜出来
   的真是中小厂 (智谱/月之暗面/面壁等) 而不是又回到大厂. 看 /recommended

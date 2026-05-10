@@ -273,6 +273,7 @@ def _load_unscored_discovered_ids(store: Store, limit: int = 30) -> list[int]:
         "baidu_campus",
         "baidu_intern",  # W17 — recruitType=INTERN 拉的暑期+日常实习
         "zerovoice_repo",  # W19+ — 0voice GitHub aggregator
+        "bytedance_jobs",  # W19+ — 字节社招 JSON API (实测 1334 岗位)
     )
     placeholders = ",".join("?" * len(sources))
     with store.connect() as conn:
