@@ -109,7 +109,11 @@ agent[全自动找岗位, 多源] → /recommended[排好序] → 用户挑 →
   已做: 加了 host-based 大厂细化 (腾讯校招/社招/百度实习/百度校招/字节/
   阿里/美团/agent_search) 共 8 条具体投递路径, 每条含登录方式 + 内推码
   提示 + 简历附件方式 + 业务线注意事项
-- **0voice GitHub 校招 repo 聚合** — 没接, Tier 2
+- ~~**0voice GitHub 校招 repo 聚合**~~ — W19+ 已做: server-side fetch
+  README → parse markdown 表格 → 475 真岗 (189 个 AI 相关) ingest, 含
+  阿里 124 个 campus-talent.alibaba.com 真 ATS URL (codex W16 标
+  unverified_js_shell 的, 通过 0voice 间接拿到了). 含北森 SaaS app.mokahr.com
+  专属 plan
 
 已交付 (W17/W18, 别再说没做):
 - ✅ 暑期/日常/校招/社招 deterministic classifier (recruit_type.py)

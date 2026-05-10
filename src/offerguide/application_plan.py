@@ -136,6 +136,11 @@ def build_application_plan(job: dict[str, Any]) -> ApplicationPlan:
             url=url, company=company, title=title,
             verified_source=verified_source, evidence_url=evidence_url,
         )
+    if _is_mokahr(source, host):
+        return _mokahr_plan(
+            url=url, company=company, title=title,
+            verified_source=verified_source, evidence_url=evidence_url,
+        )
 
     # W19+ — agent_search source needs explicit 'verify first' framing.
     # The job came from LLM web search, not a verified API. User must
@@ -257,7 +262,18 @@ def _is_bytedance(source: str, host: str) -> bool:
 
 
 def _is_alibaba(source: str, host: str) -> bool:
-    return source.startswith("alibaba") or "talent.alibaba.com" in host
+    return (
+        source.startswith("alibaba")
+        or "talent.alibaba.com" in host
+        or "campus-talent.alibaba.com" in host  # W19+ via 0voice repo
+    )
+
+
+def _is_mokahr(source: str, host: str) -> bool:
+    """W19+ — 北森 SaaS app.mokahr.com used by many 中厂/独角兽 (vendored ATS).
+    Worth a dedicated plan since the ATS form pattern is consistent across
+    its 6000+ enterprise clients."""
+    return "mokahr.com" in host
 
 
 def _is_meituan(source: str, host: str) -> bool:
@@ -476,6 +492,48 @@ def _meituan_plan(
             CopyField("附件 PDF 文件名", _resume_filename_hint(company, title), "tailor_resume", True),
         ],
         material_checklist=_common_materials(company, title),
+        post_apply_actions=_common_post_actions(),
+        verified_source=verified_source, evidence_url=evidence_url,
+    )
+
+
+def _mokahr_plan(
+    *, url: str | None, company: str, title: str,
+    verified_source: bool, evidence_url: str | None,
+) -> ApplicationPlan:
+    """W19+ — 北森 SaaS app.mokahr.com plan.
+
+    北森服务 6000+ 中大型企业 (含商汤、明略、第四范式等独角兽), ATS
+    UI/字段套路一致, 一份步骤覆盖一大批公司. 0voice repo 的不少 link
+    指向这。
+    """
+    return ApplicationPlan(
+        platform="mokahr",
+        platform_label=f"{company} · 北森 SaaS",
+        apply_url=url, action_label="打开北森网申",
+        channel_note=(
+            "这家公司用北森 SaaS ATS (国内主流招聘系统, 6000+ 企业在用)。"
+            "一般支持微信/手机号注册账号, 简历上传 + 在线编辑两种, ATS 解析较严格。"
+        ),
+        steps=[
+            "微信扫码或手机号注册 app.mokahr.com 账号 (一次注册可投多家)。",
+            "上传 PDF 简历, 北森 ATS 解析校对学校 / 专业 / 毕业时间。",
+            "回答开放题 (动机 / 项目 / 实习时长) 用下方 QA 模板。",
+            "投递后立刻在 OfferGuide 标「我投了」。",
+        ],
+        fields=[
+            CopyField("申请岗位", f"{company} · {title}", "JD", True),
+            CopyField("学校 / 专业 / 毕业时间", "和简历完全一致, ATS 解析严格", "用户资料"),
+            CopyField("项目经历摘要", "用下方 QA 中 project 类答案", "apply_assistant", True),
+            CopyField("求职动机 / 为什么这家", "用下方 motivation 类答案", "apply_assistant", True),
+            CopyField("实习时长 / 周到岗", "实习类岗诚实填; 北森筛 3+ 月较多", "用户确认"),
+            CopyField("附件 PDF 文件名", _resume_filename_hint(company, title), "tailor_resume", True),
+        ],
+        material_checklist=[
+            *_common_materials(company, title),
+            "北森 ATS 简历 PDF 5MB 限制, 字体内嵌避免解析乱码。",
+            "招聘 form 多为多页, 中途别关浏览器, 答完才能保存。",
+        ],
         post_apply_actions=_common_post_actions(),
         verified_source=verified_source, evidence_url=evidence_url,
     )

@@ -111,12 +111,28 @@ async def _run_one_cycle(
     2. 用 user resume 抽出来的 keywords 同时打 verified_official (腾讯+百度)
        — 用真 keyword "Diffusion 模型" / "RLHF" 等找到大厂里 niche 团队
     3. agent_search 用 keywords 找 AI 创业公司 / 中小厂 (大厂之外的世界)
+    W19+: 4. 0voice GitHub repo 聚合 — 100+ 公司 1000+ 岗位汇总, 每日更新.
+       一次拉到位, 含真 ATS URL (阿里 campus-talent / 字节 / 北森 SaaS)
     """
     from . import scout
     counters = await asyncio.to_thread(
         scout.crawl_nowcoder, store, limit=crawl_limit,
     )
     log.info("ambient discovery: nowcoder crawl done: %s", counters)
+
+    # W19+ — 0voice repo aggregator (475 真岗位/run, 189 个 AI 相关 实测).
+    # Cap intake to keep score_match cost under control. Cap = max_jobs.
+    try:
+        from ..platforms.zerovoice import crawl_zerovoice
+        zv_result = await asyncio.to_thread(
+            crawl_zerovoice, store, max_jobs=80,
+        )
+        log.info(
+            "ambient discovery: 0voice done: parsed=%d inserted=%d duplicate=%d",
+            zv_result.parsed_total, zv_result.inserted, zv_result.duplicate,
+        )
+    except Exception as e:
+        log.exception("ambient discovery: 0voice fetch failed: %s", e)
 
     # W18 — extract user-specific keywords ONCE per cycle, share across
     # verified_official + agent_search calls
@@ -256,6 +272,7 @@ def _load_unscored_discovered_ids(store: Store, limit: int = 30) -> list[int]:
         "tencent_social",
         "baidu_campus",
         "baidu_intern",  # W17 — recruitType=INTERN 拉的暑期+日常实习
+        "zerovoice_repo",  # W19+ — 0voice GitHub aggregator
     )
     placeholders = ",".join("?" * len(sources))
     with store.connect() as conn:
