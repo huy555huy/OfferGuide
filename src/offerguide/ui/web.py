@@ -865,94 +865,27 @@ def create_app(
         }
         application_plan = build_application_plan(job)
 
-        if not settings.deepseek_api_key:
-            return templates.TemplateResponse(
-                request, "apply_pack.html",
-                _ctx(request, job=job, error="需要先配 LLM key", pack=None,
-                     application_plan=application_plan,
-                     active_tab="recommended"),
-            )
-        if profile is None or not profile.raw_resume_text:
-            return templates.TemplateResponse(
-                request, "apply_pack.html",
-                _ctx(request, job=job,
-                     error="未配简历, 去 /profile 上传后回来",
-                     pack=None, application_plan=application_plan,
-                     active_tab="recommended"),
-            )
-        if runtime is None:
-            return templates.TemplateResponse(
-                request, "apply_pack.html",
-                _ctx(request, job=job,
-                     error="SkillRuntime 未初始化", pack=None,
-                     application_plan=application_plan,
-                     active_tab="recommended"),
-            )
-        spec = next((s for s in skills if s.name == "apply_assistant"), None)
-        if spec is None:
-            return templates.TemplateResponse(
-                request, "apply_pack.html",
-                _ctx(request, job=job,
-                     error="apply_assistant SKILL 没注册", pack=None,
-                     application_plan=application_plan,
-                     active_tab="recommended"),
-            )
-
-        # Run apply_assistant SKILL with verified inputs (W15.22)
+        # W19 — invoke apply_assistant via reusable helper.
+        # SKILL inputs verified W15.22: (company, role_focus, job_text, user_profile)
         from ..harness.tools import _format_jd_for_skill
-        from ..llm import BudgetExceeded, enforce_daily_budget
-        try:
-            enforce_daily_budget(store)
-        except BudgetExceeded as e:
-            return templates.TemplateResponse(
-                request, "apply_pack.html",
-                _ctx(request, job=job, error=str(e), pack=None,
-                     application_plan=application_plan,
-                     active_tab="recommended"),
-            )
-
-        import asyncio as _asyncio
-        import time as _time
-        t0 = _time.monotonic()
-        try:
-            sr = await _asyncio.to_thread(
-                runtime.invoke, spec,
-                {
-                    "company": job["company"],
-                    "role_focus": job["title"],
-                    "job_text": _format_jd_for_skill(job)[:5000],
-                    "user_profile": profile.raw_resume_text[:5000],
-                },
-            )
-        except Exception as e:
-            log.exception("apply_pack: invoke failed: %s", e)
-            return templates.TemplateResponse(
-                request, "apply_pack.html",
-                _ctx(request, job=job,
-                     error=f"调用 SKILL 失败: {e}", pack=None,
-                     application_plan=application_plan,
-                     active_tab="recommended"),
-            )
-
-        duration_ms = int((_time.monotonic() - t0) * 1000)
-        if sr.parsed is None:
-            return templates.TemplateResponse(
-                request, "apply_pack.html",
-                _ctx(request, job=job,
-                     error=f"SKILL 输出非 JSON (skill_run_id={sr.skill_run_id})",
-                     raw=sr.raw_text[:1500], pack=None,
-                     application_plan=application_plan,
-                     active_tab="recommended"),
-            )
-
+        from ..skill_view import invoke_skill_for_view
+        result = await invoke_skill_for_view(
+            skill_name="apply_assistant",
+            inputs_builder=lambda _spec, p: {
+                "company": job["company"],
+                "role_focus": job["title"],
+                "job_text": _format_jd_for_skill(job)[:5000],
+                "user_profile": p.raw_resume_text[:5000],
+            },
+            settings=settings, profile=profile, runtime=runtime,
+            skills=skills, store=store,
+        )
         return templates.TemplateResponse(
             request, "apply_pack.html",
-            _ctx(request, job=job, pack=sr.parsed,
-                 application_plan=application_plan,
-                 skill_run_id=sr.skill_run_id,
-                 duration_ms=duration_ms,
-                 cost_usd=round(sr.cost_usd or 0.0, 5),
-                 error=None, raw=None,
+            _ctx(request, job=job, application_plan=application_plan,
+                 pack=result.parsed, error=result.error, raw=result.raw_text,
+                 skill_run_id=result.skill_run_id,
+                 cost_usd=result.cost_usd, duration_ms=result.duration_ms,
                  active_tab="recommended"),
         )
 
@@ -993,90 +926,29 @@ def create_app(
         except Exception as e:
             log.debug("post_apply_pack: interview_corpus lookup failed: %s", e)
 
-        if not settings.deepseek_api_key:
-            return templates.TemplateResponse(
-                request, "post_apply_pack.html",
-                _ctx(request, job=job, error="需要先配 LLM key", pack=None,
-                     past_experiences_chars=len(past_experiences_text),
-                     active_tab="recommended"),
-            )
-        if profile is None or not profile.raw_resume_text:
-            return templates.TemplateResponse(
-                request, "post_apply_pack.html",
-                _ctx(request, job=job, error="未配简历", pack=None,
-                     past_experiences_chars=len(past_experiences_text),
-                     active_tab="recommended"),
-            )
-        if runtime is None:
-            return templates.TemplateResponse(
-                request, "post_apply_pack.html",
-                _ctx(request, job=job, error="SkillRuntime 未初始化", pack=None,
-                     past_experiences_chars=len(past_experiences_text),
-                     active_tab="recommended"),
-            )
-        spec = next((s for s in skills if s.name == "prepare_interview"), None)
-        if spec is None:
-            return templates.TemplateResponse(
-                request, "post_apply_pack.html",
-                _ctx(request, job=job,
-                     error="prepare_interview SKILL 没注册", pack=None,
-                     past_experiences_chars=len(past_experiences_text),
-                     active_tab="recommended"),
-            )
-
+        # W19 — invoke prepare_interview via reusable helper.
+        # SKILL inputs verified W15.22:
+        #   (company, job_text, user_profile, past_experiences)
         from ..harness.tools import _format_jd_for_skill
-        from ..llm import BudgetExceeded, enforce_daily_budget
-        try:
-            enforce_daily_budget(store)
-        except BudgetExceeded as e:
-            return templates.TemplateResponse(
-                request, "post_apply_pack.html",
-                _ctx(request, job=job, error=str(e), pack=None,
-                     past_experiences_chars=len(past_experiences_text),
-                     active_tab="recommended"),
-            )
-
-        import asyncio as _asyncio
-        import time as _time
-        t0 = _time.monotonic()
-        try:
-            sr = await _asyncio.to_thread(
-                runtime.invoke, spec,
-                {
-                    "company": job["company"],
-                    "job_text": _format_jd_for_skill(job)[:5000],
-                    "user_profile": profile.raw_resume_text[:5000],
-                    "past_experiences": past_experiences_text or "(无过往面经)",
-                },
-            )
-        except Exception as e:
-            log.exception("post_apply_pack: invoke failed: %s", e)
-            return templates.TemplateResponse(
-                request, "post_apply_pack.html",
-                _ctx(request, job=job, error=f"调用 SKILL 失败: {e}", pack=None,
-                     past_experiences_chars=len(past_experiences_text),
-                     active_tab="recommended"),
-            )
-
-        duration_ms = int((_time.monotonic() - t0) * 1000)
-        if sr.parsed is None:
-            return templates.TemplateResponse(
-                request, "post_apply_pack.html",
-                _ctx(request, job=job,
-                     error=f"SKILL 输出非 JSON (skill_run_id={sr.skill_run_id})",
-                     raw=sr.raw_text[:1500], pack=None,
-                     past_experiences_chars=len(past_experiences_text),
-                     active_tab="recommended"),
-            )
-
+        from ..skill_view import invoke_skill_for_view
+        result = await invoke_skill_for_view(
+            skill_name="prepare_interview",
+            inputs_builder=lambda _spec, p: {
+                "company": job["company"],
+                "job_text": _format_jd_for_skill(job)[:5000],
+                "user_profile": p.raw_resume_text[:5000],
+                "past_experiences": past_experiences_text or "(无过往面经)",
+            },
+            settings=settings, profile=profile, runtime=runtime,
+            skills=skills, store=store,
+        )
         return templates.TemplateResponse(
             request, "post_apply_pack.html",
-            _ctx(request, job=job, pack=sr.parsed,
-                 skill_run_id=sr.skill_run_id,
-                 duration_ms=duration_ms,
-                 cost_usd=round(sr.cost_usd or 0.0, 5),
+            _ctx(request, job=job, pack=result.parsed,
+                 error=result.error, raw=result.raw_text,
+                 skill_run_id=result.skill_run_id,
+                 cost_usd=result.cost_usd, duration_ms=result.duration_ms,
                  past_experiences_chars=len(past_experiences_text),
-                 error=None, raw=None,
                  active_tab="recommended"),
         )
 

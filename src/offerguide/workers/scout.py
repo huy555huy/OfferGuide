@@ -93,6 +93,11 @@ def crawl_nowcoder(
                 counters["errors"] += 1
                 continue
             counters["fetched"] += 1
+            # W18 — discovered_via attribution so /recommended cards can show
+            # "↳ 由 nowcoder sitemap 找到". Set BEFORE ingest so it lands in
+            # extras_json. Don't overwrite if the parser already set it.
+            rj.extras.setdefault("discovered_via", "nowcoder_sitemap")
+            rj.extras.setdefault("discovered_keyword", "(sitemap walk, no keyword)")
             was_new, _ = ingest(store, rj)
             if was_new:
                 counters["ingested_new"] += 1

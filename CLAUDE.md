@@ -92,9 +92,32 @@ agent[全自动找岗位, 多源] → /recommended[排好序] → 用户挑 →
 
 ## 6. 当前已知未解决的事 (真清单, 不假装通关)
 
-- **BOSS 沟通框 selector** — 没真 DOM 样本; W15.21 加了 probe 钩子等用户抓
-- **大厂官网半自动投递** — 反爬 + form 字段动态, 用户自己 5 分钟点完官网比让 agent 去精准
-- **字节 / 阿里 招聘官方源** — 已知 `unverified_js_shell`, 等真 API 探出来再做
+- **BOSS 沟通框 selector** — 没真 DOM 样本; W15.21 加了 probe 钩子等用户
+  抓. 用户**没用过**, 收 0 样本. 实际上 W18 把主流程移到 OfferGuide
+  /apply-pack, BOSS 浮窗变成可选的 ambient browsing 模式 — probe 是"如果
+  用户某天想在 BOSS 直接做"的兜底, 不该作为主路径承诺
+- **大厂官网半自动投递** — 反爬 + form 字段动态, 用户自己 5 分钟点完官网
+  比让 agent 去精准. application_plan.py 区分 BOSS / 牛客 / 官网 / 未知
+  4 种, 每种给 deterministic 步骤 + 字段填充指引, 但**不点发送**
+- **字节 / 阿里 招聘官方源** — 已知 `unverified_js_shell` (SOURCE_LANDSCAPE),
+  等真 API 探出来再做. 需要用户帮抓 network XHR 或登录后 inspect
+- **agent_search seed_keywords 真去找 niche 公司了吗?** — W18 把 user
+  resume 抽出的 keyword 拼到 north_star, 但**还没 dogfood 验证**搜出来
+  的真是中小厂 (智谱/月之暗面/面壁等) 而不是又回到大厂. 看 /recommended
+  顶部 "X 家中小厂" 数才能真验证
+- **application_plan 还没识别 baidu_intern / agent_search 源** — 这俩源
+  ingest 后用户点 "📋 准备投递" 走的是 official_site / unknown 路径, 不
+  够细
 - **0voice GitHub 校招 repo 聚合** — 没接, Tier 2
 
-每次 commit 前对照这 4 条, **别假装解决了再加新功能**.
+已交付 (W17/W18, 别再说没做):
+- ✅ 暑期/日常/校招/社招 deterministic classifier (recruit_type.py)
+- ✅ 百度 INTERN endpoint (实测拿到 暑期+日常实习项目)
+- ✅ /recommended 按 recruit_type filter (默认 ?type=intern)
+- ✅ 多 keyword 派发 (从 user 真简历抽 8 个 niche keyword, 不只大厂关键词)
+- ✅ discovered_via 来源 attribution (verified_official + nowcoder_sitemap
+  都已标, /recommended 卡片显示 "↳ 由 keyword X 找到")
+- ✅ /recommended diversity bar (大厂 vs 中小厂分桶)
+- ✅ W19 SKILL invoke DRY helper (skill_view.py 收掉 4 view 重复 boilerplate)
+
+每次 commit 前对照这两条清单, **别假装解决了再加新功能**.
