@@ -1,19 +1,12 @@
 """Tool schemas + dispatch for the W15 harness.
 
-13 tools total (memory + 12 from this module). Each tool is a
-**capability** the agent can choose; the agent decides when/how to use
-them. No hardcoded "if condition X, call tool Y" logic — that's the
-model's job, framed by ``instructions.md``.
+Harness tools are **capabilities** the agent can choose; the agent decides
+when/how to use them. No hardcoded "if condition X, call tool Y" logic — that's
+the model's job, framed by ``instructions.md``.
 
-Anthropic principle (verbatim from research):
-> "Design 5-10 intentional tools targeting high-impact workflows."
-> "Don't give raw SQL access; give search_jobs_by_criteria() wrapper."
-
-Tool granularity: each tool is one verb of agent agency. ``score_match``
-(SKILL wrapper) instead of ``invoke_skill(name=score_match)`` — agent
-shouldn't have to know SKILL infra exists. Tools below all return
-strings (success or 'ERROR: ...') so the agent reads them directly in
-the next turn.
+The most important job-discovery distinction: verified official-source tools
+return only sources we have actually probed, while generic web search remains
+available for exploration.
 """
 
 from __future__ import annotations
@@ -40,6 +33,25 @@ else:
     SkillSpec = Any  # type: ignore[assignment,misc]
 
 log = logging.getLogger(__name__)
+
+
+_DESIGN_NOTE = """
+Tool design note:
+Each tool is a
+**capability** the agent can choose; the agent decides when/how to use
+them. No hardcoded "if condition X, call tool Y" logic — that's the
+model's job, framed by ``instructions.md``.
+
+Anthropic principle (verbatim from research):
+> "Design 5-10 intentional tools targeting high-impact workflows."
+> "Don't give raw SQL access; give search_jobs_by_criteria() wrapper."
+
+Tool granularity: each tool is one verb of agent agency. ``score_match``
+(SKILL wrapper) instead of ``invoke_skill(name=score_match)`` — agent
+shouldn't have to know SKILL infra exists. Tools below all return
+strings (success or 'ERROR: ...') so the agent reads them directly in
+the next turn.
+"""
 
 
 # ── Dependency container ──────────────────────────────────────────────
@@ -106,6 +118,38 @@ _TOOL_DISCOVER_JOBS: dict[str, Any] = {
                 },
             },
             "required": ["criteria"],
+        },
+    },
+}
+
+
+_TOOL_SEARCH_OFFICIAL_JOBS: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "search_official_jobs",
+        "description": (
+            "Search verified official recruitment sources and ingest real JDs. "
+            "Currently proven: Tencent campus/social JSON APIs and Baidu campus "
+            "SSR list data. For ByteDance/Alibaba/Meituan/Xiaohongshu/BOSS, "
+            "returns the observed limitation instead of inventing support."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "company": {
+                    "type": "string",
+                    "description": "Company name; omit to search verified big-company sources.",
+                },
+                "keyword": {
+                    "type": "string",
+                    "description": "Job keyword, e.g. AI Agent / LLM / RAG.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max jobs per source, default 5, max 20.",
+                },
+            },
+            "required": ["keyword"],
         },
     },
 }
@@ -382,6 +426,7 @@ ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
     # Memory comes first — it's the agent's brain
     MEMORY_TOOL_SCHEMA,
     # Active (agent should proactively call)
+    _TOOL_SEARCH_OFFICIAL_JOBS,
     _TOOL_DISCOVER_JOBS,
     _TOOL_TAILOR_ADVICE,
     _TOOL_NOTIFY_USER,
@@ -454,6 +499,48 @@ def _exec_discover_jobs(args: dict[str, Any], deps: HarnessDeps) -> str:
             f"  · {n[:140]}" for n in result.notes[-3:]
         )
     return summary
+
+
+def _exec_search_official_jobs(args: dict[str, Any], deps: HarnessDeps) -> str:
+    keyword = (args.get("keyword") or "").strip()
+    if not keyword:
+        return "ERROR: search_official_jobs requires keyword"
+    company = (args.get("company") or "").strip() or None
+    limit = max(1, min(int(args.get("limit") or 5), 20))
+
+    from ..platforms.official_jobs import search_verified_official_jobs
+    from ..workers import scout
+
+    results = search_verified_official_jobs(
+        company=company,
+        keyword=keyword,
+        limit=limit,
+    )
+    inserted_ids: list[int] = []
+    dup_ids: list[int] = []
+    lines = [
+        "OK search_official_jobs completed",
+        f"criteria: company={company or 'verified official sources'} keyword={keyword!r}",
+    ]
+    for source_result in results:
+        lines.append(
+            f"- {source_result.source}: {source_result.status}; "
+            f"evidence={source_result.evidence_url or '(none)'}; "
+            f"{source_result.note}"
+        )
+        for rj in source_result.jobs:
+            was_new, job_id = scout.ingest(deps.store, rj)
+            if was_new:
+                inserted_ids.append(job_id)
+                lines.append(f"  inserted job#{job_id}: {rj.company} · {rj.title}")
+            else:
+                dup_ids.append(job_id)
+                lines.append(f"  duplicate job#{job_id}: {rj.company} · {rj.title}")
+    lines.append(
+        f"summary: inserted={inserted_ids[:10]}, duplicate={dup_ids[:10]}. "
+        "Next for promising jobs: score_match(job_id)."
+    )
+    return "\n".join(lines)[:5000]
 
 
 def _exec_fetch_jd(args: dict[str, Any], deps: HarnessDeps) -> str:
@@ -837,6 +924,7 @@ def _exec_fetch_url(args: dict[str, Any], deps: HarnessDeps) -> str:
 
 _DISPATCH_TABLE: dict[str, Callable[[dict[str, Any], HarnessDeps], str]] = {
     "memory": _exec_memory,
+    "search_official_jobs": _exec_search_official_jobs,
     "discover_jobs": _exec_discover_jobs,
     "fetch_jd": _exec_fetch_jd,
     "score_match": _exec_score_match,

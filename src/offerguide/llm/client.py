@@ -211,6 +211,15 @@ class LLMResponse:
     cost_usd: float = 0.0
     latency_ms: int = 0
     raw: dict[str, Any] | None = None
+    assistant_message: dict[str, Any] | None = None
+    """Assistant message to append back into a tool-call conversation.
+
+    Some reasoning-capable OpenAI-compatible providers return extra assistant
+    fields such as ``reasoning_content`` and require those fields to be echoed
+    on the next request. We preserve provider extras here while normalizing
+    tool-call arguments to valid JSON so loops do not hand-roll the history
+    message incorrectly.
+    """
     tool_calls: list[ToolCall] = field(default_factory=list)
     """When the model used a tool, this is non-empty AND ``content`` may be
     empty (or contain a brief 'thinking' preamble depending on provider).
@@ -454,6 +463,22 @@ class LLMClient:
                 arguments_raw=args_raw if isinstance(args_raw, str) else "",
             ))
 
+        assistant_message: dict[str, Any] = dict(message)
+        assistant_message["role"] = "assistant"
+        assistant_message["content"] = content
+        if tool_calls:
+            assistant_message["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                    },
+                }
+                for tc in tool_calls
+            ]
+
         usage = payload.get("usage", {})
         prompt_tokens = int(usage.get("prompt_tokens", 0))
         completion_tokens = int(usage.get("completion_tokens", 0))
@@ -472,6 +497,7 @@ class LLMClient:
             ),
             latency_ms=latency_ms,
             raw=payload,
+            assistant_message=assistant_message,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             cache_hit_tokens=cache_hit_tokens,

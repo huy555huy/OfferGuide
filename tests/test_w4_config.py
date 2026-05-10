@@ -15,6 +15,8 @@ def test_defaults_when_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
         "TELEGRAM_CHAT_ID",
         "OFFERGUIDE_NOTIFY",
         "OFFERGUIDE_RESUME_PDF",
+        "OFFERGUIDE_NO_AMBIENT",
+        "OFFERGUIDE_NO_SCHEDULER",
     ):
         monkeypatch.delenv(var, raising=False)
     s = Settings.from_env()
@@ -22,6 +24,7 @@ def test_defaults_when_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.feishu_webhook_url is None
     assert s.notify_channel == "console"
     assert s.notify_ready() is True  # console always ready
+    assert s.disable_ambient_crawl is False
 
 
 def test_picks_up_deepseek_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,6 +55,18 @@ def test_notify_channel_falls_back_on_garbage_value(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("OFFERGUIDE_NOTIFY", "skywriting")
     s = Settings.from_env()
     assert s.notify_channel == "console"
+
+
+def test_no_scheduler_also_disables_ambient_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OFFERGUIDE_NO_SCHEDULER", "1")
+    s = Settings.from_env()
+    assert s.disable_ambient_crawl is True
+
+
+def test_no_ambient_disables_ambient_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OFFERGUIDE_NO_AMBIENT", "1")
+    s = Settings.from_env()
+    assert s.disable_ambient_crawl is True
 
 
 # ────────── W14.10 dotenv autoload ──────────

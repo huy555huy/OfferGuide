@@ -1,10 +1,9 @@
-"""Daily JD-discovery job — runs spiders, ingests, optionally auto-scores.
+"""Legacy daily spider job — runs explicitly configured spiders, then scores.
 
-Closes the "用户得自己一个个粘 JD" loop. The agent now wakes up every day,
-runs the spider lineup, ingests new candidates into ``jobs``, and—when LLM
-+ user profile are configured—runs ``score_match`` on JDs that have enough
-text to score. High-score JDs auto-push to the inbox so they appear on the
-next morning's daily-standup home.
+The default spider lineup is intentionally empty because community catalog
+spiders are not official evidence. Real autonomous discovery now belongs to
+the harness/JobFinder agent, which can choose verified official-source tools
+or browser-session handoffs and report limitations honestly.
 
 Skip semantics (graceful degradation):
 - No spiders configured → ``skipped='no_spiders'``
@@ -27,9 +26,7 @@ from ..scheduler import JobContext, JobSpec
 log = logging.getLogger(__name__)
 
 MAX_ITEMS_PER_SPIDER = 30
-"""Per-run cap. With current sources (1 spider, namewyf/Campus2026 ~30
-互联网/AI rows), this is 'whole list' — it caps growth as more spiders
-or sources are added."""
+"""Per-run cap for explicitly enabled spiders."""
 
 
 def run(ctx: JobContext) -> dict[str, Any]:

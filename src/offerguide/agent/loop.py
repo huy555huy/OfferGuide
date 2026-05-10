@@ -1183,17 +1183,17 @@ class AgentLoop:
                 break
 
             # Append the assistant message that announced the tool calls.
-            # Critical: re-serialize arguments from the parsed dict, NOT echo
-            # the raw string back. ccvibe's Claude proxy emits malformed
-            # concat-JSON like ``"{}{\"job_id\":1}"``; if we echo that back
-            # in the next request, the proxy sees its own bug and the
-            # multi-turn tool conversation breaks (model loops re-calling
-            # the same lookup tools because it can't see prior results).
-            # See W13 dogfood #4 root-cause investigation.
-            messages.append({
-                "role": "assistant",
-                "content": resp.content or "",
-                "tool_calls": [
+            # LLMClient preserves provider-specific fields such as DeepSeek
+            # reasoning_content while still re-serializing parsed tool args
+            # into valid JSON, which keeps both reasoning models and ccvibe's
+            # malformed-arguments quirk happy.
+            assistant_msg: dict[str, Any] = (
+                dict(resp.assistant_message)
+                if resp.assistant_message is not None
+                else {"role": "assistant", "content": resp.content or ""}
+            )
+            if "tool_calls" not in assistant_msg:
+                assistant_msg["tool_calls"] = [
                     {
                         "id": tc.id,
                         "type": "function",
@@ -1205,8 +1205,8 @@ class AgentLoop:
                         },
                     }
                     for tc in resp.tool_calls
-                ],
-            })
+                ]
+            messages.append(assistant_msg)
 
             # ── W13.7 circuit breaker: detect repeat-loop ──
             # Compute a signature for each tool call this iteration. If

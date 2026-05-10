@@ -103,6 +103,7 @@ class Settings:
     # Web UI
     web_host: str = "127.0.0.1"
     web_port: int = 8000
+    disable_ambient_crawl: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -181,6 +182,10 @@ class Settings:
             ),
             web_host=os.environ.get("OFFERGUIDE_HOST", "127.0.0.1"),
             web_port=int(os.environ.get("OFFERGUIDE_PORT", "8000")),
+            disable_ambient_crawl=(
+                os.environ.get("OFFERGUIDE_NO_AMBIENT") == "1"
+                or os.environ.get("OFFERGUIDE_NO_SCHEDULER") == "1"
+            ),
         )
 
     def notify_ready(self, channel: NotifyChannel | None = None) -> bool:

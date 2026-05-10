@@ -14,8 +14,9 @@ pipeline, the search query templates. LLM was a tagger.
 
 W14.16 — actual ReAct loop:
 
-    LLM gets goal + 4 tools:
+    LLM gets goal + 5 tools:
       - web_search(query)          : Tavily, returns hits
+      - search_verified_official_jobs(company, keyword): proven official APIs/SSR
       - fetch_url(url)             : returns page text
       - extract_and_ingest_jd(...) : LLM decides field values, ingests
       - done(reason)               : LLM decides when to stop
@@ -56,6 +57,35 @@ log = logging.getLogger(__name__)
 
 
 _TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_verified_official_jobs",
+            "description": (
+                "查已实测可读的官方招聘源，并把真实 JD 入库。当前只支持腾讯"
+                "校招/社招、百度校招；字节/阿里/美团/小红书/BOSS 会返回"
+                "真实限制状态，不会假装抓到了。适合先查大厂官方岗位。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "company": {
+                        "type": "string",
+                        "description": "公司名；可空表示查已验证的大厂源",
+                    },
+                    "keyword": {
+                        "type": "string",
+                        "description": "岗位关键词，如 AI Agent / LLM / RAG",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "每个来源最多返回多少条，默认 5，最多 20",
+                    },
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -149,9 +179,11 @@ _SYSTEM_PROMPT = """你是 OfferGuide 的 JD 检索助手. 给用户找跟 north
 
 # 怎么干
 **像你帮人找工作那样自己想.** 看到搜索结果 / 网页 / 错误, 就想 "这是啥情况, 我接下来怎么办".
-没有固定流程, 没有"5 类页面分别怎么处理"那种规矩. 你能用的就 4 个工具, 怎么组合
-完全你说了算. 唯一硬规矩:
+没有固定流程, 没有"5 类页面分别怎么处理"那种规矩. 你能用的工具里有一个
+已验证官方源工具；它只覆盖真跑通的腾讯/百度，其他公司会诚实返回登录墙/未验证.
+怎么组合完全你说了算. 唯一硬规矩:
 - 想 ingest 一个 URL → 你必须先 fetch 过它 (否则就是编造)
+- search_verified_official_jobs 返回的 JD 已由官方 API/SSR 证据支撑, 不需要再 extract
 - 浪费 budget 在重复 search/fetch 上, 我会拒
 """
 
@@ -200,6 +232,7 @@ class JobFinderAgent:
         # Per-sweep state — reset each .run()
         self._visited: set[str] = set()
         self._search_qs: list[str] = []
+        self._official_qs: set[tuple[str | None, str]] = set()
         self._inserted_ids: list[int] = []
         self._skipped_dup = 0
         self._notes: list[str] = []
@@ -209,6 +242,7 @@ class JobFinderAgent:
         # Reset state
         self._visited = set()
         self._search_qs = []
+        self._official_qs = set()
         self._inserted_ids = []
         self._skipped_dup = 0
         self._notes = []
@@ -237,12 +271,18 @@ class JobFinderAgent:
 
             total_cost += resp.cost_usd or 0.0
 
-            # Append the assistant's tool-call announcement to the convo
-            assistant_msg: dict[str, Any] = {
-                "role": "assistant",
-                "content": resp.content or "",
-            }
-            if resp.tool_calls:
+            # Append the assistant's tool-call announcement to the convo.
+            # Use LLMClient's prepared history message so provider-specific
+            # fields like DeepSeek reasoning_content survive the next turn.
+            assistant_msg: dict[str, Any] = (
+                dict(resp.assistant_message)
+                if resp.assistant_message is not None
+                else {
+                    "role": "assistant",
+                    "content": resp.content or "",
+                }
+            )
+            if resp.tool_calls and "tool_calls" not in assistant_msg:
                 assistant_msg["tool_calls"] = [
                     {
                         "id": tc.id,
@@ -304,6 +344,8 @@ class JobFinderAgent:
 
     def _dispatch(self, name: str, args: dict[str, Any]) -> str:
         try:
+            if name == "search_verified_official_jobs":
+                return self._tool_search_verified_official_jobs(args)
             if name == "web_search":
                 return self._tool_web_search(args)
             if name == "fetch_url":
@@ -316,6 +358,54 @@ class JobFinderAgent:
         except Exception as e:
             log.exception("tool dispatch crashed: %s(%s)", name, args)
             return f"ERROR: {type(e).__name__}: {e}"
+
+    def _tool_search_verified_official_jobs(self, args: dict[str, Any]) -> str:
+        keyword = (args.get("keyword") or "").strip()
+        if not keyword:
+            return "ERROR: keyword is empty"
+        company = (args.get("company") or "").strip() or None
+        limit = max(1, min(int(args.get("limit") or 5), 20))
+        key = (company, keyword)
+        if key in self._official_qs:
+            return "ERROR: 这个 company+keyword 已经查过官方源了, 换关键词或继续看结果"
+        self._official_qs.add(key)
+
+        from ..platforms.official_jobs import search_verified_official_jobs
+
+        results = search_verified_official_jobs(
+            company=company,
+            keyword=keyword,
+            limit=limit,
+        )
+        lines = [
+            "OK official source probe:",
+            f"criteria: company={company or '已验证大厂源'} keyword={keyword!r}",
+        ]
+        inserted = 0
+        dup = 0
+        for source_result in results:
+            lines.append(
+                f"- {source_result.source}: {source_result.status}; "
+                f"evidence={source_result.evidence_url or '(none)'}; "
+                f"{source_result.note}"
+            )
+            for rj in source_result.jobs:
+                was_new, job_id = scout.ingest(self.store, rj)
+                if was_new:
+                    self._inserted_ids.append(job_id)
+                    inserted += 1
+                    lines.append(
+                        f"  inserted job#{job_id}: {rj.company} · {rj.title} "
+                        f"({rj.url or 'no url'})"
+                    )
+                else:
+                    self._skipped_dup += 1
+                    dup += 1
+                    lines.append(
+                        f"  duplicate job#{job_id}: {rj.company} · {rj.title}"
+                    )
+        lines.append(f"summary: inserted={inserted}, duplicate={dup}")
+        return "\n".join(lines)[:5000]
 
     def _tool_web_search(self, args: dict[str, Any]) -> str:
         q = (args.get("query") or "").strip()

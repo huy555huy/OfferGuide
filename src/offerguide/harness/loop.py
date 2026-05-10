@@ -225,12 +225,17 @@ def run(
             if resp.content:
                 final_text_parts.append(resp.content)
 
-            # Append assistant message
-            assistant_msg: dict[str, Any] = {
-                "role": "assistant",
-                "content": resp.content or "",
-            }
-            if resp.tool_calls:
+            # Append assistant message. Prefer LLMClient's prepared history
+            # message so provider-specific reasoning fields survive tool turns.
+            assistant_msg: dict[str, Any] = (
+                dict(resp.assistant_message)
+                if resp.assistant_message is not None
+                else {
+                    "role": "assistant",
+                    "content": resp.content or "",
+                }
+            )
+            if resp.tool_calls and "tool_calls" not in assistant_msg:
                 assistant_msg["tool_calls"] = [
                     {
                         "id": tc.id,

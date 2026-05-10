@@ -4,7 +4,7 @@ Structure:
 - ``instructions.md`` — agent's "soul" prompt (loaded by context.py)
 - ``memory.py`` — Memory tool (6 commands on .offerguide/worldview/)
 - ``context.py`` — context assembly + self-implemented compaction & clearing
-- ``tools.py`` — 13 tool schemas + dispatch (job-hunt specific)
+- ``tools.py`` — job-hunt tool schemas + dispatch
 - ``loop.py`` — single-threaded master loop (the heart)
 - ``triggers.py`` — event-driven primary path + cron fallback
 - ``feedback.py`` — bridge user reactions → GEPA evolution signals

@@ -14,6 +14,40 @@
 </div>
 {% endif %}
 
+{% if application_plan %}
+<div class="pkg-section">
+    <h3>{% if application_plan.verified_source %}已核验投递路径{% else %}投递路径核验{% endif %} · {{ application_plan.platform_label }}</h3>
+    <div class="small muted" style="line-height: 1.6; margin-bottom: 0.5rem;">
+        {{ application_plan.channel_note }}
+        {% if application_plan.evidence_url %}
+        <br>来源证据: {{ application_plan.evidence_url }}
+        {% endif %}
+    </div>
+    <ol style="padding-left: 1.25rem; margin-top: 0.25rem;">
+        {% for step in application_plan.steps %}
+        <li style="margin: 0.3rem 0;">{{ step }}</li>
+        {% endfor %}
+    </ol>
+    {% if application_plan.fields %}
+    <div style="margin-top: 0.75rem;">
+        <strong class="small">页面要填的东西</strong>
+        {% for field in application_plan.fields %}
+        <div class="copyable" style="margin-top: 0.5rem;">
+            {{ field.label }}: {{ field.value_hint }}
+            {% if field.copyable %}
+            <button class="copy-btn"
+                    onclick="copyToClipboard(`{{ field.value_hint|replace('\n', '\\n')|replace('`', '\\`') }}`, this)">
+                复制
+            </button>
+            {% endif %}
+        </div>
+        <div class="small muted">来源: {{ field.source }}</div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
 <div class="apply-grid">
 
     {# ─────────── 左侧主内容 ─────────── #}

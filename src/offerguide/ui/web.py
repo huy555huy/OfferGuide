@@ -36,6 +36,7 @@ from pydantic import BaseModel
 
 from .. import inbox as inbox_mod
 from ..agent import AgentLoop
+from ..application_plan import build_application_plan
 from ..config import Settings
 from ..llm import LLMClient, LLMError
 from ..memory import Store
@@ -64,11 +65,9 @@ def create_app(
     notifier: Notifier | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with explicit dependencies (testable)."""
-    # W15.23 — FastAPI lifespan: start the ambient discovery scheduler so
-    # nowcoder crawl runs on startup + every 6h. This is the "agent 全自动找
-    # 岗位" the user asked for — no manual paste, no user-clicked extension
-    # popup. crawl_nowcoder already exists (workers/scout.py) using the
-    # public sitemap chain — just hadn't been wired to startup until now.
+    # FastAPI lifespan: start the ambient discovery task unless explicitly
+    # disabled. The task is useful in normal app mode, but tests and one-off
+    # UI probes must be able to opt out without surprise network writes.
     import asyncio as _async_mod
     import contextlib as _ctxlib
 
@@ -78,7 +77,7 @@ def create_app(
     async def _lifespan(app: FastAPI):
         bg_task: _async_mod.Task[None] | None = None
         # Disabled when api_key is empty (no point crawling without downstream
-        # score_match) or when env opt-out (tests don't want network).
+        # score_match) or when env opt-out (tests / probes don't want network).
         if (settings.deepseek_api_key
                 and not getattr(settings, "disable_ambient_crawl", False)):
             bg_task = _async_mod.create_task(
@@ -852,7 +851,7 @@ def create_app(
         """
         with store.connect() as conn:
             row = conn.execute(
-                "SELECT id, title, company, location, url, raw_text "
+                "SELECT id, title, company, location, url, raw_text, source, extras_json "
                 "FROM jobs WHERE id = ?",
                 (job_id,),
             ).fetchone()
@@ -862,12 +861,15 @@ def create_app(
             "id": int(row[0]), "title": row[1] or "", "company": row[2] or "",
             "location": row[3] or "", "url": row[4] or "",
             "raw_text": row[5] or "",
+            "source": row[6] or "", "extras_json": row[7] or "{}",
         }
+        application_plan = build_application_plan(job)
 
         if not settings.deepseek_api_key:
             return templates.TemplateResponse(
                 request, "apply_pack.html",
                 _ctx(request, job=job, error="需要先配 LLM key", pack=None,
+                     application_plan=application_plan,
                      active_tab="recommended"),
             )
         if profile is None or not profile.raw_resume_text:
@@ -875,13 +877,15 @@ def create_app(
                 request, "apply_pack.html",
                 _ctx(request, job=job,
                      error="未配简历, 去 /profile 上传后回来",
-                     pack=None, active_tab="recommended"),
+                     pack=None, application_plan=application_plan,
+                     active_tab="recommended"),
             )
         if runtime is None:
             return templates.TemplateResponse(
                 request, "apply_pack.html",
                 _ctx(request, job=job,
                      error="SkillRuntime 未初始化", pack=None,
+                     application_plan=application_plan,
                      active_tab="recommended"),
             )
         spec = next((s for s in skills if s.name == "apply_assistant"), None)
@@ -890,6 +894,7 @@ def create_app(
                 request, "apply_pack.html",
                 _ctx(request, job=job,
                      error="apply_assistant SKILL 没注册", pack=None,
+                     application_plan=application_plan,
                      active_tab="recommended"),
             )
 
@@ -902,6 +907,7 @@ def create_app(
             return templates.TemplateResponse(
                 request, "apply_pack.html",
                 _ctx(request, job=job, error=str(e), pack=None,
+                     application_plan=application_plan,
                      active_tab="recommended"),
             )
 
@@ -924,6 +930,7 @@ def create_app(
                 request, "apply_pack.html",
                 _ctx(request, job=job,
                      error=f"调用 SKILL 失败: {e}", pack=None,
+                     application_plan=application_plan,
                      active_tab="recommended"),
             )
 
@@ -934,12 +941,14 @@ def create_app(
                 _ctx(request, job=job,
                      error=f"SKILL 输出非 JSON (skill_run_id={sr.skill_run_id})",
                      raw=sr.raw_text[:1500], pack=None,
+                     application_plan=application_plan,
                      active_tab="recommended"),
             )
 
         return templates.TemplateResponse(
             request, "apply_pack.html",
             _ctx(request, job=job, pack=sr.parsed,
+                 application_plan=application_plan,
                  skill_run_id=sr.skill_run_id,
                  duration_ms=duration_ms,
                  cost_usd=round(sr.cost_usd or 0.0, 5),
@@ -1164,6 +1173,13 @@ def create_app(
                     "company": company or "(未知公司)",
                     "location": location or "",
                     "url": url, "source": source or "",
+                    "application_plan": build_application_plan({
+                        "source": source or "",
+                        "url": url,
+                        "title": title or "",
+                        "company": company or "",
+                        "location": location or "",
+                    }),
                     "app_status": app_status, "score": score,
                     "reasoning": "", "gaps": gaps,
                     "color": color, "verdict": verdict,
@@ -2613,6 +2629,7 @@ def create_app(
             "location": job_row[3], "source": job_row[4], "url": job_row[5],
             "raw_text": job_row[6],
         }
+        application_plan = build_application_plan(job)
 
         # Find the most recent apply_assistant run for this job (cached package)
         package_dict = None
@@ -2649,6 +2666,7 @@ def create_app(
             _ctx(
                 request, job=job,
                 package=package_dict, package_run_id=package_run_id,
+                application_plan=application_plan,
                 applications=applications,
                 profile_loaded=profile is not None,
                 runtime_ready=runtime is not None and bool(settings.deepseek_api_key),

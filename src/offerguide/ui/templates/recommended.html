@@ -115,13 +115,38 @@
     font-size: 0.85rem; color: var(--text-muted);
     font-weight: 600;
 }
+.rec-toolbar {
+    display: flex; gap: 0.625rem; flex-wrap: wrap; align-items: center;
+    margin-top: 0.75rem;
+}
+.rec-toolbar button, .rec-toolbar a {
+    font-size: 0.82rem; padding: 0.5rem 0.75rem;
+    border-radius: 4px; border: 1px solid var(--border);
+    background: var(--bg-elev); color: var(--text); cursor: pointer;
+    text-decoration: none;
+}
+.rec-toolbar .primary {
+    background: var(--primary); color: #fff; border-color: var(--primary);
+}
+.rec-toolbar button:disabled { opacity: 0.55; cursor: not-allowed; }
 </style>
 
 <div class="card">
     <h1 style="font-family: var(--font-serif); margin: 0 0 0.375rem;">🎯 待点列表</h1>
     <div class="muted small">
-        Agent 已经评分排好序的岗位 — <strong>挨个点 "去 BOSS 投" → 看一眼 → 觉得行就在 BOSS 立即沟通</strong>.
-        浏览 BOSS JD 时浮窗会自动写开场白; 你审核后粘到沟通框, 自己点发送.
+        Agent 已经评分排好序的岗位 — 按真实渠道打开 BOSS / 牛客 / 官网网申, 先看投递包, 再由你审核发送.
+        BOSS JD 页浮窗会自动写开场白; 官网网申页会把常填字段和答案备好.
+    </div>
+    <div class="rec-toolbar">
+        <button class="primary" onclick="runAutoDiscover(this)" {% if not runtime_ready %}disabled{% endif %}>
+            全自动找新岗位
+        </button>
+        <a href="/jobs">查看跟踪</a>
+        {% if not runtime_ready %}
+        <span class="muted small">需要先配置 LLM key 才能联网自主找岗</span>
+        {% else %}
+        <span class="muted small">会用搜索 agent 找真实 JD, 入库后排到这里</span>
+        {% endif %}
     </div>
 </div>
 
@@ -165,11 +190,9 @@
 
 {% if not candidates %}
 <div class="card empty" style="padding: 2rem; text-align: center;">
-    <div class="empty-title" style="margin-bottom: 0.5rem;">📭 还没评估过任何岗位</div>
-    <div class="empty-hint" style="line-height: 1.7;">
-        2 种方式给 OfferGuide 喂岗位:<br>
-        1. 装 Chrome 扩展 → 开 BOSS 推荐页 → 点扩展图标 → 一键 sync 整页<br>
-        2. 在 <a href="/">首页</a> 粘单个 JD 链接 / 文本
+        <div class="empty-title" style="margin-bottom: 0.5rem;">📭 还没评估过任何岗位</div>
+        <div class="empty-hint" style="line-height: 1.7;">
+        先点上面的“全自动找新岗位”。BOSS 登录态岗位也可以用 Chrome 扩展同步整页；单个官网/JD 链接可在 <a href="/">首页</a> 粘贴评估。
     </div>
 </div>
 {% else %}
@@ -209,8 +232,9 @@
         <div class="actions">
             <a href="/jobs/{{ c.job_id }}/apply-pack" class="primary">📋 准备投递</a>
             {% if c.url %}
-            <a href="{{ c.url }}" target="_blank" rel="noopener">原 JD →</a>
+            <a href="{{ c.url }}" target="_blank" rel="noopener">{{ c.application_plan.action_label }} →</a>
             {% endif %}
+            <span class="muted small">{{ c.application_plan.platform_label }}</span>
         </div>
     </div>
 {% endfor %}
@@ -222,5 +246,29 @@
 {% endif %}
 
 {% endif %}
+
+<script>
+async function runAutoDiscover(btn) {
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '找岗中...';
+    try {
+        const r = await fetch('/api/scheduler/trigger/discover_new_jobs', {method: 'POST'});
+        if (!r.ok) {
+            const txt = await r.text();
+            window.toast('找岗失败: ' + txt.slice(0, 160), 'error', 5000);
+            btn.disabled = false;
+            btn.textContent = original;
+            return;
+        }
+        window.toast('新岗位已入库，正在刷新列表', 'success', 2000);
+        setTimeout(() => location.reload(), 900);
+    } catch (e) {
+        window.toast('网络错误: ' + e, 'error', 4000);
+        btn.disabled = false;
+        btn.textContent = original;
+    }
+}
+</script>
 
 {% endblock %}

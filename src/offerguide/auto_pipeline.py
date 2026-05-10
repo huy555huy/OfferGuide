@@ -285,12 +285,13 @@ def _push_to_inbox(
 def build_default_spider_set() -> list[Spider]:
     """Default spider lineup the daemon runs daily.
 
-    Today: just AwesomeJobsSpider. As more spiders graduate from
-    experimental → reliable, they get added here.
+    Intentionally empty right now. The old community-list spider is still
+    available for explicit experiments, but it is not an official source and
+    often yields thin company-level rows rather than real current JDs. The
+    production path should be the agent choosing verified official-source tools
+    or browser-session handoffs.
     """
-    from .spiders.awesome_jobs import AwesomeJobsSpider
-
-    return [AwesomeJobsSpider()]
+    return []
 
 
 def build_runtime_from_settings(

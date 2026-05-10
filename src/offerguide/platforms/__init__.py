@@ -1,6 +1,13 @@
-"""Job-source adapters. Today: nowcoder, manual. W6 adds Boss browser-extension endpoint."""
+"""Job-source adapters."""
 
-from . import manual, nowcoder
+from . import manual, nowcoder, official_jobs
 from ._spec import RawJob, canonical_text, content_hash
 
-__all__ = ["RawJob", "canonical_text", "content_hash", "manual", "nowcoder"]
+__all__ = [
+    "RawJob",
+    "canonical_text",
+    "content_hash",
+    "manual",
+    "nowcoder",
+    "official_jobs",
+]
