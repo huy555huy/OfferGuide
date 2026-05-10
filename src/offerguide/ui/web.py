@@ -1166,6 +1166,18 @@ def create_app(
                     "title": title or "",
                     "extras_json": extras_json or "{}",
                 })
+                # W18 — surface discovered_keyword (audit "哪个 keyword 引来的")
+                # so user can see source diversity, not just "AI Agent" everywhere
+                extras_obj: dict[str, Any] = {}
+                if extras_json:
+                    try:
+                        extras_obj = json.loads(extras_json)
+                        if not isinstance(extras_obj, dict):
+                            extras_obj = {}
+                    except (json.JSONDecodeError, TypeError):
+                        extras_obj = {}
+                discovered_keyword = extras_obj.get("discovered_keyword") or ""
+                discovered_via = extras_obj.get("discovered_via") or ""
                 # SKILL probability is 0-1; UI shows 0-100. Buckets per BOSS
                 # cold-apply baseline: <5% industry avg, so >30% = strong fit.
                 score: float | None = None
@@ -1193,6 +1205,9 @@ def create_app(
                     "url": url, "source": source or "",
                     "recruit_type": recruit_type,
                     "recruit_type_label": RECRUIT_LABEL_ZH.get(recruit_type, recruit_type),
+                    # W18
+                    "discovered_keyword": discovered_keyword,
+                    "discovered_via": discovered_via,
                     "application_plan": build_application_plan({
                         "source": source or "",
                         "url": url,
@@ -1251,6 +1266,20 @@ def create_app(
         for c in candidates:
             recruit_counts[c["recruit_type"]] += 1
 
+        # W18 — source diversity stats (用户能看到 "不只大厂")
+        source_counts: dict[str, int] = {}
+        company_counts: dict[str, int] = {}
+        for c in candidates:
+            source_counts[c["source"]] = source_counts.get(c["source"], 0) + 1
+            company_counts[c["company"]] = company_counts.get(c["company"], 0) + 1
+        # Top non-大厂 companies (heuristic: those NOT in big_co_set get bonus)
+        big_co_set = {"腾讯", "百度", "字节跳动", "阿里巴巴", "美团",
+                      "京东", "拼多多", "网易", "华为", "小红书"}
+        non_big_companies = [
+            (co, n) for co, n in company_counts.items() if co not in big_co_set
+        ]
+        non_big_companies.sort(key=lambda x: -x[1])
+
         # Apply filter
         filtered = [c for c in candidates if c["recruit_type"] in allowed_types]
 
@@ -1266,6 +1295,20 @@ def create_app(
         green_n = sum(1 for c in scored if c["color"] == "green")
         yellow_n = sum(1 for c in scored if c["color"] == "yellow")
         red_n = sum(1 for c in scored if c["color"] == "red")
+
+        # W18 — keywords daemon will use next cycle (transparency)
+        try:
+            from ..match_keywords import explain_match, extract_keywords
+            from ..workers.ambient import _load_active_north_star
+            cycle_keywords = extract_keywords(
+                profile.raw_resume_text if profile else None,
+                active_goal=_load_active_north_star(store)
+                    if hasattr(store, "connect") else None,
+                max_keywords=8,
+            )
+            keyword_explanations = [explain_match(h) for h in cycle_keywords]
+        except Exception:
+            keyword_explanations = []
 
         return templates.TemplateResponse(
             request, "recommended.html",
@@ -1287,6 +1330,11 @@ def create_app(
                 active_filter=filter_param,
                 recruit_counts=recruit_counts,
                 recruit_type_labels=RECRUIT_LABEL_ZH,
+                # W18 — source / company diversity + cycle keywords
+                source_counts=source_counts,
+                non_big_companies=non_big_companies[:10],
+                big_co_count=sum(1 for c in candidates if c["company"] in big_co_set),
+                cycle_keywords=keyword_explanations,
                 active_tab="recommended",
             ),
         )

@@ -162,6 +162,31 @@
 .rec-card .rt-pill.campus_fulltime { background: #fbf0e8; color: #cc785c; }
 .rec-card .rt-pill.social          { background: #eee; color: #666; }
 .rec-card .rt-pill.unknown         { background: #eee; color: #666; }
+
+/* W18 — keyword + source diversity */
+.kw-strip {
+    display: flex; gap: 0.375rem; flex-wrap: wrap; align-items: center;
+    margin: 0.625rem 0 1rem; padding: 0.625rem;
+    background: var(--bg-subtle); border-radius: var(--radius-sm);
+    font-size: 0.78rem; line-height: 1.5;
+}
+.kw-strip .kw-label { color: var(--text-muted); margin-right: 0.25rem; }
+.kw-strip .kw-chip {
+    padding: 2px 8px; border-radius: 999px;
+    background: var(--bg-elev); border: 1px solid var(--border-soft);
+    font-family: var(--font-mono); font-size: 0.72rem;
+    color: var(--primary);
+}
+.diversity-bar {
+    display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+    font-size: 0.78rem; color: var(--text-muted);
+    margin-bottom: 0.875rem;
+}
+.diversity-bar strong { color: var(--text); }
+.discovered-line {
+    font-size: 0.7rem; color: var(--text-muted); margin-top: 0.125rem;
+    font-family: var(--font-mono);
+}
 </style>
 
 <div class="card">
@@ -182,6 +207,31 @@
         {% endif %}
     </div>
 </div>
+
+{# ─────────── W18 — keyword + 来源多样性 ─────────── #}
+
+{% if cycle_keywords %}
+<div class="kw-strip">
+    <span class="kw-label">🔍 agent 用这些 keyword 找岗位 (从你简历抽的, 不只 "AI"):</span>
+    {% for kw in cycle_keywords %}<span class="kw-chip">{{ kw }}</span>{% endfor %}
+</div>
+{% endif %}
+
+{% if total_pool > 0 %}
+<div class="diversity-bar">
+    <span><strong>{{ total_pool }}</strong> 个候选岗位</span>
+    {% if non_big_companies %}
+    <span>· <strong>{{ non_big_companies | length }}</strong> 家中小厂 (大厂之外, 竞争更小)</span>
+    {% endif %}
+    {% if big_co_count > 0 %}
+    <span>· {{ big_co_count }} 个大厂岗</span>
+    {% endif %}
+    {% if source_counts %}
+    <span>·</span>
+    {% for src, n in source_counts.items() %}<span>{{ src }} {{ n }}</span>{% endfor %}
+    {% endif %}
+</div>
+{% endif %}
 
 {# ─────────── W17 — 招聘类型筛选 ─────────── #}
 
@@ -289,6 +339,9 @@
                 · <span class="muted small">{{ c.app_status }}</span>
                 {% endif %}
             </div>
+            {% if c.discovered_keyword %}
+            <div class="discovered-line">↳ 由 keyword <strong>{{ c.discovered_keyword }}</strong> 找到</div>
+            {% endif %}
             {% if c.gaps %}
             <div class="gap-line">
                 <span class="muted small">关键 gap:</span>

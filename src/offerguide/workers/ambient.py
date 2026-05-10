@@ -103,22 +103,54 @@ async def _run_one_cycle(
     user_profile_text: str | None,
     crawl_limit: int,
 ) -> None:
-    """One cycle: crawl known sources + search the web, then score each."""
+    """One cycle: crawl known sources + search the web, then score each.
+
+    W18: 多 keyword 派发. 用户原话: "不一定是这些大厂, 因为大厂基本上大家
+    都知道投, 我们需要的是全以及与用户匹配". 所以这一轮:
+    1. nowcoder sitemap 拉一遍 (~30 个全行业岗位, 含中小厂)
+    2. 用 user resume 抽出来的 keywords 同时打 verified_official (腾讯+百度)
+       — 用真 keyword "Diffusion 模型" / "RLHF" 等找到大厂里 niche 团队
+    3. agent_search 用 keywords 找 AI 创业公司 / 中小厂 (大厂之外的世界)
+    """
     from . import scout
     counters = await asyncio.to_thread(
         scout.crawl_nowcoder, store, limit=crawl_limit,
     )
     log.info("ambient discovery: nowcoder crawl done: %s", counters)
 
-    # Search-agent discovery covers company career pages, official ATS pages,
-    # and pages that are not in platform sitemaps. This is the missing
-    # "don't make the user scroll boards manually" path.
+    # W18 — extract user-specific keywords ONCE per cycle, share across
+    # verified_official + agent_search calls
+    keywords = _extract_cycle_keywords(store=store, user_profile_text=user_profile_text)
+    log.info(
+        "ambient discovery: cycle keywords: %s",
+        [k.keyword for k in keywords],
+    )
+
+    # 2. 已 verified 官方源 (腾讯校招 + 腾讯社招 + 百度 GRADUATE + INTERN)
+    #    用 user keywords 多次拉, 每个 keyword 限 3 条 → 一轮入 ~50 条
+    if keywords:
+        try:
+            official_summary = await asyncio.to_thread(
+                _crawl_verified_official_per_keyword,
+                store=store,
+                keywords=[k.keyword for k in keywords[:5]],  # 控制 cost
+                limit_per_kw=3,
+            )
+            log.info("ambient discovery: verified official done: %s", official_summary)
+        except Exception as e:
+            log.exception("ambient discovery: verified_official failed: %s", e)
+
+    # 3. agent web search — 找 AI 创业公司 / 大厂之外的中小厂
+    #    Search-agent discovery covers company career pages, official ATS pages,
+    #    and pages that are not in platform sitemaps. This is the missing
+    #    "don't make the user scroll boards manually" path.
     if settings.deepseek_api_key:
         try:
             search_result = await asyncio.to_thread(
                 _run_agent_search_blocking,
                 store=store,
                 settings=settings,
+                seed_keywords=[k.keyword for k in keywords[:3]],
             )
             log.info("ambient discovery: search agent done: %s", search_result)
         except Exception as e:
@@ -141,6 +173,67 @@ async def _run_one_cycle(
         store=store, settings=settings, runtime=runtime, skills=skills,
         user_profile_text=user_profile_text, job_ids=unscored,
     )
+
+
+def _extract_cycle_keywords(*, store: Store, user_profile_text: str | None) -> list:
+    """W18 — pull deterministic keywords from resume + active goal."""
+    from ..match_keywords import DEFAULT_KEYWORDS_PER_CYCLE, extract_keywords
+    active = _load_active_north_star(store)
+    return extract_keywords(
+        user_profile_text, active_goal=active,
+        max_keywords=DEFAULT_KEYWORDS_PER_CYCLE,
+    )
+
+
+def _crawl_verified_official_per_keyword(
+    *, store: Store, keywords: list[str], limit_per_kw: int = 3,
+) -> dict[str, Any]:
+    """For each keyword, hit verified_official (腾讯+百度) and ingest. Returns
+    counter dict for log. De-dups via scout.ingest content_hash.
+    """
+    from ..platforms.official_jobs import search_verified_official_jobs
+    from . import scout
+
+    inserted_total = 0
+    dup_total = 0
+    per_kw: dict[str, int] = {}
+    per_source: dict[str, int] = {}
+    errors: list[str] = []
+
+    for kw in keywords:
+        try:
+            results = search_verified_official_jobs(
+                company=None, keyword=kw, limit=limit_per_kw,
+            )
+        except Exception as e:
+            errors.append(f"{kw}: {type(e).__name__}: {e}")
+            continue
+
+        kw_inserted = 0
+        for sr in results:
+            for rj in sr.jobs:
+                # Annotate which keyword found this job (audit trail)
+                rj.extras.setdefault("discovered_via", "verified_official")
+                rj.extras.setdefault("discovered_keyword", kw)
+                try:
+                    was_new, _ = scout.ingest(store, rj)
+                    if was_new:
+                        inserted_total += 1
+                        kw_inserted += 1
+                        per_source[sr.source] = per_source.get(sr.source, 0) + 1
+                    else:
+                        dup_total += 1
+                except Exception as e:
+                    errors.append(f"{kw}/{sr.source}: ingest {type(e).__name__}: {e}")
+        per_kw[kw] = kw_inserted
+
+    return {
+        "inserted_total": inserted_total,
+        "duplicate_total": dup_total,
+        "per_keyword": per_kw,
+        "per_source": per_source,
+        "errors": errors[:5],
+    }
 
 
 def _load_unscored_discovered_ids(store: Store, limit: int = 30) -> list[int]:
@@ -201,8 +294,16 @@ def _load_unscored_nowcoder_ids(store: Store, limit: int = 30) -> list[int]:
     return [int(r[0]) for r in rows]
 
 
-def _run_agent_search_blocking(*, store: Store, settings: Settings) -> dict[str, Any]:
-    """Run the LLM-driven web search agent once and record a lightweight trail."""
+def _run_agent_search_blocking(
+    *, store: Store, settings: Settings,
+    seed_keywords: list[str] | None = None,
+) -> dict[str, Any]:
+    """Run the LLM-driven web search agent once and record a lightweight trail.
+
+    W18: ``seed_keywords`` (from user resume) are appended to the north_star
+    so the agent searches for niche-fitting middle-tier companies (smart AI
+    startups), not just generic 大厂 keywords.
+    """
     from ..agentic.job_finder_agent import JobFinderAgent
     from ..agentic.search import build_default_search
     from ..harness import _schema as _hs
@@ -214,6 +315,15 @@ def _run_agent_search_blocking(*, store: Store, settings: Settings) -> dict[str,
         return {"skipped": "budget_exceeded", "error": str(e)}
 
     north_star = _load_active_north_star(store)
+    if seed_keywords:
+        # W18 — surface niche keywords to the agent so it doesn't only search
+        # 大厂. The agent's system prompt already says 'find AI 创业公司';
+        # giving it the user's resume keywords focuses what to search on.
+        north_star = (
+            f"{north_star}\n\n"
+            f"用户简历命中的 niche 关键词: {' / '.join(seed_keywords)}\n"
+            f"优先用这些 keyword 找匹配的 AI 创业公司 / 中小厂, 不只大厂."
+        )
     llm = LLMClient(
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
