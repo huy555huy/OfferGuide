@@ -105,9 +105,10 @@ agent[全自动找岗位, 多源] → /recommended[排好序] → 用户挑 →
   resume 抽出的 keyword 拼到 north_star, 但**还没 dogfood 验证**搜出来
   的真是中小厂 (智谱/月之暗面/面壁等) 而不是又回到大厂. 看 /recommended
   顶部 "X 家中小厂" 数才能真验证
-- **application_plan 还没识别 baidu_intern / agent_search 源** — 这俩源
-  ingest 后用户点 "📋 准备投递" 走的是 official_site / unknown 路径, 不
-  够细
+- ~~**application_plan 还没识别 baidu_intern / agent_search 源**~~ — W19+
+  已做: 加了 host-based 大厂细化 (腾讯校招/社招/百度实习/百度校招/字节/
+  阿里/美团/agent_search) 共 8 条具体投递路径, 每条含登录方式 + 内推码
+  提示 + 简历附件方式 + 业务线注意事项
 - **0voice GitHub 校招 repo 聚合** — 没接, Tier 2
 
 已交付 (W17/W18, 别再说没做):

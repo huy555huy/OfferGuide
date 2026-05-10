@@ -106,6 +106,46 @@ def build_application_plan(job: dict[str, Any]) -> ApplicationPlan:
             evidence_url=evidence_url,
         )
 
+    # W19+ — host-based 大厂细化 (each company has known login flow + 内推
+    # mechanism + 简历上传方式; generic ATS message不够). Host check covers
+    # both verified-source ingest paths AND user-pasted URLs.
+    if _is_tencent(source, host):
+        return _tencent_plan(
+            url=url, company=company, title=title,
+            verified_source=verified_source, evidence_url=evidence_url,
+            is_social=("careers.tencent.com" in host or source == "tencent_social"),
+        )
+    if _is_baidu(source, host):
+        return _baidu_plan(
+            url=url, company=company, title=title,
+            verified_source=verified_source, evidence_url=evidence_url,
+            is_intern=(source == "baidu_intern" or (url is not None and "INTERN" in url)),
+        )
+    if _is_bytedance(source, host):
+        return _bytedance_plan(
+            url=url, company=company, title=title,
+            verified_source=verified_source, evidence_url=evidence_url,
+        )
+    if _is_alibaba(source, host):
+        return _alibaba_plan(
+            url=url, company=company, title=title,
+            verified_source=verified_source, evidence_url=evidence_url,
+        )
+    if _is_meituan(source, host):
+        return _meituan_plan(
+            url=url, company=company, title=title,
+            verified_source=verified_source, evidence_url=evidence_url,
+        )
+
+    # W19+ — agent_search source needs explicit 'verify first' framing.
+    # The job came from LLM web search, not a verified API. User must
+    # check the URL still loads + 公司是否真在招前再花时间投.
+    if source == "agent_search":
+        return _agent_search_plan(
+            url=url, company=company, title=title,
+            verified_source=False, evidence_url=evidence_url,
+        )
+
     if url and not url.startswith("paste://"):
         verified_prefix = (
             "这条 JD 来自已验证的官方招聘源；OfferGuide 只预填可复制材料，最终提交仍由用户确认。"
@@ -195,6 +235,299 @@ def _is_boss(source: str, host: str) -> bool:
 
 def _is_nowcoder(source: str, host: str) -> bool:
     return source == "nowcoder" or "nowcoder.com" in host
+
+
+def _is_tencent(source: str, host: str) -> bool:
+    return (
+        source in ("tencent_campus", "tencent_social")
+        or "join.qq.com" in host
+        or "careers.tencent.com" in host
+    )
+
+
+def _is_baidu(source: str, host: str) -> bool:
+    return (
+        source in ("baidu_campus", "baidu_intern")
+        or "talent.baidu.com" in host
+    )
+
+
+def _is_bytedance(source: str, host: str) -> bool:
+    return source.startswith("bytedance") or "jobs.bytedance.com" in host
+
+
+def _is_alibaba(source: str, host: str) -> bool:
+    return source.startswith("alibaba") or "talent.alibaba.com" in host
+
+
+def _is_meituan(source: str, host: str) -> bool:
+    return source.startswith("meituan") or "zhaopin.meituan.com" in host
+
+
+# ── Per-company plan builders ─────────────────────────────────────────
+
+
+def _tencent_plan(
+    *, url: str | None, company: str, title: str,
+    verified_source: bool, evidence_url: str | None, is_social: bool,
+) -> ApplicationPlan:
+    """腾讯校招 (join.qq.com) + 社招 (careers.tencent.com)."""
+    if is_social:
+        # 应届生不该投社招 — banner warn
+        return ApplicationPlan(
+            platform="tencent_social",
+            platform_label="腾讯社招 · ⚠ 应届生慎投",
+            apply_url=url, action_label="打开腾讯社招页",
+            channel_note="社招岗位通常要 1-3 年工作经验。应届生投简历多被卡在第一关；想试可投, 但别耗时间补答。",
+            steps=[
+                "看 JD 要求工作年限、岗位描述里「3+ years」等字眼。如果非常硬就 skip。",
+                "QQ / 微信扫码登录 careers.tencent.com。",
+                "上传 PDF 简历, 校对 ATS 解析出的字段。",
+                "投递后回 OfferGuide 标记, 系统帮你跟踪 2 周静默期。",
+            ],
+            fields=_tencent_fields(company, title),
+            material_checklist=[
+                *_common_materials(company, title),
+                "腾讯社招简历重点写「实战项目与商业 outcome」, 不要堆课程证书。",
+                "如果有大厂背景或开源 contribution, 放在最前面。",
+            ],
+            post_apply_actions=_common_post_actions(),
+            verified_source=verified_source, evidence_url=evidence_url,
+        )
+    return ApplicationPlan(
+        platform="tencent_campus",
+        platform_label="腾讯校招 · join.qq.com" + (" · 已核验" if verified_source else ""),
+        apply_url=url, action_label="打开腾讯校招页",
+        channel_note="腾讯校招走 join.qq.com 一站式 ATS, 微信扫码登录, 一份在线简历能投多个岗位。强烈建议先找到内推码再投 — 内推走 fast track。",
+        steps=[
+            "微信扫码登录 join.qq.com (没账号会自动注册)。",
+            "完善在线简历或上传 PDF — 第一次会有引导, 别跳过「项目经历」字段。",
+            "**输入内推码** (强烈建议, 牛客 / 知乎 / 微信群有现成的)。",
+            "选目标岗位, 应届实习类型确认「可全职 + 可转正」选项。",
+            "投递后立即回 OfferGuide 标「我投了」, 系统跟踪 2 周静默期。",
+        ],
+        fields=[
+            CopyField("申请岗位", f"{company} · {title}", "JD", True),
+            CopyField("内推码 (推荐)", "去牛客搜 \"腾讯 2026 内推码\" 或问学长学姐", "用户准备", True),
+            CopyField("在线简历内容", "粘 master_resume 完整版, ATS 不限字数", "用户资料"),
+            CopyField("项目经历", "用下方 QA 中 Project 类回答", "apply_assistant", True),
+            CopyField("求职动机", "用下方 motivation 类回答", "apply_assistant", True),
+            CopyField("可到岗时间", "实习开放从入职日 + 实习时长 (>=3 个月通常)", "用户确认"),
+            CopyField("附件 PDF 文件名", _resume_filename_hint(company, title), "tailor_resume", True),
+        ],
+        material_checklist=[
+            *_common_materials(company, title),
+            "腾讯 ATS 不限简历字数, 在线简历最好填全, 别只放 PDF。",
+            "投递后 14-21 天没回应再考虑跟进, 腾讯 HR 节奏慢。",
+        ],
+        post_apply_actions=[
+            "投后 24h 内可加 BG 内推人微信问声「我投了 X 岗」, 礼貌报备。",
+            "看牛客「腾讯 2026 校招」标签每天 1 次, 留意笔试通知。",
+            *_common_post_actions(),
+        ],
+        verified_source=verified_source, evidence_url=evidence_url,
+    )
+
+
+def _baidu_plan(
+    *, url: str | None, company: str, title: str,
+    verified_source: bool, evidence_url: str | None, is_intern: bool,
+) -> ApplicationPlan:
+    """百度校招 (talent.baidu.com) — GRADUATE 校招 + INTERN 实习两个 entry."""
+    intern_label = " · 暑期/日常实习" if is_intern else " · 校招正式"
+    return ApplicationPlan(
+        platform="baidu_" + ("intern" if is_intern else "campus"),
+        platform_label="百度" + intern_label + (" · 已核验" if verified_source else ""),
+        apply_url=url, action_label="打开百度招聘页",
+        channel_note=(
+            "百度走 talent.baidu.com 自研 ATS, 百度账号登录。"
+            + ("实习项目分暑期 / 日常 / AIDU 三种, 看岗位名称里的项目类型。" if is_intern else "")
+            + " 内推码可选, 不强求。"
+        ),
+        steps=[
+            "百度账号登录 talent.baidu.com (有百度网盘账号即可)。",
+            "上传 PDF 简历, 百度 ATS 解析比较严格 — 学校 / 专业 / 毕业时间一定校对。",
+            ("实习投递时确认「周到岗天数」和「实习时长」 — 暑期项目一般要求 3-4 月以上。"
+                if is_intern else "校招岗位选「毕业入职」时间, 通常是毕业当年 7 月。"),
+            "回答开放题 (动机 / 项目深挖) 时用下方 QA 模板。",
+            "投递后回 OfferGuide 标「我投了」。",
+        ],
+        fields=[
+            CopyField("申请岗位", f"{company} · {title}", "JD", True),
+            CopyField("内推码 (可选)", "去牛客搜 \"百度 2026 内推\"", "用户准备"),
+            CopyField("学校/专业/毕业时间", "和简历完全一致, ATS 解析不通过会卡", "用户资料"),
+            CopyField("项目深挖", "用下方 QA 中 project_deep_dive 类答案", "apply_assistant", True),
+            CopyField("可实习时长", "诚实填; 百度筛 3+ 月", "用户确认") if is_intern else CopyField("毕业时间", "按学位证书时间", "用户资料"),
+            CopyField("附件 PDF 文件名", _resume_filename_hint(company, title), "tailor_resume", True),
+        ],
+        material_checklist=[
+            *_common_materials(company, title),
+            "百度 PDF 只支持 5MB 以内, 字体内嵌避免 ATS 解析乱码。",
+            "项目描述把 LLM / Agent / 检索 等核心词写在前 2 句, ATS 会按关键词扫。",
+        ],
+        post_apply_actions=_common_post_actions(),
+        verified_source=verified_source, evidence_url=evidence_url,
+    )
+
+
+def _bytedance_plan(
+    *, url: str | None, company: str, title: str,
+    verified_source: bool, evidence_url: str | None,
+) -> ApplicationPlan:
+    """字节跳动 (jobs.bytedance.com) — 飞书 People 体系."""
+    return ApplicationPlan(
+        platform="bytedance",
+        platform_label="字节跳动 · jobs.bytedance.com",
+        apply_url=url, action_label="打开字节招聘页",
+        channel_note=(
+            "字节走自研飞书 People ATS, 飞书账号登录。**强烈建议先拿内推码** — "
+            "内推流程能跳过简历筛, hit rate 提升 3-5x (业内公认)。"
+        ),
+        steps=[
+            "**先去找内推码** (优先级最高): 牛客 \"字节 2026 内推\"、微信「字节内推群」、"
+            "知乎专栏。没内推码 hit rate 极低。",
+            "飞书扫码登录 jobs.bytedance.com (没飞书账号扫码会自动建)。",
+            "上传 PDF 简历, 字节 ATS 解析 OK; 在线简历也要填关键字段。",
+            "投递时填内推码字段 — 如果有, 这一步必填。",
+            "选岗位 + 城市 (字节多城市可选, 实习一般北京/上海/杭州/深圳)。",
+            "投递后立刻在 OfferGuide 标「我投了」。",
+        ],
+        fields=[
+            CopyField("申请岗位", f"{company} · {title}", "JD", True),
+            CopyField("⭐ 内推码 (强烈推荐)", "牛客 / 知乎 / 微信群里随便搜 \"字节 2026 内推码\"", "用户准备", True),
+            CopyField("学校 / 专业 / 学历 / 毕业时间", "和简历完全一致", "用户资料"),
+            CopyField("项目经历", "用下方 QA 中 project 类答案, 把 AI Agent / LLM 核心词放最前", "apply_assistant", True),
+            CopyField("可到岗 + 实习时长", "字节实习要求 >= 3 个月, 周到岗 >= 3 天", "用户确认"),
+            CopyField("附件 PDF 文件名", _resume_filename_hint(company, title), "tailor_resume", True),
+        ],
+        material_checklist=[
+            *_common_materials(company, title),
+            "字节内推码进流程后 7 天内一般有 HR 触达, 没消息可在牛客找内推人补一句。",
+            "字节 AI 团队偏好 LLM/Agent/RL 等深技术词, 简历项目描述往这上面靠。",
+        ],
+        post_apply_actions=[
+            "投后 7 天没消息 → 在牛客「字节直聊」板块搜内推人状态。",
+            *_common_post_actions(),
+        ],
+        verified_source=verified_source, evidence_url=evidence_url,
+    )
+
+
+def _alibaba_plan(
+    *, url: str | None, company: str, title: str,
+    verified_source: bool, evidence_url: str | None,
+) -> ApplicationPlan:
+    """阿里巴巴 (talent.alibaba.com) — 北森 ATS."""
+    return ApplicationPlan(
+        platform="alibaba",
+        platform_label="阿里巴巴 · talent.alibaba.com",
+        apply_url=url, action_label="打开阿里招聘页",
+        channel_note=(
+            "阿里走北森 ATS (国内主流招聘系统). 淘宝/支付宝账号登录。"
+            "阿里实习节奏: 5-7 月开放, 入职后 9-10 月评 offer。内推码可选但能加快流程。"
+        ),
+        steps=[
+            "淘宝 / 支付宝账号登录 talent.alibaba.com。",
+            "上传 PDF 简历或填在线简历; 北森 ATS 解析 ok。",
+            "回答开放题 (动机 / 项目 / 弱点) 时用下方 QA 模板。",
+            "选投递岗位 + 城市 (杭州为主, 北京 / 上海 / 深圳也有 AI 团队)。",
+            "投递后立刻在 OfferGuide 标「我投了」。",
+        ],
+        fields=[
+            CopyField("申请岗位", f"{company} · {title}", "JD", True),
+            CopyField("内推码 (可选)", "去牛客搜 \"阿里 2026 内推\"", "用户准备"),
+            CopyField("学校/专业", "和简历一致", "用户资料"),
+            CopyField("项目深挖", "用下方 QA 中 project_deep_dive 类答案", "apply_assistant", True),
+            CopyField("求职动机 / 为什么阿里", "用下方 motivation 类答案, 提具体业务线", "apply_assistant", True),
+            CopyField("附件 PDF 文件名", _resume_filename_hint(company, title), "tailor_resume", True),
+        ],
+        material_checklist=[
+            *_common_materials(company, title),
+            "阿里 AI 业务线分散 (通义 / 达摩院 / 阿里云 / 蚂蚁), 看清是哪条线再写动机。",
+        ],
+        post_apply_actions=_common_post_actions(),
+        verified_source=verified_source, evidence_url=evidence_url,
+    )
+
+
+def _meituan_plan(
+    *, url: str | None, company: str, title: str,
+    verified_source: bool, evidence_url: str | None,
+) -> ApplicationPlan:
+    """美团 (zhaopin.meituan.com) — 北森 ATS, 强登录墙."""
+    return ApplicationPlan(
+        platform="meituan",
+        platform_label="美团 · zhaopin.meituan.com · ⚠ 需登录看完整 JD",
+        apply_url=url, action_label="打开美团招聘页",
+        channel_note=(
+            "美团走北森 ATS, 强登录墙 — 不登录连完整 JD 都看不全。"
+            "美团账号登录 (没账号扫码自动注册)。"
+        ),
+        steps=[
+            "美团 App 扫码登录 zhaopin.meituan.com, 看完整 JD 详情。",
+            "上传 PDF 简历, 北森 ATS 字段解析, 校对学校 / 专业。",
+            "回答开放题用下方 QA 模板。",
+            "投递后立刻在 OfferGuide 标「我投了」。",
+        ],
+        fields=[
+            CopyField("申请岗位", f"{company} · {title}", "JD", True),
+            CopyField("学校/专业", "和简历一致", "用户资料"),
+            CopyField("项目经历摘要", "用下方 QA 中 project 类答案", "apply_assistant", True),
+            CopyField("附件 PDF 文件名", _resume_filename_hint(company, title), "tailor_resume", True),
+        ],
+        material_checklist=_common_materials(company, title),
+        post_apply_actions=_common_post_actions(),
+        verified_source=verified_source, evidence_url=evidence_url,
+    )
+
+
+def _agent_search_plan(
+    *, url: str | None, company: str, title: str,
+    verified_source: bool, evidence_url: str | None,
+) -> ApplicationPlan:
+    """W19+ — agent_search 找到的岗位. LLM 经 web search 抓回, 不是 verified API.
+    用户必须先核验是否真实存在再投, 否则浪费时间."""
+    return ApplicationPlan(
+        platform="agent_search_external",
+        platform_label="agent 搜到的外部岗 · ⚠ 先核验",
+        apply_url=url, action_label="打开链接核验",
+        channel_note=(
+            "这条 JD 来自 OfferGuide agent 自动 web search, **不是 verified API**。"
+            "agent 找的岗位有时是过期 / 错误公司名 / 死链, 投前请先打开链接核验是否真存在。"
+            "确认无误后按页面具体投递入口 (大概率是公司官网) 走流程, 用下方材料填写。"
+        ),
+        steps=[
+            "**先打开链接** 看页面是否仍在招 + 公司名是否一致 + 截止日期是否过。",
+            "如果链接 404 / 公司不对 → 在 OfferGuide 标「已撤回」, agent 会从池子去掉。",
+            "如果真在招 → 按页面提示走 (官网注册 / 邮箱投 / BOSS / 等), 用下方 QA 模板填材料。",
+            "投递后回 OfferGuide 标「我投了」。",
+        ],
+        fields=[
+            CopyField("公司 / 岗位名", f"{company} · {title}", "JD"),
+            CopyField("项目经历摘要", "用下方 QA 中最贴 JD 的 project 答案", "apply_assistant", True),
+            CopyField("求职动机", "用下方 motivation 答案", "apply_assistant", True),
+            CopyField("附件 PDF 文件名", _resume_filename_hint(company, title), "tailor_resume", True),
+            CopyField("投递方式 (邮件 / 表单 / 沟通)", "看页面给的入口, 没说就邮箱直发 hr@", "用户判断"),
+        ],
+        material_checklist=[
+            *_common_materials(company, title),
+            "如果公司是 AI 创业公司 (智谱 / 月之暗面 / MiniMax 等), 简历重点突出 LLM/Agent/RL 实战。",
+            "邮件投递时主题写 \"应聘 [岗位名] - [姓名] - [学校]\", HR 一目了然。",
+        ],
+        post_apply_actions=_common_post_actions(),
+        verified_source=False,  # agent_search 永远不算 verified
+        evidence_url=evidence_url,
+    )
+
+
+def _tencent_fields(company: str, title: str) -> list[CopyField]:
+    """Shared field list for tencent (社招用)."""
+    return [
+        CopyField("申请岗位", f"{company} · {title}", "JD", True),
+        CopyField("学校/专业/毕业时间", "和简历一致", "用户资料"),
+        CopyField("项目经历", "用下方 QA 中 project 类答案", "apply_assistant", True),
+        CopyField("附件 PDF 文件名", _resume_filename_hint(company, title), "tailor_resume", True),
+    ]
 
 
 def _resume_filename_hint(company: str, title: str) -> str:
