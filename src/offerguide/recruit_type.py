@@ -109,6 +109,15 @@ def classify_recruit_type(job: dict[str, Any]) -> str:
             return CAMPUS_FULLTIME
         return _classify_by_title(title)
 
+    # W20 — shixiseng /interns 端点全部是实习 (校招走 resume.shixiseng.com/xiaozhao
+    # 不在这个 adapter 里). title 含 "暑期"/"summer" → SUMMER, 否则 DAILY.
+    # 不会 fall 到 UNKNOWN 因为 source 已经保证是实习.
+    if source == "shixiseng":
+        t_lower = (title or "").lower()
+        if "暑期" in title or "summer" in t_lower:
+            return SUMMER_INTERN
+        return DAILY_INTERN
+
     # nowcoder + boss_extension + user_paste_* → title heuristic
     return _classify_by_title(title)
 

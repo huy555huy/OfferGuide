@@ -161,6 +161,30 @@
             </div>
         </div>
     </div>
+    {% if application_plan.material_checklist or application_plan.post_apply_actions %}
+    <div style="border-top: 1px solid var(--border-soft); margin-top: 0.75rem; padding-top: 0.625rem; display: grid; grid-template-columns: 1fr 1fr; gap: 0.875rem;">
+        {% if application_plan.material_checklist %}
+        <div>
+            <strong style="font-size: 0.86rem;">📦 投前材料 checklist</strong>
+            <ul class="checklist" style="margin: 0.375rem 0 0 1.1rem; font-size: 0.84rem; line-height: 1.55;">
+                {% for item in application_plan.material_checklist %}
+                <li>{{ item }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        {% if application_plan.post_apply_actions %}
+        <div>
+            <strong style="font-size: 0.86rem;">📍 投后跟进动作</strong>
+            <ul class="checklist" style="margin: 0.375rem 0 0 1.1rem; font-size: 0.84rem; line-height: 1.55;">
+                {% for item in application_plan.post_apply_actions %}
+                <li>{{ item }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
 </div>
 {% endif %}
 

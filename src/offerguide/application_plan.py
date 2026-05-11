@@ -151,6 +151,15 @@ def build_application_plan(job: dict[str, Any]) -> ApplicationPlan:
             verified_source=False, evidence_url=evidence_url,
         )
 
+    # W20 — 实习僧 (shixiseng.com) 实习专用聚合.
+    # 入口在 shixiseng 站内: 用户登录后按"投递" → HR 收简历 (类似牛客).
+    # 不去原公司 ATS, 但 HR 看完会 follow up 微信加好友 / 邮件.
+    if source == "shixiseng" or "shixiseng.com" in host:
+        return _shixiseng_plan(
+            url=url, company=company, title=title,
+            verified_source=verified_source, evidence_url=evidence_url,
+        )
+
     if url and not url.startswith("paste://"):
         verified_prefix = (
             "这条 JD 来自已验证的官方招聘源；OfferGuide 只预填可复制材料，最终提交仍由用户确认。"
@@ -539,6 +548,58 @@ def _mokahr_plan(
             "招聘 form 多为多页, 中途别关浏览器, 答完才能保存。",
         ],
         post_apply_actions=_common_post_actions(),
+        verified_source=verified_source, evidence_url=evidence_url,
+    )
+
+
+def _shixiseng_plan(
+    *, url: str | None, company: str, title: str,
+    verified_source: bool, evidence_url: str | None,
+) -> ApplicationPlan:
+    """W20 — 实习僧 实习专用聚合.
+
+    实习僧的投递流程: 站内注册 → 简历填写/上传 → 点"投递" → HR 在站内
+    后台收到 → HR 直接发消息或加微信. 不像牛客有"沟通"功能, 但有"打招呼"
+    + 简历同步 + 站内信回应. 数据 verified 2026-05-11.
+    """
+    return ApplicationPlan(
+        platform="shixiseng",
+        platform_label="实习僧 · 实习专用聚合",
+        apply_url=url, action_label="打开实习僧投递",
+        channel_note=(
+            "实习僧是国内主流大学生实习入口, 站内注册后投递 (微信/手机号都行)。"
+            "投递后 HR 在站内后台直接看简历, 看上的会发站内信或加微信; 实习僧"
+            "也支持上传 PDF 简历做附件投递。"
+        ),
+        steps=[
+            "微信扫码或手机号注册 shixiseng.com (一次注册可投全站)。",
+            "完善在线简历 — 学校/专业/毕业时间/可实习时长一定填全, 实习僧"
+            "HR 主要看这几项过滤。",
+            "上传 PDF 附件简历 (针对这家微调过的 master_resume 版本)。",
+            "打开 JD 详情, 点「立即投递」按钮 (有的岗要先点「沟通」再投)。",
+            "投递后 1-7 天 HR 可能站内信回, 可以同时盯邮件 + 微信加好友请求。",
+            "投递后立刻在 OfferGuide 标「我投了」。",
+        ],
+        fields=[
+            CopyField("申请岗位", f"{company} · {title}", "JD", True),
+            CopyField("学校/专业/毕业时间", "和简历完全一致, HR 主要看这几项", "用户资料"),
+            CopyField("可实习时长 / 周到岗天数", "诚实填; 实习僧很多岗要 3+ 月 / 周 4+ 天",
+                      "用户确认"),
+            CopyField("项目经历摘要", "用下方 QA 中 project 类答案", "apply_assistant", True),
+            CopyField("打招呼/留言 (可选)", "粘下方自我介绍话术, 改成 1-2 句", "apply_assistant", True),
+            CopyField("附件 PDF 文件名", _resume_filename_hint(company, title),
+                      "tailor_resume", True),
+        ],
+        material_checklist=[
+            *_common_materials(company, title),
+            "实习僧 PDF 5MB 以内, 中文字体内嵌避免 HR 看简历乱码。",
+            "实习僧 HR 多偏向 1-2 周内能到岗的候选人, 时间灵活就主动写出来。",
+        ],
+        post_apply_actions=[
+            "投后留意实习僧站内信 + 邮箱 + 微信加好友请求 (HR 经常加微信谈)。",
+            "投后 7-10 天没消息可以在岗位下方点「再次沟通」or 撤回重投。",
+            *_common_post_actions(),
+        ],
         verified_source=verified_source, evidence_url=evidence_url,
     )
 
