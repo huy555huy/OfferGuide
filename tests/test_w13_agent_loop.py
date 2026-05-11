@@ -241,7 +241,12 @@ class TestSnapshot:
 
 class TestAgentLoopE2E:
     def test_loop_with_zero_tool_calls_just_finalizes(self, empty_store):
-        """Model can decide there's nothing to do — emits final immediately."""
+        """Model can decide there's nothing to do — emits final immediately.
+
+        W20.3: trivial run (≤1 iter + 0 SKILL invoked) → critic SKIPPED via
+        gating. We assert 'critique_skipped' event with reason='trivial_run'
+        instead of 'critique'. Critic is no longer wasted on empty trajectories.
+        """
         skills = discover_skills(SKILLS_ROOT)
         runtime = SkillRuntime(llm=_StubLLMWithTools(), store=empty_store)
         stub = _StubLLMWithTools(
@@ -252,18 +257,21 @@ class TestAgentLoopE2E:
         loop = AgentLoop(
             llm=stub, runtime=runtime, store=empty_store,
             skills=skills, max_iterations=4,
+            critic_enabled=True,  # W20.4 — explicit since default is now OFF
         )
         result = loop.run(goal="今日例行检查", trigger_kind="test")
         assert result.error is None
         assert result.iterations == 1
         assert "暂无" in result.final_answer
-        # events: state_snapshot + thinking + final + critique
         kinds = [e.kind for e in result.events]
         assert "state_snapshot" in kinds
         assert "thinking" in kinds
         assert "final" in kinds
-        # critic should run too
-        assert "critique" in kinds
+        # W20.3: trivial run → critic gated out (skip event instead of run event)
+        assert "critique_skipped" in kinds
+        assert "critique" not in kinds
+        skip_event = next(e for e in result.events if e.kind == "critique_skipped")
+        assert skip_event.payload.get("reason") == "trivial_run"
 
     def test_loop_executes_one_tool_then_finalizes(self, populated_store):
         """Model calls 1 tool, sees result, then issues final."""
@@ -347,8 +355,10 @@ class TestAgentLoopE2E:
         assert isinstance(traj, list)
         assert len(traj) >= 2  # at least state_snapshot + final
         assert any(e["kind"] == "state_snapshot" for e in traj)
-        # critic should have produced a numeric score (default stub returns 0.7)
-        assert critic == pytest.approx(0.7)
+        # W20.3 — trigger_kind="unit_test" + 0 SKILL + 1 iter = trivial,
+        # critic skipped → critic_score=None persisted. Test validates the
+        # row was still written with the trivial trajectory; just no critic.
+        assert critic is None
 
     def test_loop_handles_unknown_tool_gracefully(self, empty_store):
         """When model calls a tool that doesn't exist, error flows through to model."""
@@ -561,6 +571,7 @@ class TestCriticSignalAutoWrite:
         loop = AgentLoop(
             llm=agent_stub, runtime=runtime, store=populated_store,
             skills=skills, max_iterations=4,
+            critic_enabled=True,  # W20.4 — explicit since default is now OFF
         )
         result = loop.run(goal="score the bytedance job", trigger_kind="test")
         assert result.critic_score == pytest.approx(0.78)

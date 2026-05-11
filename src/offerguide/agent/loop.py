@@ -1017,8 +1017,15 @@ class AgentLoop:
         skills: Iterable[SkillSpec],
         master_resume_text: str | None = None,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
-        critic_enabled: bool = True,
+        # W20.4 — critic 默认 OFF. 用户原话: "纯系统代码的 critic 来掩饰
+        # 没有意义, 因为他凭什么能评判你?". 同 LLM 评同 LLM 是 epistemo-
+        # logically 弱信号; user_thumbs (weight 2.0) / app_outcome
+        # (weight 1.5) / follow_through (weight 0.8) 是真 signal source.
+        # critic (weight 1.0) 默认关, 想要 evolve 信号靠 user 真行动.
+        # opt-in: pass critic_enabled=True OR set env OFFERGUIDE_CRITIC_ENABLED=1
+        critic_enabled: bool = False,
         critic_model: str | None = None,
+        critic_timeout_s: float = 15.0,
         notifier: Any = None,
     ) -> None:
         self._llm = llm
@@ -1041,8 +1048,15 @@ class AgentLoop:
         )
         self._master_resume_text = master_resume_text or ""
         self._max_iter = max(1, int(max_iterations))
-        self._critic_enabled = bool(critic_enabled)
+        # W20.4 — env override 把 critic 打开 (默认 False, 想要 evolve 信号
+        # 应该靠 user_thumbs / app_outcome / follow_through 这些真 signal).
+        import os as _os
+        env_force_on = _os.environ.get("OFFERGUIDE_CRITIC_ENABLED") == "1"
+        self._critic_enabled = bool(critic_enabled) or env_force_on
         self._critic_model = critic_model
+        # W20.3 — critic 跑超过 timeout 强制中断, 不让它卡住整个 run.
+        # 用户原话: "不能因为他而反耽误了我的模型的使用".
+        self._critic_timeout_s = float(critic_timeout_s)
         # Per-run state (set during run(), cleared after) — exposed to action
         # tools that need attribution context (write_suggestion needs run_id
         # + last invoked SKILL to route user_thumbs feedback correctly).
@@ -1289,20 +1303,31 @@ class AgentLoop:
             )
             emit("error", message=f"max_iter ({self._max_iter}) reached")
 
-        # 4. Self-critique
+        # 4. Self-critique (W20.3 — gated to not tax user UX)
         critic_score: float | None = None
         critic_notes: str | None = None
-        if self._critic_enabled and final_answer:
-            try:
-                critic_score, critic_notes = self._self_critique(
-                    goal=goal,
-                    final_answer=final_answer,
-                    events=events,
-                )
-                emit("critique", score=critic_score, notes=critic_notes)
-            except Exception as e:
-                log.info("critic pass failed (non-fatal): %s", e)
-                emit("critique", score=None, notes=f"(critic failed: {e})")
+        if final_answer:
+            run_critic, skip_reason = self._should_run_critic(
+                trigger_kind=trigger_kind,
+                iterations=final_iteration,
+                skill_invocations=skill_invocations,
+            )
+            if run_critic:
+                try:
+                    critic_score, critic_notes = self._self_critique_with_timeout(
+                        goal=goal,
+                        final_answer=final_answer,
+                        events=events,
+                    )
+                    emit("critique", score=critic_score, notes=critic_notes)
+                except Exception as e:
+                    log.info("critic pass failed (non-fatal): %s", e)
+                    emit("critique", score=None, notes=f"(critic failed: {e})")
+            else:
+                # Don't burn an LLM call when the critic gate said skip.
+                # Emit a 'critique_skipped' event so logs/UI know why.
+                log.debug("critic skipped: %s", skip_reason)
+                emit("critique_skipped", reason=skip_reason or "unknown")
 
         # 4b. Write evolution_signals — attribute the critic score to every
         # SKILL that ran during this trajectory. The whole-trajectory score
@@ -1799,6 +1824,98 @@ class AgentLoop:
 
         # Schema-listed but not implemented — programming error
         return f"ERROR: lookup tool '{tc.name}' is declared but not implemented"
+
+    # W20.3 — critic gating: kinds that get critic vs skipped.
+    # cron_wake / scheduler / autonomous (background): keep critic — has time,
+    #   needs signal for SKILL evolve fitness scoring.
+    # user_button / manual / chat / sse (interactive): skip critic — UX latency
+    #   matters more than evolve signal (user can re-trigger if they want).
+    _CRITIC_TRIGGER_KINDS_INCLUDED: frozenset[str] = frozenset({
+        "cron_wake", "scheduler", "autonomous", "ambient",
+    })
+    _CRITIC_TRIGGER_KINDS_EXCLUDED: frozenset[str] = frozenset({
+        "user_button", "manual", "chat", "sse", "user", "user_chat",
+    })
+
+    def _should_run_critic(
+        self, *, trigger_kind: str,
+        iterations: int, skill_invocations: dict[str, dict],
+    ) -> tuple[bool, str | None]:
+        """W20.3 — decide whether to run critic for this trajectory.
+
+        Returns (should_run, skip_reason). skip_reason is None when running.
+
+        Order of checks (most-actionable first, so log/audit shows the
+        actual gating layer that fired):
+
+        1. Hard disabled (self._critic_enabled=False)
+        2. Env disabled (OFFERGUIDE_CRITIC_DISABLED=1)
+        3. Trigger kind: user-triggered → skip (UX latency matters)
+        4. Trivial run: ≤1 iter AND 0 SKILL invoked → nothing to critique
+        5. Sample rate (env OFFERGUIDE_CRITIC_SAMPLE_RATE, default 1.0)
+        """
+        import os as _os
+        if not self._critic_enabled:
+            return False, "constructor_disabled"
+        if _os.environ.get("OFFERGUIDE_CRITIC_DISABLED") == "1":
+            return False, "env_disabled"
+        # Interactive runs: skip critic to keep UX fast
+        if trigger_kind in self._CRITIC_TRIGGER_KINDS_EXCLUDED:
+            return False, f"interactive_trigger:{trigger_kind}"
+        # Trivial: nothing meaningful to evaluate (no tools used, no decisions)
+        if iterations <= 1 and not skill_invocations:
+            return False, "trivial_run"
+        # Sample rate (for users who want signal but cap cost)
+        sample_raw = _os.environ.get("OFFERGUIDE_CRITIC_SAMPLE_RATE")
+        if sample_raw:
+            try:
+                rate = float(sample_raw)
+            except ValueError:
+                rate = 1.0
+            if rate < 1.0:
+                import random as _random
+                if _random.random() > rate:
+                    return False, f"sampled_out:rate={rate}"
+        return True, None
+
+    def _self_critique_with_timeout(
+        self, *, goal: str, final_answer: str, events: list[AgentEvent],
+    ) -> tuple[float | None, str | None]:
+        """W20.3 — wrap _self_critique with a hard timeout via thread.
+
+        If critic LLM call hangs > self._critic_timeout_s, we abandon it
+        and return (None, "(critic timeout)"). The orphan thread will eventually
+        time out via httpx but won't block the run() return.
+        """
+        import threading as _threading
+        result_box: dict[str, Any] = {"done": False}
+
+        def _worker():
+            try:
+                score, notes = self._self_critique(
+                    goal=goal, final_answer=final_answer, events=events,
+                )
+                result_box["score"] = score
+                result_box["notes"] = notes
+            except Exception as e:  # pragma: no cover - defensive
+                result_box["error"] = e
+            finally:
+                result_box["done"] = True
+
+        t = _threading.Thread(
+            target=_worker, name="critic-llm", daemon=True,
+        )
+        t.start()
+        t.join(timeout=self._critic_timeout_s)
+        if not result_box["done"]:
+            log.warning(
+                "critic timed out after %.1fs (orphan thread continues)",
+                self._critic_timeout_s,
+            )
+            return None, f"(critic timeout > {self._critic_timeout_s:.0f}s)"
+        if "error" in result_box:
+            raise result_box["error"]
+        return result_box.get("score"), result_box.get("notes")
 
     def _self_critique(
         self, *, goal: str, final_answer: str, events: list[AgentEvent],

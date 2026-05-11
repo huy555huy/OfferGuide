@@ -568,7 +568,10 @@ def create_app(
             agent = AgentLoop(
                 llm=llm, runtime=runtime, store=store, skills=skills,
                 master_resume_text=profile.raw_resume_text if profile else "",
-                max_iterations=6, critic_enabled=True,
+                max_iterations=6,
+                # W20.4 — critic 默认 OFF (用户原话: "凭什么能评判你"). 真
+                # evolve signal 来自 user_thumbs / app_outcome / follow_through.
+                # 想强制开 critic: set env OFFERGUIDE_CRITIC_ENABLED=1
                 notifier=notifier,
             )
             # W14.7-fix: previously this was a blocking sync call inside an
@@ -804,6 +807,44 @@ def create_app(
                 "VALUES (?, ?, ?, ?)",
                 ("user_marked_applied", job_id, "user clicked '已投'", "user"),
             )
+
+        # W20.4 — REAL signal (not LLM-judging-LLM): user actually acted on
+        # this job → record follow_through=True for the score_match SKILL run
+        # that recommended it. This is ground-truth, not opinion. Goes
+        # straight into evolution_signals (weight 0.8).
+        try:
+            from .. import evolution as _evo
+            with store.connect() as conn:
+                # Find the score_match skill_run that scored this job
+                # (most recent). harness_events.kind='scored' carries the
+                # skill_run_id in the JSON note.
+                row = conn.execute(
+                    "SELECT json_extract(note, '$.skill_run_id') as srid "
+                    "FROM harness_events "
+                    "WHERE kind = 'scored' AND job_id = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (job_id,),
+                ).fetchone()
+                if row and row[0] is not None:
+                    srid = int(row[0])
+                    # Look up the SKILL version that ran
+                    sr = conn.execute(
+                        "SELECT skill_version FROM skill_runs WHERE id = ?",
+                        (srid,),
+                    ).fetchone()
+                    if sr and sr[0]:
+                        _evo.record_follow_through(
+                            store,
+                            skill_name="score_match",
+                            skill_version=str(sr[0]),
+                            skill_run_id=srid,
+                            executed=True,
+                            notes=f"user clicked '我投了' on job#{job_id}",
+                        )
+        except Exception as e:
+            log_mod = __import__("logging").getLogger(__name__)
+            log_mod.debug("follow_through signal write failed: %s", e)
+
         return {"application_id": app_id, "next_wake": "+7d"}
 
     @app.get("/jobs", response_class=HTMLResponse)
@@ -838,6 +879,58 @@ def create_app(
                 active_tab="jobs",
             ),
         )
+
+    def _link_skill_to_job_and_signal(
+        *, skill_name: str, skill_run_id: int | None,
+        job_id: int, signal_kind: str,
+    ) -> None:
+        """W20.5 — write 2 things in one go (idempotent, errors swallowed):
+
+        1. ``harness_event`` linking this skill_run_id ↔ job_id (so later
+           code can find "which apply_assistant call was for this job").
+           Was missing pre-W20.5 for everything except score_match.
+        2. ``evolution_signal`` of kind 'follow_through' (real signal: user
+           opened this view = they're using the SKILL output).
+
+        Skipped silently if skill_run_id is None (SKILL didn't run, e.g.,
+        no LLM key — nothing to attribute).
+        """
+        if skill_run_id is None:
+            return
+        try:
+            with store.connect() as conn:
+                # Look up skill_version for accurate evolve attribution
+                sr = conn.execute(
+                    "SELECT skill_version FROM skill_runs WHERE id = ?",
+                    (skill_run_id,),
+                ).fetchone()
+                if not sr or not sr[0]:
+                    return
+                skill_version = str(sr[0])
+                conn.execute(
+                    "INSERT INTO harness_events(kind, job_id, note, source) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        signal_kind, job_id,
+                        json.dumps({
+                            "skill_run_id": skill_run_id,
+                            "skill_name": skill_name,
+                            "skill_version": skill_version,
+                        }, ensure_ascii=False),
+                        "view_visit",
+                    ),
+                )
+            from .. import evolution as _evo
+            _evo.record_follow_through(
+                store,
+                skill_name=skill_name,
+                skill_version=skill_version,
+                skill_run_id=skill_run_id,
+                executed=True,
+                notes=f"user opened view for job#{job_id}",
+            )
+        except Exception as e:
+            log.debug("link_skill_to_job_and_signal failed: %s", e)
 
     @app.get("/jobs/{job_id}/apply-pack", response_class=HTMLResponse)
     async def apply_pack_view(job_id: int, request: Request) -> Any:
@@ -879,6 +972,12 @@ def create_app(
             },
             settings=settings, profile=profile, runtime=runtime,
             skills=skills, store=store,
+        )
+        # W20.5 — link this SKILL run to the job + write follow_through signal.
+        # User opening this view = real action (using SKILL output) = real signal.
+        _link_skill_to_job_and_signal(
+            skill_name="apply_assistant", skill_run_id=result.skill_run_id,
+            job_id=job_id, signal_kind="apply_pack_generated",
         )
         return templates.TemplateResponse(
             request, "apply_pack.html",
@@ -941,6 +1040,11 @@ def create_app(
             },
             settings=settings, profile=profile, runtime=runtime,
             skills=skills, store=store,
+        )
+        # W20.5 — link SKILL→job + follow_through signal (user opened view).
+        _link_skill_to_job_and_signal(
+            skill_name="prepare_interview", skill_run_id=result.skill_run_id,
+            job_id=job_id, signal_kind="post_apply_pack_generated",
         )
         return templates.TemplateResponse(
             request, "post_apply_pack.html",
@@ -2751,8 +2855,15 @@ def create_app(
                 (app_id, event_kind),
             )
 
-        # W13.x feedback loop: positive/negative outcomes → evolution_signals
-        # attributed to apply_assistant + most recent SKILLs that ran for this job
+        # W20.5 — multi-SKILL outcome attribution.
+        # Pre-W20.5: only apply_assistant got credit (hardcoded skill_version=0.1.0).
+        # Real chain for an application:
+        #   score_match (找到岗) → tailor_resume (改简历)
+        #   → apply_assistant (写自我介绍) → prepare_interview (面试准备)
+        # All 4 SKILLs participated. Outcome should fan to all of them via
+        # the harness_events linking SKILL run_ids ↔ job_id (written by
+        # _exec_score_match for score_match and _link_skill_to_job_and_signal
+        # for apply_assistant + prepare_interview).
         try:
             from .. import evolution as _evo
             outcome_map = {
@@ -2763,18 +2874,72 @@ def create_app(
             }
             outcome = outcome_map.get(status)
             if outcome:
-                # Attribute to apply_assistant (most direct link)
-                _evo.record_app_outcome(
-                    store,
-                    skill_name="apply_assistant",
-                    skill_version="0.1.0",  # TODO: lookup current live version
-                    skill_run_id=None,
-                    outcome=outcome,  # type: ignore[arg-type]
-                    weight=1.0,
-                )
+                # W20.5 — find all SKILL runs that touched this job via
+                # harness_events (kind 'scored' / 'apply_pack_generated' /
+                # 'post_apply_pack_generated'). harness_events table may not
+                # exist in fresh fixtures — init it here defensively (idempotent)
+                # and fall back to apply_assistant only-attribution if so.
+                try:
+                    from ..harness import _schema as _hs
+                    _hs.init_harness_schema(store)
+                except Exception:
+                    pass
+                with store.connect() as conn:
+                    skill_rows = conn.execute(
+                        "SELECT DISTINCT json_extract(note, '$.skill_run_id') as srid, "
+                        "       json_extract(note, '$.skill_name') as sn "
+                        "FROM harness_events "
+                        "WHERE job_id = ? AND kind IN "
+                        "  ('scored', 'apply_pack_generated', 'post_apply_pack_generated') "
+                        "  AND json_extract(note, '$.skill_run_id') IS NOT NULL",
+                        (job_id,),
+                    ).fetchall()
+                    # Map skill_run_id → skill_version
+                    seen_runs: set[int] = set()
+                    for srid_raw, sn_raw in skill_rows:
+                        if srid_raw is None:
+                            continue
+                        srid = int(srid_raw)
+                        if srid in seen_runs:
+                            continue
+                        seen_runs.add(srid)
+                        sn = str(sn_raw) if sn_raw else None
+                        # Look up version + (if we don't have skill_name) name
+                        sr = conn.execute(
+                            "SELECT skill_name, skill_version "
+                            "FROM skill_runs WHERE id = ?",
+                            (srid,),
+                        ).fetchone()
+                        if not sr:
+                            continue
+                        skill_name = sn or str(sr[0])
+                        skill_version = str(sr[1])
+                        try:
+                            _evo.record_app_outcome(
+                                store,
+                                skill_name=skill_name,
+                                skill_version=skill_version,
+                                skill_run_id=srid,
+                                outcome=outcome,  # type: ignore[arg-type]
+                                weight=1.0,
+                            )
+                        except Exception as e:
+                            log.debug(
+                                "app_outcome write for %s#%d failed: %s",
+                                skill_name, srid, e,
+                            )
+                # Fallback if NO SKILL events found (job created from
+                # user paste with no SKILL chain) — at least keep old behavior
+                # of attributing to apply_assistant
+                if not skill_rows:
+                    _evo.record_app_outcome(
+                        store, skill_name="apply_assistant",
+                        skill_version="0.1.0", skill_run_id=None,
+                        outcome=outcome,  # type: ignore[arg-type]
+                        weight=0.5,  # lower weight since attribution is fuzzy
+                    )
         except Exception as e:
-            log_mod = __import__("logging").getLogger(__name__)
-            log_mod.debug("apply outcome signal write failed: %s", e)
+            log.debug("apply outcome signal write failed: %s", e)
 
         # W14 联动: outcome → user_facts. Terminal outcomes (offer/rejected) are
         # high-quality preference signals — extract them as user_facts so future

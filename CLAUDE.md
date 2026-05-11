@@ -69,6 +69,39 @@ C. **grep 是反向工具 — 不能用 grep 做"X 是否存在" 的二值判断
 
    "显然的事是假设的温床" + "**搜索式 verify 是假设的放大器**".
 
+**最最最狠的一条 (W20.4 用户原话戳穿后加, 信号合法性层)**:
+
+D. **LLM 不能自评. 凡是 "用一个 LLM 评判另一个 LLM 输出" 默认假设是弱信号**.
+
+   用户原话: "**不能使用一个纯系统代码的 critic 来掩饰, 因为他凭什么能评判你?**"
+
+   2026-05-11 W20.4 真改: AgentLoop critic 默认从 ON 改 OFF. critic LLM
+   weight=1.0 (mid, 原作者 evolution/signals.py 自承 "model judging another
+   model (good but biased)"). 真 evolve signal 必须来自:
+   - **user_thumbs** (用户真点 👍/👎, weight=2.0) — 最直接
+   - **app_outcome** (真投了 → HR 回 / 面试 / offer, weight=1.5) — 真世界 outcome
+   - **follow_through** (用户真点 "我投了", weight=0.8) — 真行动
+
+   3 种真信号 sum weight = 4.3, **远超 critic 1.0**. 设计意图本就是真行动
+   为主, critic 是补充.
+
+   **反模式**:
+   - "我加个 LLM 当 judge 给 SKILL 评分" — 默认 wrong, 除非有独立 ground
+     truth 校准 (judge vs 人工标注 agreement > 0.8)
+   - "用 deterministic Python 写 critic" — 同样 wrong, Python 凭什么知道
+     用户真该不该 act on 这个建议?
+
+   **正确模式**:
+   - 设计 hooks 让用户的真行动 (👍/我投了/收到回复/面试/offer) 自动写
+     evolution_signal
+   - LLM-as-judge 只作为 offline batch eval (eval_synthetic, weight=0.6,
+     最低), 不进 production hot path
+   - 想给 evolve 加新 signal? 先问 "这个 signal 来自用户真行动吗? 还是
+     LLM 自己给自己打分?"
+
+   口诀: **真权威 = 真行动 / 真 outcome. LLM 评 LLM 是 self-confirmation
+   bias 的发明专利.**
+
 **违反时 = 对用户的伤害**: 用户已经压力大要找工作. 我每写一行假设的代码, 他都得花时间验证 / 报错 / 等下个版本修. **比不写还差.**
 
 **血淋淋的反面教材** (从 W14 起到 W15.22):
@@ -174,6 +207,21 @@ agent[全自动找岗位, 多源] → /recommended[排好序] → 用户挑 →
   阿里 124 个 campus-talent.alibaba.com 真 ATS URL (codex W16 标
   unverified_js_shell 的, 通过 0voice 间接拿到了). 含北森 SaaS app.mokahr.com
   专属 plan
+- ~~**实习僧 (shixiseng.com) 实习专用聚合**~~ — W20 已做 (2026-05-11
+  真 dogfood, 见 docs/dogfood_2026-05-11/w20_shixiseng_live.md):
+  - List page SSR Nuxt 但字段 font-encoded 反爬, 只取 `inn_xxx` token
+  - Detail page SSR 真字符 (不再 font-obf), parse `new_job_name` /
+    `com-name` / `job_position` / `job_money` / `job_detail`
+  - 真测 cycle: 2 keyword × 8 detail = 16 真岗 / 16 unique 公司 / 0 dup /
+    0 error. 12 niche (香巴拉/算力大陆/AKULAKU/聚宽/澳鹏/量坤/医者/...)
+    + 4 大厂 (百度/淘宝闪购/网易/小红书). **全 100% 实习** (真填补 0voice
+    repo 25% 实习占比的空白)
+  - 加了 `_shixiseng_plan` (6 步 + 6 字段 + 站内信 / 微信加好友 / 实习时长
+    专门提示)
+- ~~**apply_pack.html 漏渲染 material_checklist + post_apply_actions**~~ —
+  W20 audit 时暴露 + fix (见 docs/dogfood_2026-05-11/full_cycle_audit.md
+  Bug 2). application_plan dataclass 有 7 字段被 host plan 真填了, 但
+  template 只读 4 个, 50% plan 内容用户看不到. 已 fix template.
 
 已交付 (W17/W18, 别再说没做):
 - ✅ 暑期/日常/校招/社招 deterministic classifier (recruit_type.py)
