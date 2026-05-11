@@ -1342,6 +1342,28 @@ class AgentLoop:
                 skill_invocations=skill_invocations,
             )
 
+        # 4c. W20.6 — Deterministic trajectory analysis (NOT a critic).
+        #
+        # 关键区别: critic LLM 给 trajectory 打分 (epistemo 弱, 已 W20.4 关掉).
+        # 这里是 Python 看 event 流, 检测**真发生的具体 pattern** (max_iter /
+        # circuit_breaker / 反复 tool error / 0 action), 写**事实描述**
+        # (不是评价) 到 agent_self_observations. 下次 wake 的 snapshot 读到,
+        # 行为闭环不重蹈覆辙.
+        #
+        # 不违反 CLAUDE.md 规则 D (LLM 不能自评): 0 LLM call, pure Python
+        # pattern detection. 跟 grep error logs 一回事.
+        if final_answer and not (
+            final_iteration <= 1 and not skill_invocations
+        ):
+            try:
+                self._analyze_and_persist_observations(
+                    run_id=run_id, goal=goal, events=events,
+                    final_iteration=final_iteration,
+                    skill_invocations=skill_invocations,
+                )
+            except Exception as e:
+                log.info("trajectory analyzer failed (non-fatal): %s", e)
+
         # 5. Persist + return
         try:
             return self._finalize(
@@ -1982,6 +2004,200 @@ class AgentLoop:
             score = None
         notes = str(data.get("notes") or "")[:500]
         return score, notes
+
+    # ─────────────────────── W20.6 trajectory analyzer ───────────────────────
+    #
+    # Pure deterministic pattern detection from event stream. Outputs
+    # self-observation rows the agent reads on next wake (snapshot_state).
+    # NOT a critic — no scoring, no LLM, just "this specific bad pattern
+    # actually happened in run#N, evidence attached, future-you don't repeat".
+
+    # Bound how many observations of the same "kind+text" we keep — agents
+    # that keep hitting the same wall shouldn't spam snapshot with 50 rows.
+    _OBSERVATION_DEDUP_WINDOW_DAYS = 14
+
+    def _analyze_and_persist_observations(
+        self,
+        *,
+        run_id: int | None,
+        goal: str,
+        events: list[AgentEvent],
+        final_iteration: int,
+        skill_invocations: dict[str, dict],
+    ) -> list[tuple[str, str]]:
+        """Run trajectory analyzers, persist new observations to DB.
+
+        Returns list of (pattern_kind, observation_text) actually persisted
+        (excludes deduped). Useful for tests + telemetry.
+
+        IMPORTANT: not a critic. We don't judge "was this run good". We
+        detect SPECIFIC bad patterns ("you hit max_iter without final answer")
+        and write a factual note. Agent reads notes next time via snapshot.
+        """
+        from .. import goals as _goals  # local: keep loop.py loadable
+
+        observations = self._detect_patterns(
+            goal=goal, events=events,
+            final_iteration=final_iteration,
+            skill_invocations=skill_invocations,
+        )
+        persisted: list[tuple[str, str]] = []
+        for pattern_kind, text, evidence in observations:
+            # Dedup: don't re-write the same observation if a recent (≤ 14d)
+            # active row already says the same thing. Otherwise snapshot
+            # piles up with N copies of the same lesson.
+            if self._observation_already_active(text, pattern_kind):
+                continue
+            try:
+                _goals.write_self_observation(
+                    self._store,
+                    observation=text,
+                    pattern_kind=pattern_kind,  # type: ignore[arg-type]
+                    evidence={**evidence, "run_id": run_id},
+                    valid_for_days=self._OBSERVATION_DEDUP_WINDOW_DAYS,
+                )
+                persisted.append((pattern_kind, text))
+            except Exception as e:
+                log.debug("self_observation write failed: %s", e)
+        return persisted
+
+    def _observation_already_active(
+        self, text: str, pattern_kind: str,
+    ) -> bool:
+        """True if a non-expired, non-superseded row with same text exists."""
+        try:
+            with self._store.connect() as conn:
+                row = conn.execute(
+                    "SELECT id FROM agent_self_observations "
+                    "WHERE observation = ? AND pattern_kind = ? "
+                    "  AND superseded_by IS NULL "
+                    "  AND (valid_until IS NULL OR valid_until > julianday('now')) "
+                    "LIMIT 1",
+                    (text, pattern_kind),
+                ).fetchone()
+                return row is not None
+        except Exception:
+            return False  # if table missing etc, just attempt the write
+
+    def _detect_patterns(
+        self,
+        *,
+        goal: str,
+        events: list[AgentEvent],
+        final_iteration: int,
+        skill_invocations: dict[str, dict],
+    ) -> list[tuple[str, str, dict[str, Any]]]:
+        """Run all detectors against the trajectory.
+
+        Returns list of (pattern_kind, observation_text, evidence_dict).
+        Each detector is independent + cheap. Add more detectors here as
+        we see real patterns the agent should learn from.
+        """
+        out: list[tuple[str, str, dict[str, Any]]] = []
+
+        tool_calls = [e for e in events if e.kind == "tool_call"]
+        tool_results = [e for e in events if e.kind == "tool_result"]
+        errors = [e for e in events if e.kind == "error"]
+        had_final = any(e.kind == "final" for e in events)
+
+        # ── D1: max_iter overshoot ──────────────────────────────────
+        # Agent ran all iterations without converging on a final answer.
+        # The "error: max_iter reached" event already marks this; convert
+        # to a learnable lesson.
+        max_iter_errors = [
+            e for e in errors
+            if "max_iter" in (e.payload.get("message") or "")
+        ]
+        if max_iter_errors and not had_final:
+            out.append((
+                "overreach",
+                f"上次跑到了 max_iter ({self._max_iter}) 才停, 自然 final 没触发. "
+                f"下次 goal 类似时早点判断收手, 别堆 tool call.",
+                {
+                    "detector": "max_iter_overshoot",
+                    "iterations": final_iteration,
+                    "goal_prefix": (goal or "")[:120],
+                },
+            ))
+
+        # ── D2: circuit-breaker / repeated same (tool, args) ─────────
+        # Track (tool_name, args_signature) → count. >=3 = bad pattern.
+        repeat_counter: dict[tuple[str, str], int] = {}
+        for tc_ev in tool_calls:
+            name = str(tc_ev.payload.get("name") or "")
+            args = tc_ev.payload.get("arguments")
+            # args_signature: compact JSON; identical args → identical key
+            try:
+                sig = json.dumps(args, sort_keys=True, ensure_ascii=False)[:200]
+            except Exception:
+                sig = str(args)[:200]
+            key = (name, sig)
+            repeat_counter[key] = repeat_counter.get(key, 0) + 1
+
+        for (tool_name, sig), count in repeat_counter.items():
+            if count >= 3 and tool_name:
+                out.append((
+                    "repeated_mistake",
+                    f"上次反复调 {tool_name} 同一组 args ({count} 次). "
+                    f"如果第一次结果没用, 检查 args 是否对而不是再调一次.",
+                    {
+                        "detector": "circuit_breaker_pattern",
+                        "tool": tool_name,
+                        "args_sig": sig[:160],
+                        "count": count,
+                    },
+                ))
+
+        # ── D3: tool returned ERROR ≥2 times ────────────────────────
+        # tool_result preview starting with 'ERROR:' is the convention
+        # (_execute_tool returns 'ERROR: ...' on tool failures).
+        error_by_tool: dict[str, int] = {}
+        for tr_ev in tool_results:
+            preview = str(tr_ev.payload.get("result_preview") or "")
+            if preview.startswith("ERROR"):
+                tn = str(tr_ev.payload.get("name") or "")
+                if tn:
+                    error_by_tool[tn] = error_by_tool.get(tn, 0) + 1
+
+        for tool_name, count in error_by_tool.items():
+            if count >= 2:
+                out.append((
+                    "repeated_mistake",
+                    f"上次 {tool_name} 调用 {count} 次都返回 ERROR. "
+                    f"调它前先验证 input 假设 (e.g. job_id 存在 / 表已初始化).",
+                    {
+                        "detector": "repeated_tool_error",
+                        "tool": tool_name,
+                        "error_count": count,
+                    },
+                ))
+
+        # ── D4: zero action with non-trivial goal ───────────────────
+        # Agent declared final without any tool_call. If the goal looks
+        # like it needs investigation (e.g., "score", "tailor", "evaluate"),
+        # mark this as underreach.
+        if had_final and not tool_calls and goal:
+            # Keywords ≥2 chars + specific enough not to match maintenance
+            # goals like "今日例行检查" / "看看进度". Tuned after a real test
+            # caught "查" alone matching "检查".
+            action_hint_keywords = (
+                "评估", "投递", "面试", "推荐", "分析", "score", "tailor",
+                "evaluate", "search ", "find new", "找新", "找岗",
+            )
+            goal_lc = goal.lower()
+            if any(kw.lower() in goal_lc for kw in action_hint_keywords):
+                out.append((
+                    "underreach",
+                    f"上次 goal 含 action 词 (e.g. 评估/找/分析) 但 0 tool_call 直接 final. "
+                    f"下次先 read 数据再回答, 别空判断.",
+                    {
+                        "detector": "zero_action_action_goal",
+                        "goal_prefix": (goal or "")[:120],
+                        "final_iteration": final_iteration,
+                    },
+                ))
+
+        return out
 
     def _write_critic_signals(
         self,
