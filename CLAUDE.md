@@ -69,39 +69,6 @@ C. **grep 是反向工具 — 不能用 grep 做"X 是否存在" 的二值判断
 
    "显然的事是假设的温床" + "**搜索式 verify 是假设的放大器**".
 
-**最最最狠的一条 (W20.4 用户原话戳穿后加, 信号合法性层)**:
-
-D. **LLM 不能自评. 凡是 "用一个 LLM 评判另一个 LLM 输出" 默认假设是弱信号**.
-
-   用户原话: "**不能使用一个纯系统代码的 critic 来掩饰, 因为他凭什么能评判你?**"
-
-   2026-05-11 W20.4 真改: AgentLoop critic 默认从 ON 改 OFF. critic LLM
-   weight=1.0 (mid, 原作者 evolution/signals.py 自承 "model judging another
-   model (good but biased)"). 真 evolve signal 必须来自:
-   - **user_thumbs** (用户真点 👍/👎, weight=2.0) — 最直接
-   - **app_outcome** (真投了 → HR 回 / 面试 / offer, weight=1.5) — 真世界 outcome
-   - **follow_through** (用户真点 "我投了", weight=0.8) — 真行动
-
-   3 种真信号 sum weight = 4.3, **远超 critic 1.0**. 设计意图本就是真行动
-   为主, critic 是补充.
-
-   **反模式**:
-   - "我加个 LLM 当 judge 给 SKILL 评分" — 默认 wrong, 除非有独立 ground
-     truth 校准 (judge vs 人工标注 agreement > 0.8)
-   - "用 deterministic Python 写 critic" — 同样 wrong, Python 凭什么知道
-     用户真该不该 act on 这个建议?
-
-   **正确模式**:
-   - 设计 hooks 让用户的真行动 (👍/我投了/收到回复/面试/offer) 自动写
-     evolution_signal
-   - LLM-as-judge 只作为 offline batch eval (eval_synthetic, weight=0.6,
-     最低), 不进 production hot path
-   - 想给 evolve 加新 signal? 先问 "这个 signal 来自用户真行动吗? 还是
-     LLM 自己给自己打分?"
-
-   口诀: **真权威 = 真行动 / 真 outcome. LLM 评 LLM 是 self-confirmation
-   bias 的发明专利.**
-
 **违反时 = 对用户的伤害**: 用户已经压力大要找工作. 我每写一行假设的代码, 他都得花时间验证 / 报错 / 等下个版本修. **比不写还差.**
 
 **血淋淋的反面教材** (从 W14 起到 W15.22):
