@@ -113,54 +113,86 @@ async def _run_one_cycle(
     3. agent_search 用 keywords 找 AI 创业公司 / 中小厂 (大厂之外的世界)
     W19+: 4. 0voice GitHub repo 聚合 — 100+ 公司 1000+ 岗位汇总, 每日更新.
        一次拉到位, 含真 ATS URL (阿里 campus-talent / 字节 / 北森 SaaS)
+    W20: 5. 实习僧 (shixiseng.com) 实习专用聚合 — niche AI 创业公司实习.
+
+    W20.2 — 4 个 fetch 阶段 (nowcoder / 0voice / verified×kw / shixiseng×kw)
+    并行 via asyncio.gather. 它们打不同域 (nowcoder.com / raw.githubusercontent.com
+    / qq.com+baidu.com / shixiseng.com), 互不抢 rate limit. 顺序执行白浪费.
+    agent_search 单独跑因为它是 LLM, 跟 fetch 抢 LLM rate limit/cost.
     """
-    from . import scout
-    counters = await asyncio.to_thread(
-        scout.crawl_nowcoder, store, limit=crawl_limit,
-    )
-    log.info("ambient discovery: nowcoder crawl done: %s", counters)
+    import time as _time
+    cycle_t0 = _time.monotonic()
 
-    # W19+ — 0voice repo aggregator (475 真岗位/run, 189 个 AI 相关 实测).
-    # Cap intake to keep score_match cost under control. Cap = max_jobs.
-    try:
-        from ..platforms.zerovoice import crawl_zerovoice
-        zv_result = await asyncio.to_thread(
-            crawl_zerovoice, store, max_jobs=80,
-        )
-        log.info(
-            "ambient discovery: 0voice done: parsed=%d inserted=%d duplicate=%d",
-            zv_result.parsed_total, zv_result.inserted, zv_result.duplicate,
-        )
-    except Exception as e:
-        log.exception("ambient discovery: 0voice fetch failed: %s", e)
-
-    # W18 — extract user-specific keywords ONCE per cycle, share across
-    # verified_official + agent_search calls
+    # ── Stage 1: extract keywords (cheap, in-process) ─────────────────
     keywords = _extract_cycle_keywords(store=store, user_profile_text=user_profile_text)
     log.info(
         "ambient discovery: cycle keywords: %s",
         [k.keyword for k in keywords],
     )
 
-    # 2. 已 verified 官方源 (腾讯校招 + 腾讯社招 + 百度 GRADUATE + INTERN)
-    #    用 user keywords 多次拉, 每个 keyword 限 3 条 → 一轮入 ~50 条
-    if keywords:
+    # ── Stage 2-5: 4 fetch sources in parallel ────────────────────────
+    from . import scout
+    from ..platforms.zerovoice import crawl_zerovoice
+
+    async def _stage_nowcoder() -> tuple[str, float, Any, Exception | None]:
+        t = _time.monotonic()
         try:
-            official_summary = await asyncio.to_thread(
+            r = await asyncio.to_thread(scout.crawl_nowcoder, store, limit=crawl_limit)
+            return ("nowcoder", _time.monotonic() - t, r, None)
+        except Exception as e:
+            return ("nowcoder", _time.monotonic() - t, None, e)
+
+    async def _stage_zerovoice() -> tuple[str, float, Any, Exception | None]:
+        t = _time.monotonic()
+        try:
+            r = await asyncio.to_thread(crawl_zerovoice, store, max_jobs=80)
+            return ("0voice", _time.monotonic() - t, r, None)
+        except Exception as e:
+            return ("0voice", _time.monotonic() - t, None, e)
+
+    async def _stage_verified() -> tuple[str, float, Any, Exception | None]:
+        t = _time.monotonic()
+        if not keywords:
+            return ("verified_official", 0.0, {"skipped": "no_keywords"}, None)
+        try:
+            r = await asyncio.to_thread(
                 _crawl_verified_official_per_keyword,
                 store=store,
-                keywords=[k.keyword for k in keywords[:5]],  # 控制 cost
+                keywords=[k.keyword for k in keywords[:5]],
                 limit_per_kw=3,
             )
-            log.info("ambient discovery: verified official done: %s", official_summary)
+            return ("verified_official", _time.monotonic() - t, r, None)
         except Exception as e:
-            log.exception("ambient discovery: verified_official failed: %s", e)
+            return ("verified_official", _time.monotonic() - t, None, e)
 
-    # 3. agent web search — 找 AI 创业公司 / 大厂之外的中小厂
-    #    Search-agent discovery covers company career pages, official ATS pages,
-    #    and pages that are not in platform sitemaps. This is the missing
-    #    "don't make the user scroll boards manually" path.
+    async def _stage_shixiseng() -> tuple[str, float, Any, Exception | None]:
+        t = _time.monotonic()
+        if not keywords:
+            return ("shixiseng", 0.0, {"skipped": "no_keywords"}, None)
+        try:
+            r = await asyncio.to_thread(
+                _crawl_shixiseng_per_keyword,
+                store=store,
+                keywords=[k.keyword for k in keywords[:2]],
+                limit_per_kw=8,
+            )
+            return ("shixiseng", _time.monotonic() - t, r, None)
+        except Exception as e:
+            return ("shixiseng", _time.monotonic() - t, None, e)
+
+    fetch_results = await asyncio.gather(
+        _stage_nowcoder(), _stage_zerovoice(),
+        _stage_verified(), _stage_shixiseng(),
+    )
+    for name, dur, payload, err in fetch_results:
+        if err is not None:
+            log.exception("ambient discovery: %s failed (%.1fs): %s", name, dur, err)
+        else:
+            log.info("ambient discovery: %s done (%.1fs): %s", name, dur, payload)
+
+    # ── Stage 6: agent_search (separate — uses LLM, can't share rate limit) ──
     if settings.deepseek_api_key:
+        t = _time.monotonic()
         try:
             search_result = await asyncio.to_thread(
                 _run_agent_search_blocking,
@@ -168,37 +200,75 @@ async def _run_one_cycle(
                 settings=settings,
                 seed_keywords=[k.keyword for k in keywords[:3]],
             )
-            log.info("ambient discovery: search agent done: %s", search_result)
+            log.info(
+                "ambient discovery: agent_search done (%.1fs): %s",
+                _time.monotonic() - t, search_result,
+            )
         except Exception as e:
-            log.exception("ambient discovery: search agent failed: %s", e)
+            log.exception(
+                "ambient discovery: agent_search failed (%.1fs): %s",
+                _time.monotonic() - t, e,
+            )
 
-    # Score newly-ingested jobs. We can't easily know all ids that were new
-    # across adapters, so query jobs from automatic sources without a scored
-    # event yet.
+    # ── Stage 7: score newly-ingested jobs (parallel via ThreadPool) ──
     if runtime is None or not user_profile_text or not skills:
         log.info("ambient discovery: skipping score (no runtime / no profile / no skills)")
+        log.info(
+            "ambient discovery: cycle done in %.1fs (no scoring)",
+            _time.monotonic() - cycle_t0,
+        )
         return
 
     unscored = await asyncio.to_thread(_load_unscored_discovered_ids, store)
     if not unscored:
+        log.info(
+            "ambient discovery: cycle done in %.1fs (0 unscored)",
+            _time.monotonic() - cycle_t0,
+        )
         return
 
-    log.info("ambient discovery: scoring %d new jobs", len(unscored))
+    score_t = _time.monotonic()
     await asyncio.to_thread(
         _score_jobs_blocking,
         store=store, settings=settings, runtime=runtime, skills=skills,
         user_profile_text=user_profile_text, job_ids=unscored,
     )
+    log.info(
+        "ambient discovery: cycle done in %.1fs (scoring took %.1fs of %d jobs)",
+        _time.monotonic() - cycle_t0, _time.monotonic() - score_t, len(unscored),
+    )
+
+
+# W20.2 — cache by (resume_text_hash, active_goal_hash). 简历 + 目标都不变
+# (用户 6h 内一般不改) → 命中率高. 每 hit 省 1 DB read + python regex match.
+# 失效: 简历或目标改了, 自动重算 (hash 变).
+_KW_CACHE: dict[tuple[str, str], list] = {}
+_KW_CACHE_MAX_ENTRIES = 8  # 上限防泄漏 — 1 user 一般 1 entry, 多 user 部署也够
 
 
 def _extract_cycle_keywords(*, store: Store, user_profile_text: str | None) -> list:
-    """W18 — pull deterministic keywords from resume + active goal."""
+    """W18 — pull deterministic keywords from resume + active goal.
+
+    W20.2 — cache by (resume_hash, active_goal). DB read + regex 不重算.
+    """
+    import hashlib
     from ..match_keywords import DEFAULT_KEYWORDS_PER_CYCLE, extract_keywords
     active = _load_active_north_star(store)
-    return extract_keywords(
+    resume_h = hashlib.sha1(
+        (user_profile_text or "").encode("utf-8"),
+    ).hexdigest()[:16]
+    cache_key = (resume_h, active or "")
+    if cache_key in _KW_CACHE:
+        return _KW_CACHE[cache_key]
+    out = extract_keywords(
         user_profile_text, active_goal=active,
         max_keywords=DEFAULT_KEYWORDS_PER_CYCLE,
     )
+    # Bound cache size — drop oldest entry if at cap (FIFO is fine, no LRU needed)
+    if len(_KW_CACHE) >= _KW_CACHE_MAX_ENTRIES:
+        _KW_CACHE.pop(next(iter(_KW_CACHE)))
+    _KW_CACHE[cache_key] = out
+    return out
 
 
 def _crawl_verified_official_per_keyword(
@@ -252,6 +322,45 @@ def _crawl_verified_official_per_keyword(
     }
 
 
+def _crawl_shixiseng_per_keyword(
+    *, store: Store, keywords: list[str], limit_per_kw: int = 8,
+) -> dict[str, Any]:
+    """W20 — for each keyword, hit shixiseng's list page + ingest top N
+    detail pages. Returns counter dict for log."""
+    from ..platforms.shixiseng import crawl_shixiseng
+
+    inserted_total = 0
+    dup_total = 0
+    parsed_total = 0
+    per_kw: dict[str, int] = {}
+    by_company_total: dict[str, int] = {}
+    errors: list[str] = []
+
+    for kw in keywords:
+        try:
+            r = crawl_shixiseng(store, keyword=kw, max_jobs=limit_per_kw)
+        except Exception as e:
+            errors.append(f"{kw}: {type(e).__name__}: {e}")
+            continue
+        inserted_total += r.inserted
+        dup_total += r.duplicate
+        parsed_total += r.parsed
+        per_kw[kw] = r.inserted
+        for comp, n in r.by_company.items():
+            by_company_total[comp] = by_company_total.get(comp, 0) + n
+        if r.errors:
+            errors.extend([f"{kw}: {e}" for e in r.errors[:3]])
+
+    return {
+        "inserted_total": inserted_total,
+        "duplicate_total": dup_total,
+        "parsed_total": parsed_total,
+        "per_keyword": per_kw,
+        "company_diversity": len(by_company_total),
+        "errors": errors[:5],
+    }
+
+
 def _load_unscored_discovered_ids(store: Store, limit: int = 30) -> list[int]:
     """Pick automatically discovered jobs with no 'scored' event yet.
 
@@ -274,6 +383,7 @@ def _load_unscored_discovered_ids(store: Store, limit: int = 30) -> list[int]:
         "baidu_intern",  # W17 — recruitType=INTERN 拉的暑期+日常实习
         "zerovoice_repo",  # W19+ — 0voice GitHub aggregator
         "bytedance_jobs",  # W19+ — 字节社招 JSON API (实测 1334 岗位)
+        "shixiseng",  # W20 — 实习僧 实习专用聚合 (含 niche AI 创业公司实习)
     )
     placeholders = ",".join("?" * len(sources))
     with store.connect() as conn:
@@ -312,16 +422,40 @@ def _load_unscored_nowcoder_ids(store: Store, limit: int = 30) -> list[int]:
     return [int(r[0]) for r in rows]
 
 
+DEFAULT_AGENT_SEARCH_MAX_ITERATIONS = 8
+"""W20.2 — cap ambient JobFinderAgent iterations.
+
+Dogfood 2026-05-11 (docs/dogfood_2026-05-11/agent_search_seed_keywords.md):
+- Default 25 iter, agent ran 19 / 174s / $0.0078 / 41 jobs (40 大厂 + 1 niche)
+- Diminishing returns past iter ~5 — first 5 calls hit verified_official
+  and fill 30+ jobs cheap, later iters chase web search niche which mostly
+  fails (SPA pages can't be fetched server-side)
+- 0voice + shixiseng (W19+/W20) now cover niche better than agent web search
+- Ambient is recurring (every 6h) — cap should reflect "incremental" use,
+  not "first-time exhaustive"
+
+8 iter ≈ 60s ≈ $0.003 per cycle. 4 cycles/day = $0.012/day on agent_search,
+well under daily $5 cap and headroom for score_match's ~30 calls.
+"""
+
+
 def _run_agent_search_blocking(
     *, store: Store, settings: Settings,
     seed_keywords: list[str] | None = None,
+    max_iterations: int = DEFAULT_AGENT_SEARCH_MAX_ITERATIONS,
 ) -> dict[str, Any]:
     """Run the LLM-driven web search agent once and record a lightweight trail.
 
     W18: ``seed_keywords`` (from user resume) are appended to the north_star
     so the agent searches for niche-fitting middle-tier companies (smart AI
     startups), not just generic 大厂 keywords.
+
+    W20.2: ``max_iterations`` defaults to 8 (was unbounded → 25 default in
+    JobFinderAgent). Saves ~110s + $0.005 per cycle vs. the 19-iter dogfood
+    baseline.
     """
+    import os as _os
+
     from ..agentic.job_finder_agent import JobFinderAgent
     from ..agentic.search import build_default_search
     from ..harness import _schema as _hs
@@ -331,6 +465,14 @@ def _run_agent_search_blocking(
         enforce_daily_budget(store)
     except BudgetExceeded as e:
         return {"skipped": "budget_exceeded", "error": str(e)}
+
+    # Env override for users who want to tune
+    env_iter = _os.environ.get("OFFERGUIDE_AGENT_SEARCH_MAX_ITER")
+    if env_iter:
+        try:
+            max_iterations = max(1, min(50, int(env_iter)))
+        except ValueError:
+            pass
 
     north_star = _load_active_north_star(store)
     if seed_keywords:
@@ -348,7 +490,10 @@ def _run_agent_search_blocking(
         default_model=settings.default_model,
     )
     search = build_default_search()
-    agent = JobFinderAgent(store=store, llm=llm, search=search)
+    agent = JobFinderAgent(
+        store=store, llm=llm, search=search,
+        max_iterations=max_iterations,
+    )
     try:
         result = agent.run(north_star=north_star)
     finally:
@@ -403,6 +548,20 @@ def _load_active_north_star(store: Store) -> str:
     return "；".join(p for p in parts if p)[:500]
 
 
+DEFAULT_SCORE_PARALLELISM = 4
+"""Concurrent score_match invocations per cycle.
+
+LLM call ~5-10s each; running in parallel reduces 30 jobs from 150-300s to
+~40-75s. Bound by:
+- LLM provider's per-account rate limit (DeepSeek allows 10+ concurrent)
+- SQLite WAL mode (multiple readers + serialized writers, fine for 4)
+- Each thread gets its own Store connection (Store.connect is per-call)
+
+4 picked as a safe default — bumps perf 4x without straining provider QPS.
+Configurable via OFFERGUIDE_SCORE_PARALLELISM env if user hits rate limits.
+"""
+
+
 def _score_jobs_blocking(
     *,
     store: Store,
@@ -411,14 +570,52 @@ def _score_jobs_blocking(
     skills: list[SkillSpec],
     user_profile_text: str,
     job_ids: list[int],
+    parallelism: int = DEFAULT_SCORE_PARALLELISM,
 ) -> None:
-    """Run score_match for each job_id via the harness tool dispatch."""
+    """Run score_match for each job_id via the harness tool dispatch.
+
+    W20.2 — parallelized. Pre-W20.2: sequential `for jid in job_ids: ...`,
+    each ~5-10s LLM call → 30 jobs blocks 150-300s. Parallel via
+    ThreadPoolExecutor cuts that ~4x.
+
+    Each worker thread:
+    - Calls _exec_score_match (loads job, calls LLM, writes harness_event)
+    - Independent Store.connect() (sqlite WAL allows concurrent readers + serialized writers)
+    - Independent runtime.invoke (httpx.Client is thread-safe; LLMClient also thread-safe)
+
+    Budget check is per-job on the calling side. We re-check inside the worker
+    for safety so concurrent jobs don't all stampede past a fresh budget cap.
+    """
+    import os as _os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from ..harness import HarnessDeps, MemoryStore, default_worldview_dir
     from ..harness import _schema as _hs
     from ..harness.tools import _exec_score_match
     from ..llm import BudgetExceeded, enforce_daily_budget
 
     _hs.init_harness_schema(store)
+    # Allow env override for users hitting rate limits
+    env_par = _os.environ.get("OFFERGUIDE_SCORE_PARALLELISM")
+    if env_par:
+        try:
+            parallelism = max(1, min(16, int(env_par)))
+        except ValueError:
+            pass
+
+    if not job_ids:
+        return
+
+    # Pre-flight budget check (one DB read) — cheap fast-fail
+    try:
+        enforce_daily_budget(store)
+    except BudgetExceeded as e:
+        log.warning("ambient discovery: budget exceeded before scoring: %s", e)
+        return
+
+    # Single shared HarnessDeps — store is thread-safe (per-call connect),
+    # runtime is thread-safe (LLMClient.chat is stateless beyond config),
+    # MemoryStore writes are append-only.
     deps = HarnessDeps(
         settings=settings, store=store,
         memory_store=MemoryStore(root=default_worldview_dir(settings)),
@@ -426,21 +623,47 @@ def _score_jobs_blocking(
         user_profile_text=user_profile_text,
     )
 
-    for jid in job_ids:
+    def _score_one(jid: int) -> tuple[int, str | None, Exception | None]:
         try:
             enforce_daily_budget(store)
         except BudgetExceeded as e:
-            log.warning("ambient discovery: budget exceeded, stopping: %s", e)
-            return
+            return jid, f"BUDGET_EXCEEDED: {e}", None
         try:
-            result = _exec_score_match({"job_id": jid}, deps)
-            if result.startswith("OK"):
-                log.info("ambient discovery: scored job#%d", jid)
-            else:
-                log.warning("ambient discovery: score for job#%d returned: %s",
-                            jid, result[:200])
+            return jid, _exec_score_match({"job_id": jid}, deps), None
         except Exception as e:
-            log.exception("ambient discovery: score job#%d failed: %s", jid, e)
+            return jid, None, e
+
+    n_workers = max(1, min(parallelism, len(job_ids)))
+    log.info(
+        "ambient discovery: scoring %d jobs with parallelism=%d",
+        len(job_ids), n_workers,
+    )
+    ok = warn = fail = budget_stops = 0
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+        futures = {ex.submit(_score_one, jid): jid for jid in job_ids}
+        for fut in as_completed(futures):
+            jid, result, exc = fut.result()
+            if exc is not None:
+                fail += 1
+                log.exception("ambient discovery: score job#%d failed: %s", jid, exc)
+                continue
+            if result and result.startswith("OK"):
+                ok += 1
+                log.info("ambient discovery: scored job#%d", jid)
+            elif result and result.startswith("BUDGET_EXCEEDED"):
+                budget_stops += 1
+                # Don't break here (would orphan in-flight futures); just log.
+                log.warning("ambient discovery: budget cap hit on job#%d", jid)
+            else:
+                warn += 1
+                log.warning(
+                    "ambient discovery: score for job#%d returned: %s",
+                    jid, (result or "")[:200],
+                )
+    log.info(
+        "ambient discovery: scoring done — ok=%d warn=%d fail=%d budget_stops=%d",
+        ok, warn, fail, budget_stops,
+    )
 
 
 def status_summary(store: Store) -> dict[str, Any]:
