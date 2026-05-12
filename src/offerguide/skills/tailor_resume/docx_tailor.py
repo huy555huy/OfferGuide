@@ -142,35 +142,28 @@ def _is_eligible(paragraph_text: str, run_count: int, is_bold: bool) -> tuple[bo
 # ─────────── LLM rewrite step ─────────────────────────────
 
 
-_REWRITE_PROMPT = """你是 OfferGuide 的简历段落微调员。给定:
-- 用户 master 简历全文 (上下文用)
-- 目标 JD 全文
-- 一组待改写的段落 (按 index)
+_REWRITE_PROMPT = """你是简历改写助手。给定:
+- master 简历全文 (用户已经写好的, 这是语气和体裁的 ground truth)
+- 完整 JD
+- 一组待判断的段落
 
-返回 JSON 数组, 每个元素对应一个段落:
+任务: 让 JD 的关键词在段落里命中, 但**保持 master 原本的语气和体裁** —
+改完的段落跟 master 其它段落放一起读起来像同一个人写的。
+
+严禁:
+1. 新增 master 没提到的事实 (公司 / 项目 / 数字 / 技术 / 工具)
+2. 改硬事实 (学校 / 学位 / 起止时间)
+3. 段落字符长度变化超过 ±20% (Word 段落会跳行重排)
+
+输出 JSON 数组, 每项:
 {{
-  "index": <int, 必填, 与输入对齐>,
-  "decision": "rewrite" | "keep" ,
-  "new_text": <str, decision=rewrite 时必填; keep 时填空字符串>,
-  "rationale": <str, 一句话, 引用 JD 第 X 条 / ATS 关键词 / profile 必备项>
+  "index": <段落编号, 跟输入对齐>,
+  "decision": "rewrite" | "keep",
+  "new_text": <rewrite 给改后段落; keep 给空串>,
+  "rationale": <一句话: 引用 JD 第几句 / 哪个关键词>
 }}
 
-**严禁** (ANY 违规这条段落必须 decision=keep):
-1. 新增 master_resume 没有的实习公司/项目/比赛/论文
-2. 修改可被验证的硬事实 (学校 / 学位 / 实习时间 / 数字结果)
-3. 夸大或缩小数字 (AUC 0.04 不能变 5%)
-4. 编造 master_resume 没提到的技术栈
-5. 修改段落字符长度 ±50% 之外 (会破坏 Word 排版)
-
-**鼓励** (有这些信号就 rewrite):
-- master_resume 写得太啰嗦 / 不贴 JD 关键词 → 改措辞贴 JD
-- 同一个项目可以强调不同侧面以匹配 JD → 调整侧重
-- 漏写但简历其他地方有证据的 ATS 关键词可以加进段落
-
-**重要**: new_text 字符数和 original 不能差太远 (Word 段落长度变化会跳行重排)。
-理想: ±20% 之内。
-
-只返回 JSON 数组。不要 markdown 代码块。
+只返回 JSON 数组, 不要 markdown 代码块包裹。
 """
 
 

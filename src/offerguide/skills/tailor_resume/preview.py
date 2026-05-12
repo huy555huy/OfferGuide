@@ -131,6 +131,17 @@ def soffice_to_pdf(
         return None
 
     expected_output = output_dir / (docx_path.stem + ".pdf")
+
+    # Cache: if the PDF already exists and is newer than the source docx,
+    # skip the soffice conversion (it's the slow part — 3-8s cold).
+    # Same docx + same libreoffice → bit-identical PDF, no point re-running.
+    if expected_output.exists():
+        try:
+            if expected_output.stat().st_mtime >= docx_path.stat().st_mtime:
+                return expected_output
+        except OSError:
+            pass  # If stat fails for any reason, fall through and re-convert.
+
     try:
         result = subprocess.run(
             [
