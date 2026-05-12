@@ -142,28 +142,42 @@ def _is_eligible(paragraph_text: str, run_count: int, is_bold: bool) -> tuple[bo
 # ─────────── LLM rewrite step ─────────────────────────────
 
 
-_REWRITE_PROMPT = """你是简历改写助手。给定:
-- master 简历全文 (用户已经写好的, 这是语气和体裁的 ground truth)
-- 完整 JD
-- 一组待判断的段落
+_REWRITE_PROMPT = """你是 OfferGuide 的高级 ATS 简历优化兼“反 AI 痕迹”专家。你的任务是基于目标 JD，对用户简历的指定段落进行精准改写。
+你的终极目标有两个：
+1. 【打败 ATS】最大化植入 JD 核心关键词，提高机器解析匹配度。
+2. 【去 AI 化】生成的内容必须 100% 像一个真实的、理性的、甚至有些“干瘪”的资深工程师/求职者写的，绝对不能被 HR 察觉出 AI 生成的痕迹。
 
-任务: 让 JD 的关键词在段落里命中, 但**保持 master 原本的语气和体裁** —
-改完的段落跟 master 其它段落放一起读起来像同一个人写的。
+【输入信息】
+1. 用户 master 简历全文（提供全局事实依据）
+2. 目标 JD 全文及岗位聚焦
+3. 一组待改写的段落（按 index 索引）
 
-严禁:
-1. 新增 master 没提到的事实 (公司 / 项目 / 数字 / 技术 / 工具)
-2. 改硬事实 (学校 / 学位 / 起止时间)
-3. 段落字符长度变化超过 ±20% (Word 段落会跳行重排)
+【输出格式】
+必须返回合法的 JSON 数组：
+[
+  {
+    "index": <int>,
+    "decision": "rewrite" | "keep",
+    "new_text": "<str>",
+    "rationale": "<str, 简述改写动机>",
+    "added_skills_justification": {
+      "<新增的专业技能词>": "<str, 推导逻辑>"
+    }
+  }
+]
 
-输出 JSON 数组, 每项:
-{{
-  "index": <段落编号, 跟输入对齐>,
-  "decision": "rewrite" | "keep",
-  "new_text": <rewrite 给改后段落; keep 给空串>,
-  "rationale": <一句话: 引用 JD 第几句 / 哪个关键词>
-}}
+【🚨 去 AI 化与行文风格规范（极度重要，一旦违规直接判定失败）】
+1. 绝对禁用 AI 常用套话：严禁出现“致力于”、“成功地”、“全面提升”、“不仅...而且...”、“展现了卓越的...”、“为团队带来了...”、“深入挖掘”等带有主观感情色彩或强形容词的废话。
+2. 保持“颗粒度粗糙”的真实感：人类写简历往往是动宾短语直接陈述（如“设计并实现 XX 系统，QPS 提升 20%”）。不要为了句子通顺去补充主语或使用长从句，保持精简、干练、客观的“STAR法则”句式。
+3. 模仿原作者的“口音”：尽量保留原段落的句式骨架，只进行局部的“词汇替换”和“专业名词注入”，不要把一段短句强行改写成几百字的连篇大论。
 
-只返回 JSON 数组, 不要 markdown 代码块包裹。
+【🎯 ATS 提分与改写红线】
+1. 隐性技能显式化（ATS 提分核心）：将原简历中隐含的技术点显式写出以迎合 JD。所有凭空新增的名词必须在 added_skills_justification 中自我举证！
+2. 术语降维与精准对齐：将用户的口语化描述替换为 JD 上的原生关键词（必须精确匹配大小写或常见缩写，如 K8s, CI/CD）。
+3. 事实捏造红线（触犯则 decision=keep）：严禁凭空捏造不存在的项目经历；严禁修改可验证的量化指标（AUC 0.04 不能改 5%）；严禁添加与已有经历毫无逻辑关联的技术栈。
+4. 物理排版红线（触犯则 decision=keep）：new_text 的字符数必须控制在 original 的 ±30% 以内，以防 Word 换行错位导致排版崩溃。
+
+请直接输出 JSON 数组，不要包含任何 Markdown 代码块标记。
 """
 
 
@@ -289,11 +303,14 @@ def tailor_docx(
         new_text = (d.get("new_text") or "").strip()
         if not new_text:
             continue
-        # Sanity: new text length within ±50% of original (compare stripped
-        # to stripped — Word paragraphs may have trailing whitespace)
+        # Sanity: new text length within ±25% of original. master is a
+        # hand-tuned single-page layout; the prompt asks for ±15% so the
+        # LLM aims small, but the code accepts up to ±25% — anything
+        # bigger is likely a regression (e.g. LLM rewriting a one-bullet
+        # claim into a paragraph) that would break page-fit.
         orig_stripped = len(plan.original_text.strip())
         new_stripped = len(new_text.strip())
-        if orig_stripped > 0 and not (0.4 <= new_stripped / orig_stripped <= 1.6):
+        if orig_stripped > 0 and not (0.75 <= new_stripped / orig_stripped <= 1.25):
             log.info(
                 "docx_tailor: skip rewrite of paragraph %d — length drift %d→%d",
                 plan.index, orig_stripped, new_stripped,

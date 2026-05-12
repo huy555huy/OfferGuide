@@ -3448,35 +3448,24 @@ def create_app(
             ),
         )
 
-    @app.get("/api/tailor/preview/{filename}", response_class=HTMLResponse)
+    @app.get("/api/tailor/preview/{filename}")
     def tailor_preview(filename: str) -> Any:
-        """Render a tailored .docx as in-browser HTML (W13.9).
+        """Legacy mammoth-HTML preview path — now redirects to libreoffice PDF.
 
-        Embedded as iframe in /tailor result page so user can see the
-        tailored resume before downloading. User can ⌘P → "Save as PDF"
-        to get a portable PDF (browser embeds fonts).
+        Mammoth flattens tab/space-based multi-column layout (master 用
+        \\t 实现的"学校 ... 时间"两栏) into a single line, losing the
+        resume's visual structure. The libreoffice PDF path renders
+        the docx 100% faithfully (multi-column, headshot, fonts all
+        preserved). Keep the URL alive for any saved links / bookmarks,
+        but route through the faithful renderer.
         """
-        from pathlib import Path as _Path
+        from fastapi.responses import RedirectResponse
 
         if "/" in filename or "\\" in filename or ".." in filename:
             raise HTTPException(400, "invalid filename")
         if not filename.endswith(".docx"):
             raise HTTPException(400, "not a docx")
-
-        path = _Path("data/tailored") / filename
-        if not path.exists():
-            raise HTTPException(404, "file not found")
-
-        try:
-            from ..skills.tailor_resume.preview import docx_to_html
-            html = docx_to_html(path)
-        except ImportError:
-            raise HTTPException(
-                500, "mammoth not installed — pip install mammoth"
-            ) from None
-        except Exception as e:
-            raise HTTPException(500, f"preview generation failed: {e}") from None
-        return HTMLResponse(content=html, media_type="text/html; charset=utf-8")
+        return RedirectResponse(url=f"/api/tailor/pdf/{filename}", status_code=307)
 
     @app.get("/api/tailor/pdf/{filename}")
     def tailor_pdf(filename: str) -> Any:

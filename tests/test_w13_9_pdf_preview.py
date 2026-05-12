@@ -135,18 +135,19 @@ class TestPreviewRoute:
         resp = client.get("/api/tailor/preview/file.txt")
         assert resp.status_code == 400
 
-    def test_preview_returns_html(self, app_client):
+    def test_preview_redirects_to_pdf(self, app_client):
+        """W21 follow-up: /api/tailor/preview/{name} now 307-redirects to
+        the LibreOffice PDF endpoint. The legacy mammoth-HTML path flattened
+        tab/space multi-column layout in master.docx and lost the resume
+        structure — see web.py:tailor_preview docstring."""
         client, tmp_path = app_client
         self._make_real_docx(tmp_path, "tailored_test.docx")
-        resp = client.get("/api/tailor/preview/tailored_test.docx")
-        assert resp.status_code == 200
-        # Content-Type is HTML
-        assert "text/html" in resp.headers["content-type"]
-        # Renders our content
-        assert "Real Tailored Resume" in resp.text
-        assert "Some content here" in resp.text
-        # Print CSS present
-        assert "@page" in resp.text
+        resp = client.get(
+            "/api/tailor/preview/tailored_test.docx",
+            follow_redirects=False,
+        )
+        assert resp.status_code == 307
+        assert resp.headers["location"] == "/api/tailor/pdf/tailored_test.docx"
 
 
 class TestPDFRoute:

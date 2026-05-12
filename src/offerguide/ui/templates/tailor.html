@@ -159,7 +159,7 @@
         <div style="display: grid; grid-template-columns: 1fr auto auto auto; gap: 0.5rem; align-items: center; padding: 0.625rem 0.75rem; background: var(--bg-elev); border: 1px solid var(--border-soft); border-radius: var(--radius-sm);">
             <span style="font-family: var(--font-mono); font-size: 0.825rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ t.filename }}">{{ t.filename }}</span>
             <span class="muted small">{{ t.size_kb }} KB</span>
-            <a href="/api/tailor/preview/{{ t.filename }}" target="_blank" class="btn ghost" style="padding: 0.25rem 0.625rem;">📄 预览</a>
+            <a href="/api/tailor/pdf/{{ t.filename }}" target="_blank" class="btn ghost" style="padding: 0.25rem 0.625rem;">📄 预览</a>
             <a href="/api/tailor/download/{{ t.filename }}" class="btn ghost" style="padding: 0.25rem 0.625rem;" download>⬇ docx</a>
         </div>
     {% endfor %}

@@ -148,12 +148,19 @@ class TestDocxTailorWithStub:
         if not master_path.exists():
             pytest.skip("user resume not present")
 
-        # Mock LLM to rewrite exactly one paragraph
+        # Mock LLM to rewrite exactly one paragraph.
+        # new_text length must stay within ±25% of master para 18 (166 chars)
+        # — the docx_tailor length guard rejects bigger drifts to keep Word
+        # page layout stable.
         decisions = [
             {
                 "index": 18,
                 "decision": "rewrite",
-                "new_text": "重新设计 Deep Research Agent: 用 LangGraph + DSPy + Pydantic v2 schema 实现 agent state machine, 闭环目标可验证",
+                "new_text": (
+                    "实现 Deep Research Agent: 基于 LangGraph + DSPy 搭 agent state machine, "
+                    "支持长期承载研究过程的运行时, 问题理解、动作执行、observation 累积、"
+                    "evidence 管理与报告交付形成可验证闭环, 接 Pydantic v2 schema 校验输出"
+                ),
                 "rationale": "对齐 JD 第 2 条 LangGraph 要求 + 加 ATS 关键词",
             }
         ]
@@ -182,7 +189,8 @@ class TestDocxTailorWithStub:
 
         # Verify para 18 was actually mutated
         assert "Deep Research Agent" in new.paragraphs[18].text
-        assert "LangGraph + DSPy + Pydantic" in new.paragraphs[18].text
+        assert "LangGraph + DSPy" in new.paragraphs[18].text
+        assert "Pydantic v2" in new.paragraphs[18].text
 
         # Verify untouched para keeps content
         assert orig.paragraphs[1].text == new.paragraphs[1].text  # TestUser
