@@ -17,6 +17,8 @@
        a row doesn't shift its content right (the previous CSS had no
        default border, so clicking made the layout jump — "点击的时候画面是怪的"). */
     .job-row {
+        position: relative;
+        display: block;
         padding: 0.625rem 0.875rem;
         border-bottom: 1px solid var(--border-soft);
         border-left: 3px solid transparent;
@@ -24,6 +26,18 @@
     }
     .job-row:hover { background: var(--bg-subtle); }
     .job-row.selected { background: var(--primary-soft); border-left-color: var(--primary); }
+    /* Belt-and-suspenders hide for the radio. Inline ``style="display:none"``
+       sometimes leaves a 1px sliver in Chrome inside a <label>, which renders
+       as a thin vertical line crossing every row at the same x. Positioning
+       absolutely off-flow with zero opacity + zero size hides it for real. */
+    .job-row > input[type="radio"] {
+        position: absolute;
+        left: -9999px;
+        width: 0;
+        height: 0;
+        opacity: 0;
+        pointer-events: none;
+    }
     /* Two-row grid keeps company + title on one line (truncated with ellipsis)
        and pushes meta (location · source · 字数) into its own column on the
        right, vertically centered. Previous flex layout had no min-width
@@ -74,7 +88,7 @@
             <div class="job-list" id="job-list">
                 {% for j in jobs %}
                 <label class="job-row {% if selected_job_id == j.id|string %}selected{% endif %}">
-                    <input type="radio" name="job_id" value="{{ j.id }}" style="display:none;"
+                    <input type="radio" name="job_id" value="{{ j.id }}"
                            {% if selected_job_id == j.id|string %}checked{% endif %}
                            onchange="document.querySelectorAll('.job-row').forEach(r=>r.classList.remove('selected'));this.parentElement.classList.add('selected')">
                     <div class="top">

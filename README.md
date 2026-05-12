@@ -118,84 +118,83 @@ OfferGuide 反方向走：**不点投递**，做真正提高 reply rate 的事�
 
 ---
 
-## Architecture
+## Architecture (W21 — agent-first)
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      Conversational Agent (LangGraph)               │
-│                                                                     │
-│   evolvable SKILLs (Hermes-style SKILL.md):                         │
-│     ★ score_match        — 校准过的匹配概率 + 多维 reasoning         │
-│     ★ analyze_gaps       — 关键词差距 + 微调建议（带 AI 检测风险）     │
-│     ★ prepare_interview  — 公司画像 + 题目预测 + 备战重点              │
-│     ★ deep_project_prep  — 项目级深挖：每个项目 5+ 题 + 答题骨架       │
-│                            + 弱点应对 + behavioral STAR (W8'')        │
-│     ★ compare_jobs       — 同公司多职位投哪个 + 投递限额优化 (W8''')   │
-│                                                                     │
-│   utility SKILLs:                                                   │
-│       update_status     — 应用状态机                                 │
-│       query_history     — 历史检索                                   │
-└─────────────────┬───────────────────────────────────────────────────┘
-                  │
-       ┌──────────┴──────────┐
-       │                     │
-┌──────▼─────┐       ┌───────▼────────┐
-│  Workers   │       │  Inbox + UI    │
-│            │       │  (HITL queue)  │
-│ Scout:     │       │                │
-│  · 牛客    │       │ FastAPI + HTMX │
-│  · 浏览器  │       │                │
-│    扩展    │       │ 飞书 webhook   │
-│            │       │ Telegram bot   │
-│ Tracker:   │       │                │
-│  · 状态机  │       │                │
-│  · 沉默检测│       │                │
-│  · 7/14/30d│       │                │
-└──────┬─────┘       └────────┬───────┘
-       │                      │
-       └──────────┬───────────┘
-                  │
-         ┌────────▼────────┐
-         │ Memory          │
-         │ (local-first)   │
-         │                 │
-         │ SQLite +        │
-         │ sqlite-vec      │
-         │                 │
-         │ application_    │
-         │   events log    │
-         │ skill_runs      │
-         │ evolution_log   │
-         │ inbox_items     │
-         └─────────┬───────┘
-                   │
-        ┌──────────▼─────────────┐
-        │ Self-evolution layer   │
-        │                        │
-        │ DSPy GEPA              │
-        │ (ICLR 2026 Oral)       │
-        │                        │
-        │ Golden trainset        │
-        │   + 3-axis metric:     │
-        │     · prob in band     │
-        │     · keyword recall   │
-        │     · anti-FP          │
-        │                        │
-        │ Writes evolved         │
-        │ SKILL.md, parent .bak  │
-        │ evolution_log row      │
-        └────────────────────────┘
+        ┌─────────────────────────────────────────────────────────────┐
+        │  harness — single master loop (W15)                         │
+        │  "dumb on purpose; coordinates Claude's decisions,          │
+        │   doesn't make them" — agency is in-context, not in code   │
+        │                                                             │
+        │  trigger (cron / event / user_input / scheduled)            │
+        │      → ContextManager (compaction, tool-result clearing)    │
+        │      → LLM with 17 main-agent tools                         │
+        │      → execute tools sequentially → loop until end_turn     │
+        │                                                             │
+        │  17 tools (instructions.md): memory · score_match ·         │
+        │  tailor_advice · notify_user · ask_user · interview_prep ·  │
+        │  reflect_outcome · fetch_jd · web_search · fetch_url ·      │
+        │  record_event · schedule_next_wake · discover_jobs ·        │
+        │  search_official_jobs · detect_evolution_candidates ·       │
+        │  evolve_skill · run_release_cycle                           │
+        └────────────────┬────────────────────────────────────────────┘
+                         │
+       ┌─────────────────┼─────────────────────────┐
+       │                 │                         │
+┌──────▼──────────┐ ┌────▼────────────┐  ┌────────▼──────────────────┐
+│ W21 SubAgents   │ │ evolvable SKILLs│  │ ambient discovery (W15.23)│
+│ (delegate_*)    │ │ (Hermes-style)  │  │ 4 parallel stages each    │
+│                 │ │                 │  │ cycle:                    │
+│ DiscoverySub —  │ │ score_match     │  │  · nowcoder sitemap       │
+│  9 verified     │ │ analyze_gaps    │  │  · 0voice GitHub repo     │
+│  fetchers       │ │ apply_assistant │  │    aggregator             │
+│  (nowcoder /    │ │ tailor_resume   │  │  · verified_official      │
+│   腾讯校招 + 社招│ │ prepare_interv. │  │    (腾讯/百度/字节)       │
+│   / 百度校招 +   │ │ mock_interview  │  │  · 实习僧                 │
+│   实习 / 字节 /  │ │ deep_project... │  │                           │
+│   0voice /      │ │ compare_jobs    │  │ Pre-ingest filter:         │
+│   实习僧)        │ │ apply_assistant │  │  scout._is_obviously_      │
+│                 │ │ ... 11 total    │  │  offtopic (蓝领/销售)      │
+│ EvaluationSub —  │ │                 │  └───────────────────────────┘
+│  6 SKILL        │ │                 │
+│  wrappers       │ │                 │
+└─────────────────┘ └────────┬────────┘
+                             │
+                ┌────────────▼──────────────────────┐
+                │  closed-loop evolution (W13.1)    │
+                │                                   │
+                │  signals (3 real-feedback only):  │
+                │   · user_thumbs   (UI 👍/👎)      │
+                │   · app_outcome   (offer/reject)  │
+                │   · follow_through (acted?)       │
+                │     — LLM self-critique retired,  │
+                │       it's reflexively biased     │
+                │                                   │
+                │  → fitness.compute_fitness        │
+                │  → detect_evolution_candidates    │
+                │     (agent calls as a tool)       │
+                │  → evolve_skill → shadow row      │
+                │  → run_release_cycle: shadow →    │
+                │    canary (traffic split) → live  │
+                │  → SkillRuntime.invoke routes per │
+                │    skill_variants table           │
+                └───────────────────────────────────┘
+
+Persistence (single SQLite file, sqlite-vec for embeddings):
+  jobs · applications · harness_runs · harness_events · harness_scheduled_wakes
+  skill_runs · skill_variants · evolution_signals · user_keywords · inbox_items
+  user_facts (mem0-style)
 ```
 
 ### Key design decisions
 
 | Decision | Choice | Why (with source) |
 |---|---|---|
-| Multi-agent? | **Single LangGraph agent + tools** | [Anthropic](https://claude.com/blog/building-multi-agent-systems-when-and-how-to-use-them): "start simple, multi-agent costs 3-10x tokens" |
-| Skill format | **Hermes SKILL.md** (design only, not runtime) | [Hermes Agent](https://github.com/nousresearch/hermes-agent) ICLR 2026 Oral, MIT |
-| Self-evolution | **DSPy GEPA** | [GEPA paper](https://arxiv.org/abs/2507.19457) ICLR 2026 Oral; cheap (~$2/run, "auto=light") |
+| Agent topology | **Single harness master loop** (W15) + **W21 SubAgent** for specialized domains | [Anthropic agent guide](https://www.anthropic.com/research/building-effective-agents): "single agent, agency in-context, no planner/executor/reflector chain"; sub-agent pattern from [Hermes Agent](https://github.com/nousresearch/hermes-agent) `delegate_tool.py` |
+| Skill format | **Hermes SKILL.md** (design + variant runtime) | [Hermes Agent](https://github.com/nousresearch/hermes-agent) ICLR 2026 Oral, MIT |
+| Self-evolution | **Closed-loop GEPA-style** (3 real-feedback signal channels, no LLM self-critique) | LLM-self-eval is reflexively biased; signals come from user 👍/👎 + app outcome + follow-through. [GEPA paper](https://arxiv.org/abs/2507.19457) is the algorithm reference |
 | Vector store | **sqlite-vec** (single-user) | local-first, zero ops; Qdrant overkill at our scale |
-| LLM | **DeepSeek V4** main + reflection | OpenAI-compat API, China-friendly |
+| LLM | **DeepSeek V4** | OpenAI-compat API, China-friendly; daily $5 budget cap |
 | Notifier | **飞书 webhook + Telegram bot** dual-rail | Server酱 5 条/天硬限制不够用 |
 | HITL | **Inbox queue (SQLite)** rather than `interrupt()` | Async-friendly, easier to reason about |
 | Boss 接入 | **浏览器扩展 (Manifest V3, click-to-extract)** | Boss ToS 不允许后台爬，扩展 inject 是合规的；**默认不自动发送** |
@@ -282,26 +281,24 @@ pip install -e ".[dev,ui,evolution,scheduling]"
 export DEEPSEEK_API_KEY=sk-...
 export OFFERGUIDE_RESUME_PDF=/path/to/your_resume.pdf
 
-# 3. quickstart — exercises every layer through W8 (offline by default)
-python examples/quickstart.py /path/to/your_resume.pdf
-# add --invoke-skills to actually call the LLM
-# add --invoke-agent to also build the LangGraph and run action='everything'
-
-# 4. start the conversational UI
+# 3. start the agent + UI (this is the main entrypoint)
 python -m offerguide.ui.web  # http://localhost:8000
+# spawns the FastAPI app, the ambient discovery background task (4 stages
+# fetching nowcoder / 0voice / verified官方 / 实习僧), and the cron-style
+# scheduler that pokes the harness every hour. Set OFFERGUIDE_NO_SCHEDULER=1
+# to disable the in-process scheduler (e.g. during dev / debug).
 
-# 5. workers (cron candidates)
+# 4. workers (independent CLIs)
 python -m offerguide.workers tracker run                   # 沉默扫描
 python -m offerguide.workers scout nowcoder --limit 50     # 牛客 sitemap
 
-# 6. evolve a SKILL (any of the 3 — adapters/ supports all)
-python -m offerguide.evolution evolve score_match --auto light
-python -m offerguide.evolution evolve analyze_gaps
-python -m offerguide.evolution evolve prepare_interview
+# 5. trigger the harness once (cron-equivalent, no UI needed)
+python -m offerguide.autonomous run-once
 
-# 7. before/after report
-python -m offerguide.evolution diff score_match
-python -m offerguide.evolution diff score_match --markdown > evolution.md
+# 6. evolve a SKILL on demand (normally the agent does this itself when
+#    it sees fitness < threshold; this is the manual override)
+#    UI equivalent: /evolution page → "立即进化" button
+curl -X POST http://localhost:8000/api/evolution/evolve/score_match
 ```
 
 ### Boss browser extension (v0.3 — 半自动求职)
@@ -328,41 +325,77 @@ python -m offerguide.evolution diff score_match --markdown > evolution.md
 
 ```
 src/offerguide/
-├── agent/                # LangGraph 单 agent + state
-├── application_events.py # 应用事件日志（W5'）
-├── state_machine.py      # event kind → applications.status
-├── config.py             # env-driven Settings
-├── evolution/
-│   ├── cli.py            # python -m offerguide.evolution {evolve,diff}
-│   ├── runner.py         # SKILL-agnostic GEPA 编排 (W8' refactor)
-│   ├── adapters/         # one module per evolvable SKILL:
-│   │   ├── _base.py      #   - generic MetricBreakdown, aggregate
-│   │   ├── score_match.py        # 10 examples + 3-axis metric
-│   │   ├── analyze_gaps.py       # 7 examples + 4-axis metric
-│   │   ├── prepare_interview.py  # 6 examples + 5-axis metric
-│   │   └── deep_project_prep.py  # 5 examples + 6-axis metric
-│   ├── golden_trainset.py # back-compat shim → adapters/score_match
-│   ├── metrics.py        # back-compat shim → adapters/_base + score_match
-│   ├── dspy_module.py    # SkillSpec → dspy.Signature
-│   └── diff.py           # 进化前后对比报告
-├── inbox.py              # HITL 队列
-├── interview_corpus.py   # 面经 RAG
-├── llm/                  # DeepSeek V4 OpenAI-compat httpx client
-├── memory/               # SQLite + sqlite-vec
-├── platforms/            # nowcoder / manual / boss_extension
-├── profile/              # PDF 简历解析
-├── skills/
-│   ├── score_match/        ★ evolvable
-│   ├── analyze_gaps/       ★ evolvable
-│   ├── prepare_interview/  ★ evolvable
-│   └── deep_project_prep/  ★ evolvable (项目级深度备战)
+├── harness/              # W15 master loop — single ReAct loop, file-based
+│   ├── loop.py           #   worldview, agency in-context
+│   ├── tools.py          #   17 main-agent tools (single registry via
+│   │                     #   _MAIN_TOOL_ENTRIES — schema + dispatch both
+│   │                     #   derive from one source)
+│   ├── instructions.md   #   agent's "soul prompt" (190 lines)
+│   ├── context.py        #   ContextManager: compaction + tool-result clearing
+│   ├── memory.py         #   MemoryStore: 6-command tool over .offerguide/worldview/*.md
+│   ├── triggers.py       #   cron / event / scheduled / user_input
+│   └── evaluate.py       #   fast paste-JD path (skips agent loop)
+├── agents/               # W21 SubAgent base + Discovery + Evaluation
+│   ├── base.py           #   bounded ReAct loop scoped to one tool group
+│   ├── discovery.py      #   delegate_discovery — 9 verified fetchers
+│   └── evaluation.py     #   delegate_evaluation — 6 SKILL wrappers
+├── tools/                # W21 ToolRegistry (singleton, self-registering)
+│   ├── registry.py
+│   ├── discovery.py      #   fetch_{nowcoder,tencent_*,baidu_*,bytedance,
+│   │                     #   zerovoice,shixiseng} + read_last_fetch_times
+│   └── evaluation.py     #   score_job / generate_apply_pack / tailor_resume /
+│                         #   find_resume_gaps / compare_jobs / read_job (shared)
+├── skills/               # 11 Hermes-style SKILL.md units (evolvable)
+│   ├── score_match/      ★ calibrated match probability
+│   ├── tailor_resume/    ★ JD-specific resume (anti-fabrication)
+│   ├── apply_assistant/  ★ application Q&A + intro script
+│   ├── prepare_interview/★ interview prep pack
+│   ├── analyze_gaps/     ★ resume gap analysis
+│   ├── mock_interview/   ★ multi-turn mock
+│   ├── deep_project_prep/★ per-project deep dive
+│   ├── compare_jobs/     ★ multi-job per-company comparison
+│   ├── post_interview_reflection/  ★
+│   ├── profile_resume_gap/         ★
+│   ├── successful_profile/         ★
+│   ├── write_cover_letter/         ★
+│   ├── _runtime.py       #   SkillRuntime: invoke + use_cache + variant routing
+│   ├── _loader.py        #   SKILL.md → SkillSpec
+│   └── _spec.py
+├── evolution/            # Closed-loop GEPA-style SKILL evolution (W13.1)
+│   ├── signals.py        #   record_user_thumbs / record_app_outcome /
+│   │                     #   record_follow_through (3 real-feedback channels)
+│   ├── fitness.py        #   compute_fitness / detect_evolution_candidates
+│   ├── evolve.py         #   evolve_skill (generate N variants as shadow rows)
+│   ├── registry.py       #   skill_variants lifecycle (shadow → canary → live)
+│   └── release.py        #   run_release_cycle (gray-release pipeline)
+├── workers/
+│   ├── ambient.py        #   W15.23 background discovery loop (4 stages)
+│   ├── scout.py          #   nowcoder ingest + offtopic title filter
+│   └── tracker.py        #   silence detection + status machine
+├── agentic/              # LLM-backed utility helpers (NOT agents — name
+│   ├── corpus_collector.py     # legacy; left for compat)
+│   ├── email_classifier_llm.py #   面经 search + ingest
+│   ├── company_sweep.py        #   procedural company sweep (was meta_agent.py)
+│   └── search.py               #   Tavily backend
+├── autonomous/           # APScheduler cron entry — single 'wake_agent' job
+│   └── scheduler.py      #   每小时 (08-22) poll pending triggers / heartbeat
 ├── ui/
-│   ├── web.py            # FastAPI + HTMX
+│   ├── web.py            # FastAPI + HTMX (~5300 lines, in-process scheduler)
 │   └── notify/           # 飞书 / Telegram / console
-└── workers/
-    ├── __main__.py       # python -m offerguide.workers {tracker,scout}
-    ├── scout.py          # 牛客 sitemap crawler + ingest
-    └── tracker.py        # 沉默检测 + 状态机 + 提醒
+├── user_keywords.py      # W21 user-managed include/exclude keyword store
+├── _markdown.py          # Internal markdown helper (was context_engine.py;
+│                         # renamed when we noticed the old name shopped the
+│                         # term "context engineering" but didn't actually do any)
+├── application_plan.py   # Per-platform application path enum (verified URLs)
+├── recruit_type.py       # Deterministic 暑期/日常/校招/社招 classifier
+├── inbox.py              # HITL queue
+├── interview_corpus.py   # 面经 RAG
+├── llm/                  # DeepSeek V4 OpenAI-compat httpx client + budget cap
+├── memory/               # SQLite + sqlite-vec
+├── platforms/            # nowcoder / manual / boss_extension / official_jobs /
+│                         #   zerovoice / shixiseng
+├── profile/              # PDF / docx resume parsing
+└── goals.py              # north-star goal + progress (heuristic on_track)
 
 browser_extension/        # Manifest V3 Chrome 扩展（Boss 页面提取）
 docs/
@@ -411,7 +444,42 @@ tests/                    # 329 tests, all green
        Run as daemon: `python -m offerguide.autonomous run`，或 cron 友好的
        `run-once <job>`。设计 borrowed from APScheduler / OpenHands / LangChain — 见
        [ATTRIBUTION.md](ATTRIBUTION.md)
-- [ ] **dogfood** — 4 周持续投递收集真实 reply rate 数据；跑首次 GEPA 真活；填 `[TBD]` 数字
+- [x] **W13** — central **AgentLoop** (model-in-driver-seat ReAct loop). Replaced
+       LangGraph hardcoded `requested_action` enum routing with one model that
+       reads state + decides which SKILL to call + self-critiques. *Retired in W21.*
+- [x] **W13.1** — closed-loop SKILL evolution: 3 real-feedback signal channels
+       (user_thumbs / app_outcome / follow_through) feeding `evolution_signals`
+       → `fitness.compute_fitness` → variant lifecycle (shadow → canary → live)
+       via `SkillRuntime` traffic split. Replaces W6 DSPy/GEPA framework.
+- [x] **W15** — **harness** rewrite (Anthropic-style single master loop): 400-line
+       `loop.py`, file-based worldview (`.offerguide/worldview/*.md`), 6-command
+       memory tool, file-based agency-in-context. `instructions.md` is the agent's
+       "soul prompt". Cron + chat endpoint both go through `harness.run_one`.
+- [x] **W15.23** — ambient discovery loop (4 parallel stages: nowcoder / 0voice
+       GitHub repo / verified官方 / shixiseng) + score_match on newly-ingested
+       jobs each cycle.
+- [x] **W17/W18** — 暑期/日常/校招/社招 deterministic classifier; multi-keyword
+       dispatch from resume; verified-official sources (腾讯/百度/字节);
+       `discovered_via` attribution surfaced on /recommended cards.
+- [x] **W19/W20** — 0voice GitHub aggregator (475 真岗 / 124 阿里 ATS URL);
+       shixiseng adapter (font-encoded list page workaround, real detail page);
+       host-based `application_plan` (8 specific paths per platform).
+- [x] **W21** — agent-first refactor: deleted W13 AgentLoop (2334 lines + 19
+       dead test files / 10k+ lines). harness is now the only main path.
+       **SubAgent** (`agents/`) wired to `discover_jobs`. **Self-evolution closed**:
+       3 evolution tools (`detect_evolution_candidates` / `evolve_skill` /
+       `run_release_cycle`) added to main agent so it can drive its own SKILL
+       evolution from real signals — previously only the /evolution UI could.
+       `_MAIN_TOOL_ENTRIES` collapses schema + dispatch into one source of truth.
+       `agent_runs` table deprecated; UI fully on `harness_runs`. Net diff:
+       +1899 / -14545 (single commit, history in `641e188`).
+- [x] **W21 UX follow-up** — apply-pack 改成 tailor_resume + apply_assistant 并行
+       bundle (主流程"先微调后投递" 修正); SkillRuntime `use_cache` (cold 30s →
+       cached 0.01s); user-managed keyword include/exclude UI; dead-URL report
+       button + filter; nowcoder ingest title blacklist (蓝领/服务业); /tailor
+       page layout-shift + long-company-name overflow fixes.
+- [ ] **dogfood** — 4 周持续投递收集真实 reply rate 数据；evolution closed-loop
+       真触发一次 evolve_skill；填 `[TBD]` 数字
 
 ### What's still TBD（需 dogfood 数据）
 
@@ -439,7 +507,7 @@ OfferGuide 是个混合系统。哪些组件**真用 LLM**，哪些只是**确�
 | `state_machine.py` (event → applications.status) | ✅ 规则 (合适) | 离散状态映射，规则更可读 |
 | `scout.py` (牛客 sitemap crawler) | ✅ 规则 (合适) | HTML 解析 + httpx，crawler 本来就是 reactive |
 | Boss 浏览器扩展 JD 提取 | ✅ DOM selector | DOM extraction，规则合适 |
-| `evolution/` GEPA SKILL prompt 进化 | ✅ DSPy GEPA + DeepSeek 反思 LM | meta-evolution layer |
+| `evolution/` closed-loop SKILL prompt 进化 (W13.1) | ✅ DeepSeek (variant generation) + 3 real-signal channels | self-evolution layer; no LLM self-critique (W20.4 retired — reflexively biased) |
 
 **还没做但应该做**（W9 候选）：
 - Boss 扩展加事件抓取（已查看 / 站内信 → 自动 record events）
@@ -448,5 +516,7 @@ OfferGuide 是个混合系统。哪些组件**真用 LLM**，哪些只是**确�
 
 ## License
 
-MIT. See [ATTRIBUTION.md](ATTRIBUTION.md) — OfferGuide 借鉴 Hermes Agent 的 SKILL.md 设计、
-使用 DSPy GEPA 进化算法，均 MIT。
+MIT. See [ATTRIBUTION.md](ATTRIBUTION.md) — OfferGuide 借鉴 Hermes Agent 的 SKILL.md
+设计 + `delegate_tool.py` sub-agent pattern (MIT); GEPA-style closed-loop evolution
+inspired by the [GEPA paper](https://arxiv.org/abs/2507.19457) (algorithm reference
+only — OfferGuide implements its own closed loop, no DSPy/GEPA framework dep).

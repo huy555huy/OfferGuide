@@ -200,4 +200,32 @@ agent[全自动找岗位, 多源] → /recommended[排好序] → 用户挑 →
 - ✅ /recommended diversity bar (大厂 vs 中小厂分桶)
 - ✅ W19 SKILL invoke DRY helper (skill_view.py 收掉 4 view 重复 boilerplate)
 
-每次 commit 前对照这两条清单, **别假装解决了再加新功能**.
+已交付 (W21 agent-first refactor + UX 收尾, 2026-05-12):
+- ✅ 删 W13 AgentLoop (2334 行 monolith), harness 是唯一主路径 (web UI + cron)
+- ✅ W21 SubAgent (DiscoverySubAgent / EvaluationSubAgent) 真接到主 agent —
+  不再"零 caller"; harness 的 discover_jobs tool 走 DiscoverySubAgent
+  (9 verified fetcher), 不再走老 JobFinderAgent + Tavily
+- ✅ 自进化闭环接通: 3 evolution tool (detect_evolution_candidates /
+  evolve_skill / run_release_cycle) 加进主 agent 工具集 — agent 自己看
+  fitness 决定何时进化, 不再只能 UI 手动 promote
+- ✅ ToolRegistry 单 source of truth: _MAIN_TOOL_ENTRIES 统一注册 17 个
+  main-agent tool, ALL_TOOL_SCHEMAS + dispatch 都从这一处派生
+- ✅ apply_pack 主流程修正: /jobs/{id}/apply-pack 先 tailor_resume + 后
+  apply_assistant 并行 (asyncio.gather), 顶部明写"① 简历 → ② 话术 → ③ 投递"
+- ✅ SkillRuntime use_cache: view endpoint 默认 cache, apply-pack 第二次
+  visit 从 30s+ 降到 0.01s
+- ✅ 用户自定义 keyword UI: user_keywords 表 + 3 endpoint + /recommended
+  panel (include 加权 20 > 默认 10, exclude 立即从列表隐藏)
+- ✅ dead-url 处理: /api/jobs/{id}/report-dead + 卡片 "⚠ 失效" 按钮 +
+  /recommended SQL filter dead
+- ✅ nowcoder ingest title 黑名单 (蓝领/服务业/电话销售) — title-only 匹配
+  避免 false-positive 误伤 IT 岗
+- ✅ context_engine.py 死亡 (cargo cult markdown formatter), agent_runs 表
+  deprecated (UI 全切 harness_runs), agentic/meta_agent.py 重命名 company_sweep
+- ✅ 概念正名: agents/__init__ 写"despite the name, these are NOT agents"
+  (corpus_collector / search / email_classifier_llm 是 util, 不是 agent)
+- ✅ tailor.html layout: minmax(0,1fr) + ellipsis 修长公司名撑爆 column,
+  border-left transparent default 修点击 layout shift, radio absolute hide
+  修 1px vertical sliver
+
+每次 commit 前对照这三条清单, **别假装解决了再加新功能**.
