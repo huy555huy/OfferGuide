@@ -25,11 +25,69 @@ from ..platforms import RawJob, content_hash, nowcoder
 log = logging.getLogger(__name__)
 
 
+# ── Off-topic filter ──────────────────────────────────────────────────
+#
+# nowcoder's sitemap is mixed-industry — alongside the AI / 数据 / 软件 jobs
+# our user actually wants, it carries 制造业 / 餐饮 / 服务业 / 销售 etc.
+# (real example from dogfood: a 兰州 玻尿酸装盒 普工岗 surfaced as a
+# top-of-feed "未评分" card and made the recommended list look broken).
+#
+# This is a coarse blacklist, NOT a positive-match filter — we don't want
+# to reject "数据分析师 实习" just because it doesn't say "AI". Anything that
+# survives lands in jobs/ and score_match decides if it's a good fit per
+# the user's CV. We only intercept the obvious factory / service-industry
+# noise that has zero chance of fitting any tech-graduate profile.
+#
+# Each token below is matched as a substring in title + raw_text. If ANY
+# match, the row is rejected at ingest time.
+_OBVIOUS_OFFTOPIC_TOKENS: tuple[str, ...] = (
+    # Factory / 蓝领
+    "坐岗", "长白班", "普工", "厂工", "操作工", "装配工",
+    "流水线", "包吃住", "倒班", "夜班", "焊工", "钳工",
+    "电工", "车工", "贴标", "贴面膜", "包装工", "拣货",
+    "分拣员", "理货员",
+    # Service / 服务业
+    "保洁", "保安", "门卫", "收银员", "服务员", "迎宾",
+    "传菜", "厨师", "学徒", "送餐员", "外卖员", "骑手",
+    "配送员", "快递员", "司机", "代驾", "美容", "美甲",
+    "理发", "按摩", "足疗", "客房", "导购", "促销员",
+    # Sales / 中介 / 直播
+    "电销", "电话销售", "房产中介", "保险代理", "贷款专员",
+    "信用卡专员", "微商", "直播带货", "网红主播",
+    # Misc obvious-mismatch
+    "幼师", "小学老师", "瑜伽教练", "健身教练",
+)
+
+
+def _is_obviously_offtopic(rj: RawJob) -> tuple[bool, str]:
+    """Coarse pre-ingest filter for clearly mismatched jobs.
+
+    Returns ``(reject, matched_token)``. matched_token is empty when not
+    rejecting.
+
+    **Title-only match** is intentional: factory / service / 销售 keywords
+    naturally appear in the *title* of those jobs ("坐岗长白班", "电话销售").
+    A previous version matched raw_text too and false-positive'd real
+    targets ("云游戏-Agent应用工程师" was rejected because its JD body
+    mentioned 流水线 in passing). The job's title is the cleaner signal.
+    """
+    title = rj.title or ""
+    for tok in _OBVIOUS_OFFTOPIC_TOKENS:
+        if tok in title:
+            return True, tok
+    return False, ""
+
+
 def ingest(store: Store, rj: RawJob) -> tuple[bool, int]:
     """Insert one job. Returns (was_new, job_id).
 
     Idempotent: re-ingesting an identical RawJob is a no-op (returns the
     existing row's id and `was_new=False`).
+
+    Pre-ingest filter (W21 follow-up): rows obviously not for a tech-graduate
+    user (factory / service / 销售 / etc.) are rejected before they pollute
+    the recommendations feed. ``(False, 0)`` is returned in that case so
+    callers can count rejections without raising.
 
     `rj.extras` is persisted into the structured `jobs.extras_json` column —
     NOT concatenated into `raw_text`. This is the W5' fix: previously the
@@ -40,6 +98,15 @@ def ingest(store: Store, rj: RawJob) -> tuple[bool, int]:
     canonical text only, so two scrapes with identical JD content but
     different extras still dedup correctly.
     """
+    reject, matched = _is_obviously_offtopic(rj)
+    if reject:
+        log.info(
+            "scout.ingest: rejected offtopic job (matched=%r) "
+            "source=%s url=%s title=%r",
+            matched, rj.source, rj.url, (rj.title or "")[:60],
+        )
+        return False, 0
+
     h = content_hash(rj)
     extras_payload = json.dumps(rj.extras or {}, ensure_ascii=False)
 

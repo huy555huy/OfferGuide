@@ -424,17 +424,12 @@ CREATE TABLE IF NOT EXISTS skill_variants (
 CREATE INDEX IF NOT EXISTS idx_variants_skill_status ON skill_variants(skill_name, status);
 CREATE INDEX IF NOT EXISTS idx_variants_status       ON skill_variants(status);
 
--- ``agent_runs`` records each W13 central-agent-loop invocation.
--- This table is the trajectory log: every "thinking → tool_call →
--- tool_result → critique → final" emit ends up as one event in
--- ``trajectory_json``. Critic scores the trajectory (not just the
--- final answer) so GEPA can later evolve the loop's system prompt
--- using trajectory quality as fitness.
---
--- A row exists from the moment the loop is started (status='running')
--- so a crashed agent leaves an audit trail. status flips to 'ok'/'error'
--- on completion. trigger_kind tells us who woke the agent: 'cron' /
--- 'user_button' / 'event_arrival' / 'manual_test'.
+-- ``agent_runs`` — DEPRECATED. W13 central-agent-loop run log. The W21
+-- refactor retired AgentLoop in favor of the harness (see ``harness_runs``
+-- in ``harness/_schema.py``). This table is kept ONLY so historical data
+-- from pre-W21 installs is still readable; no code writes new rows here.
+-- The UI reads exclusively from harness_runs. New deployments should treat
+-- this table as inert.
 CREATE TABLE IF NOT EXISTS agent_runs (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     trigger_kind       TEXT NOT NULL,

@@ -27,37 +27,64 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .._markdown import MarkdownBlock, render_block, render_markdown_document
 from ..llm import LLMClient, LLMError
 from .memory import MemoryStore
 
 log = logging.getLogger(__name__)
 
 
-# Anthropic's published triggers. Tuned for OpenAI-compat (DeepSeek ~64K
-# context) — we use lower thresholds because total context budget is
-# smaller than Claude's.
-#
-# Q4 (W15.13 review answer): 40K → 30K. Realistic worst case at 8 iter:
-# system prompt 3K + 5 tool results × 6K = 33K alone. Old 40K trigger
-# left only 24K for the next call's output + new content → too tight,
-# would hit DeepSeek's 64K hard limit and crash with context_length_exceeded.
-# 30K trigger leaves comfortable headroom.
-COMPACTION_TRIGGER_TOKENS = 30_000
+@dataclass(frozen=True, slots=True)
+class ContextPolicy:
+    """Thresholds for the compaction / tool-result-clearing loops."""
+
+    compaction_trigger_tokens: int = 30_000
+    clear_tool_results_trigger_tokens: int = 12_000
+    keep_recent_tool_results: int = 4
+    keep_recent_messages_after_compact: int = 6
+
+
+DEFAULT_CONTEXT_POLICY = ContextPolicy()
+
+COMPACTION_TRIGGER_TOKENS = DEFAULT_CONTEXT_POLICY.compaction_trigger_tokens
 """Above this estimated input_tokens, run compaction (model summarizes
 older messages). Tuned for DeepSeek's ~64K window."""
 
-CLEAR_TOOL_RESULTS_TRIGGER_TOKENS = 12_000
+CLEAR_TOOL_RESULTS_TRIGGER_TOKENS = (
+    DEFAULT_CONTEXT_POLICY.clear_tool_results_trigger_tokens
+)
 """Above this, replace old tool output blocks with placeholders.
-Cheaper than compaction (no LLM call) so tries this first.
-Q4: 15K → 12K to keep clearing well below compaction threshold (30K)
-so the cheap path runs FIRST and may obviate compaction."""
+Cheaper than compaction (no LLM call) so tries this first. Below the
+compaction threshold so the cheap path runs FIRST and may obviate compaction."""
 
-KEEP_RECENT_TOOL_RESULTS = 4
+KEEP_RECENT_TOOL_RESULTS = DEFAULT_CONTEXT_POLICY.keep_recent_tool_results
 """How many most-recent tool results to keep after clearing."""
 
-KEEP_RECENT_MESSAGES_AFTER_COMPACT = 6
+KEEP_RECENT_MESSAGES_AFTER_COMPACT = (
+    DEFAULT_CONTEXT_POLICY.keep_recent_messages_after_compact
+)
 """After compaction, keep N most-recent messages alongside the summary
 (to preserve immediate working context)."""
+
+
+EVIDENCE_FIRST_POLICY = render_markdown_document(
+    MarkdownBlock(
+        heading="证据优先",
+        lines=(
+            "所有全局判断先看证据，再做推断。",
+            "不能把推理伪装成事实。",
+            "把事实、推断、未知分开；证据不够就继续查、问用户，或保持 unknown。",
+            "不要把时间、沉默、低活跃度直接解释成用户状态或意图。",
+        ),
+    ),
+    MarkdownBlock(
+        heading="未知优先",
+        lines=(
+            "会影响全局策略的决定必须有证据链。",
+            "假设只能作为假设，不能驱动批量投递、改目标、强推通知等动作。",
+        ),
+    ),
+)
 
 
 # Compaction prompt — mirror Anthropic's published default.
@@ -90,10 +117,16 @@ class SystemFacts:
     calendar_phase: str = ""
 
     def render(self) -> str:
-        return (
-            f"# 系统事实 (每次 wake 注入)\n"
-            f"- 今天: {self.today.isoformat()} ({_weekday_zh(self.today)})\n"
-            f"- 校招阶段: {self.calendar_phase or _infer_phase(self.today)}\n"
+        return self.to_block().render()
+
+    def to_block(self) -> MarkdownBlock:
+        """Return the facts as a reusable markdown block."""
+        return render_block(
+            "系统事实 (每次 wake 注入)",
+            lines=(
+                f"- 今天: {self.today.isoformat()} ({_weekday_zh(self.today)})",
+                f"- 校招阶段: {self.calendar_phase or _infer_phase(self.today)}",
+            ),
         )
 
 
@@ -119,6 +152,7 @@ class ContextManager:
 
     llm: LLMClient
     memory: MemoryStore
+    policy: ContextPolicy = field(default_factory=ContextPolicy)
     last_prompt_tokens: int = 0
     """Updated after each LLM response. Best estimate of next call's
     input_tokens (which equals previous input_tokens + new content)."""
@@ -127,26 +161,37 @@ class ContextManager:
         self, *, system_facts: SystemFacts | None = None,
     ) -> str:
         """Assemble the system message: instructions + facts + MEMORY.md."""
-        parts = [load_instructions()]
+        blocks: list[MarkdownBlock | str] = [
+            EVIDENCE_FIRST_POLICY,
+            load_instructions(),
+        ]
         facts = system_facts or SystemFacts()
-        parts.append(facts.render())
+        blocks.append(facts.to_block())
 
         memory_dump = self.memory.auto_load_text(max_lines=200)
         if memory_dump.strip():
-            parts.append(
-                f"# 你脑子里的当前状态 (worldview/MEMORY.md 前 200 行)\n\n"
-                f"{memory_dump}\n\n"
-                "---\n"
-                "想看 worldview 其它文件 → 调 memory(command='view', path='...').\n"
-                "想更新 → memory(command='str_replace' / 'insert' / 'create')."
+            blocks.append(
+                render_block(
+                    "你脑子里的当前状态 (worldview/MEMORY.md 前 200 行)",
+                    body=memory_dump,
+                    lines=(
+                        "---",
+                        "想看 worldview 其它文件 → 调 memory(command='view', path='...').",
+                        "想更新 → memory(command='str_replace' / 'insert' / 'create').",
+                    ),
+                )
             )
         else:
-            parts.append(
-                "# 你的 worldview 是空的\n\n"
-                "这是你第一次 wake (或者 .offerguide/worldview/ 被清过). "
-                "应该先 ask_user 拿基础信息 (cv / 偏好 / 雷区), 写进 candidate.md."
+            blocks.append(
+                render_block(
+                    "你的 worldview 是空的",
+                    body=(
+                        "这是你第一次 wake (或者 .offerguide/worldview/ 被清过). "
+                        "应该先 ask_user 拿基础信息 (cv / 偏好 / 雷区), 写进 candidate.md."
+                    ),
+                )
             )
-        return "\n\n".join(parts)
+        return render_markdown_document(*blocks)
 
     def estimate_input_tokens(
         self, messages: list[dict[str, Any]],
@@ -178,18 +223,18 @@ class ContextManager:
         content of role='tool' messages get replaced.
         """
         est = self.estimate_input_tokens(messages)
-        if est < CLEAR_TOOL_RESULTS_TRIGGER_TOKENS:
+        if est < self.policy.clear_tool_results_trigger_tokens:
             return messages, 0
 
         # Find indices of all tool result messages
         tool_indices = [
             i for i, m in enumerate(messages) if m.get("role") == "tool"
         ]
-        if len(tool_indices) <= KEEP_RECENT_TOOL_RESULTS:
+        if len(tool_indices) <= self.policy.keep_recent_tool_results:
             return messages, 0
 
         # Keep the last N; clear the rest
-        keep_from = tool_indices[-KEEP_RECENT_TOOL_RESULTS]
+        keep_from = tool_indices[-self.policy.keep_recent_tool_results]
         cleared = 0
         new_messages: list[dict[str, Any]] = []
         for i, m in enumerate(messages):
@@ -209,7 +254,7 @@ class ContextManager:
                 new_messages.append(m)
         log.info(
             "context: cleared %d old tool results (est_tokens %d > %d trigger)",
-            cleared, est, CLEAR_TOOL_RESULTS_TRIGGER_TOKENS,
+            cleared, est, self.policy.clear_tool_results_trigger_tokens,
         )
         return new_messages, cleared
 
@@ -224,7 +269,7 @@ class ContextManager:
         index 0, plus K most-recent messages at the tail.
         """
         est = self.estimate_input_tokens(messages)
-        if est < COMPACTION_TRIGGER_TOKENS:
+        if est < self.policy.compaction_trigger_tokens:
             return messages, False
 
         if len(messages) < 6:
@@ -233,8 +278,8 @@ class ContextManager:
 
         # System at index 0; compact middle; keep last K
         system_msg = messages[0]
-        tail = messages[-KEEP_RECENT_MESSAGES_AFTER_COMPACT:]
-        middle = messages[1:-KEEP_RECENT_MESSAGES_AFTER_COMPACT]
+        tail = messages[-self.policy.keep_recent_messages_after_compact:]
+        middle = messages[1:-self.policy.keep_recent_messages_after_compact]
         if not middle:
             return messages, False
 
@@ -277,8 +322,8 @@ class ContextManager:
         log.info(
             "context: compacted %d middle messages (est_tokens %d > %d trigger) "
             "→ kept system + summary + last %d",
-            len(middle), est, COMPACTION_TRIGGER_TOKENS,
-            KEEP_RECENT_MESSAGES_AFTER_COMPACT,
+            len(middle), est, self.policy.compaction_trigger_tokens,
+            self.policy.keep_recent_messages_after_compact,
         )
         # Reset anchor since the conversation is now smaller
         self.last_prompt_tokens = 0

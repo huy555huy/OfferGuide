@@ -135,11 +135,9 @@
             {% endif %}
             {% if g.target_metric %}<span>· 指标: {{ g.target_metric }}</span>{% endif %}
             <span style="margin-left: auto;">
-                {% if p.is_on_track %}
-                <span class="pill low">on track</span>
-                {% else %}
-                <span class="pill medium">⚠ 节奏偏慢</span>
-                {% endif %}
+                <span class="pill {% if p.assessment_state == 'ok' %}low{% else %}medium{% endif %}">
+                    {{ p.assessment_label }}
+                </span>
             </span>
         </div>
         {% if g.description %}
@@ -157,7 +155,7 @@
 
         {% if p.apps_silent_14d > 0 %}
         <div class="small" style="color: var(--danger); margin-top: 0.5rem;">
-            ⚠ {{ p.apps_silent_14d }} 个申请 14+ 天没回 — 大概率挂了, 该清理或最后再 follow up 一次
+            ⚠ {{ p.apps_silent_14d }} 个申请 14+ 天未记录新进展 — 先核对邮箱/平台, 再决定是否 follow up 或清理
         </div>
         {% endif %}
 

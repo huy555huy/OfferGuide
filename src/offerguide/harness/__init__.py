@@ -122,6 +122,22 @@ def build_deps(
             _log.warning("harness.build_deps: skill discovery failed: %s", e)
             skills = []
 
+    # Ensure W21 ToolRegistry is populated. The main harness agent uses its
+    # own ALL_TOOL_SCHEMAS + dispatch table (defined in harness/tools.py)
+    # — that's the "main" capability set the user surfaces in
+    # instructions.md. The W21 registry is for sub-agents (Discovery /
+    # Evaluation): when discover_jobs spawns DiscoverySubAgent, the
+    # sub-agent reads its tool subset from the registry. Loading at
+    # build_deps time guarantees the registry is ready before any
+    # sub-agent fires.
+    try:
+        from ..agents.base import register_universal_tools
+        from ..tools import load_all_tools, registry as _tool_registry
+        load_all_tools()
+        register_universal_tools(_tool_registry)
+    except Exception as e:
+        _log.warning("harness.build_deps: tool registry load failed: %s", e)
+
     profile_text: str | None = None
     resume_path = getattr(settings, "resume_pdf", None)
     if resume_path:

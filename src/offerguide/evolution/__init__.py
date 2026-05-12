@@ -5,34 +5,35 @@ sound metric primitive but no real signal pipeline — the trainset was
 hand-stitched from skill_runs without quality labels, so evolution
 was theoretical not driven by lived experience.
 
-W13.1 architecture:
+Closed-loop architecture (post-W21 — harness drives, no LLM self-critique):
 
     skill_run executed
         │
-        ├─ AgentLoop critic LLM judges trajectory  ──┐
-        ├─ user 👍/👎 in /agent inbox                ├─→ evolution_signals
-        ├─ application reaches outcome (offer/rej)   │
-        └─ user did/didn't follow through            ┘
-                                                      ↓
-                                              fitness.compute_fitness
-                                                      ↓
-                                              fitness.detect_evolution_candidates
-                                                      ↓
-                                              meta_evolve_skill (a SKILL the agent calls)
-                                                      ↓
-                                              generates N variants
-                                                      ↓
-                                       runs each on recent real inputs
-                                                      ↓
-                                              registry.insert_shadow_variant
-                                                      ↓
-                                       gray-release: promote_to_canary
-                                                      ↓
-                                  SkillRuntime routes traffic per canary_traffic_pct
-                                                      ↓
-                                       fitness.compare_versions decides
-                                                      ↓
-                                       promote_to_live  /  fail_variant
+        ├─ user 👍/👎 in /agent inbox                ┐
+        ├─ application reaches outcome (offer/rej)   ├─→ evolution_signals
+        ├─ user did/didn't follow through            │   (3 real-feedback channels;
+        │                                            │   no LLM-self-critique — that
+        │                                            │   pattern was retired with W13
+        │                                            │   AgentLoop. A 'critic' slot
+        │                                            │   exists for future external
+        │                                            │   annotators, but isn't wired.)
+        ↓
+    fitness.compute_fitness  (aggregate signals into one score per skill_version)
+        ↓
+    The harness agent calls detect_evolution_candidates as a tool when it
+    suspects a SKILL is underperforming. If results say "ripe":
+        ↓
+    agent calls evolve_skill(name)  →  evolution.evolve.evolve_skill()
+        ↓
+    generates N variants, persisted as 'shadow' rows in skill_variants
+        ↓
+    agent (or cron, or user UI) calls run_release_cycle:
+      - shadow → canary  (small traffic split via SkillRuntime variant routing)
+      - canary signals ripen → fitness.compare_versions
+      - canary → live (winner) or fail_variant (loser)
+        ↓
+    SkillRuntime.invoke consults skill_variants per call → routes to live
+    (or canary slice). New SKILL invocations write fresh signals. Loop.
 
 Public API:
 

@@ -62,6 +62,7 @@ async def invoke_skill_for_view(
     runtime: SkillRuntime | None,
     skills: list[SkillSpec],
     store: Store,
+    use_cache: bool = True,
 ) -> SkillViewResult:
     """Validate config + invoke a SKILL for an HTML view. Returns either
     error message or parsed payload + cost/timing meta.
@@ -98,7 +99,9 @@ async def invoke_skill_for_view(
     import time as _time
     t0 = _time.monotonic()
     try:
-        sr = await _asyncio.to_thread(runtime.invoke, spec, inputs)
+        sr = await _asyncio.to_thread(
+            lambda: runtime.invoke(spec, inputs, use_cache=use_cache)
+        )
     except Exception as e:
         log.exception("skill_view: invoke %s failed: %s", skill_name, e)
         return SkillViewResult(error=f"调用 SKILL 失败: {e}")

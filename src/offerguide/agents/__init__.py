@@ -1,6 +1,6 @@
 """Sub-agents — domain-specialized ReAct loops the main agent delegates to.
 
-The main agent (in `offerguide.agent.loop`) keeps a small tool list. When
+The main agent (in `offerguide.harness.loop`) keeps a small tool list. When
 a task falls into a specialized domain (discovery / evaluation / outcome
 review), the main agent calls `delegate_*(goal)`, which spawns a sub-agent
 of the appropriate kind. The sub-agent has its own tool subset + system

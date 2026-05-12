@@ -190,27 +190,13 @@ async def _run_one_cycle(
         else:
             log.info("ambient discovery: %s done (%.1fs): %s", name, dur, payload)
 
-    # ── Stage 6: agent_search (separate — uses LLM, can't share rate limit) ──
-    if settings.deepseek_api_key:
-        t = _time.monotonic()
-        try:
-            search_result = await asyncio.to_thread(
-                _run_agent_search_blocking,
-                store=store,
-                settings=settings,
-                seed_keywords=[k.keyword for k in keywords[:3]],
-            )
-            log.info(
-                "ambient discovery: agent_search done (%.1fs): %s",
-                _time.monotonic() - t, search_result,
-            )
-        except Exception as e:
-            log.exception(
-                "ambient discovery: agent_search failed (%.1fs): %s",
-                _time.monotonic() - t, e,
-            )
-
-    # ── Stage 7: score newly-ingested jobs (parallel via ThreadPool) ──
+    # ── Stage 6: score newly-ingested jobs (parallel via ThreadPool) ──
+    # W21 cleanup: removed Stage 5 "agent_search" (JobFinderAgent + Tavily
+    # web_search). CLAUDE.md W19+ dogfood verified niche coverage now comes
+    # primarily from 0voice + shixiseng stages above; agent_search added
+    # 1-3 jobs/cycle at $0.005 each — diminishing returns vs. dedicated
+    # verified fetchers. DiscoverySubAgent (the harness-driven path) covers
+    # the same ground when the main agent explicitly wants discovery.
     if runtime is None or not user_profile_text or not skills:
         log.info("ambient discovery: skipping score (no runtime / no profile / no skills)")
         log.info(
@@ -249,22 +235,49 @@ _KW_CACHE_MAX_ENTRIES = 8  # 上限防泄漏 — 1 user 一般 1 entry, 多 user
 def _extract_cycle_keywords(*, store: Store, user_profile_text: str | None) -> list:
     """W18 — pull deterministic keywords from resume + active goal.
 
-    W20.2 — cache by (resume_hash, active_goal). DB read + regex 不重算.
+    W20.2 — cache by (resume_hash, active_goal, user_includes_sig). DB read +
+    regex 不重算. Cache key includes a hash of user-managed include keywords
+    so adding/removing a chip on /recommended invalidates the cache without
+    extra plumbing.
+
+    User include keywords are prepended with the highest weight — they
+    represent explicit intent and should out-rank vocab-derived matches.
     """
     import hashlib
-    from ..match_keywords import DEFAULT_KEYWORDS_PER_CYCLE, extract_keywords
+    from .. import user_keywords as _uk
+    from ..match_keywords import (
+        DEFAULT_KEYWORDS_PER_CYCLE,
+        KeywordHit,
+        extract_keywords,
+    )
+
     active = _load_active_north_star(store)
+    try:
+        user_inc, _user_exc = _uk.list_keywords(store)
+    except Exception as e:
+        log.debug("user_keywords load failed (treating as empty): %s", e)
+        user_inc = []
+
     resume_h = hashlib.sha1(
         (user_profile_text or "").encode("utf-8"),
     ).hexdigest()[:16]
-    cache_key = (resume_h, active or "")
+    user_inc_sig = "|".join(sorted(k.keyword for k in user_inc))
+    cache_key = (resume_h, active or "", user_inc_sig)
     if cache_key in _KW_CACHE:
         return _KW_CACHE[cache_key]
-    out = extract_keywords(
+
+    # Reserve slots for user-include keywords so they're guaranteed to ride.
+    user_hits = [
+        KeywordHit(keyword=k.keyword, matched_aliases=("(user_include)",), weight=20)
+        for k in user_inc
+    ]
+    auto_budget = max(0, DEFAULT_KEYWORDS_PER_CYCLE - len(user_hits))
+    auto = extract_keywords(
         user_profile_text, active_goal=active,
-        max_keywords=DEFAULT_KEYWORDS_PER_CYCLE,
-    )
-    # Bound cache size — drop oldest entry if at cap (FIFO is fine, no LRU needed)
+        max_keywords=auto_budget,
+    ) if auto_budget > 0 else []
+    out = user_hits + auto
+
     if len(_KW_CACHE) >= _KW_CACHE_MAX_ENTRIES:
         _KW_CACHE.pop(next(iter(_KW_CACHE)))
     _KW_CACHE[cache_key] = out
@@ -420,114 +433,6 @@ def _load_unscored_nowcoder_ids(store: Store, limit: int = 30) -> list[int]:
             (limit,),
         ).fetchall()
     return [int(r[0]) for r in rows]
-
-
-DEFAULT_AGENT_SEARCH_MAX_ITERATIONS = 8
-"""W20.2 — cap ambient JobFinderAgent iterations.
-
-Dogfood 2026-05-11 (docs/dogfood_2026-05-11/agent_search_seed_keywords.md):
-- Default 25 iter, agent ran 19 / 174s / $0.0078 / 41 jobs (40 大厂 + 1 niche)
-- Diminishing returns past iter ~5 — first 5 calls hit verified_official
-  and fill 30+ jobs cheap, later iters chase web search niche which mostly
-  fails (SPA pages can't be fetched server-side)
-- 0voice + shixiseng (W19+/W20) now cover niche better than agent web search
-- Ambient is recurring (every 6h) — cap should reflect "incremental" use,
-  not "first-time exhaustive"
-
-8 iter ≈ 60s ≈ $0.003 per cycle. 4 cycles/day = $0.012/day on agent_search,
-well under daily $5 cap and headroom for score_match's ~30 calls.
-"""
-
-
-def _run_agent_search_blocking(
-    *, store: Store, settings: Settings,
-    seed_keywords: list[str] | None = None,
-    max_iterations: int = DEFAULT_AGENT_SEARCH_MAX_ITERATIONS,
-) -> dict[str, Any]:
-    """Run the LLM-driven web search agent once and record a lightweight trail.
-
-    W18: ``seed_keywords`` (from user resume) are appended to the north_star
-    so the agent searches for niche-fitting middle-tier companies (smart AI
-    startups), not just generic 大厂 keywords.
-
-    W20.2: ``max_iterations`` defaults to 8 (was unbounded → 25 default in
-    JobFinderAgent). Saves ~110s + $0.005 per cycle vs. the 19-iter dogfood
-    baseline.
-    """
-    import os as _os
-
-    from ..agentic.job_finder_agent import JobFinderAgent
-    from ..agentic.search import build_default_search
-    from ..harness import _schema as _hs
-    from ..llm import BudgetExceeded, LLMClient, enforce_daily_budget
-
-    try:
-        enforce_daily_budget(store)
-    except BudgetExceeded as e:
-        return {"skipped": "budget_exceeded", "error": str(e)}
-
-    # Env override for users who want to tune
-    env_iter = _os.environ.get("OFFERGUIDE_AGENT_SEARCH_MAX_ITER")
-    if env_iter:
-        try:
-            max_iterations = max(1, min(50, int(env_iter)))
-        except ValueError:
-            pass
-
-    north_star = _load_active_north_star(store)
-    if seed_keywords:
-        # W18 — surface niche keywords to the agent so it doesn't only search
-        # 大厂. The agent's system prompt already says 'find AI 创业公司';
-        # giving it the user's resume keywords focuses what to search on.
-        north_star = (
-            f"{north_star}\n\n"
-            f"用户简历命中的 niche 关键词: {' / '.join(seed_keywords)}\n"
-            f"优先用这些 keyword 找匹配的 AI 创业公司 / 中小厂, 不只大厂."
-        )
-    llm = LLMClient(
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        default_model=settings.default_model,
-    )
-    search = build_default_search()
-    agent = JobFinderAgent(
-        store=store, llm=llm, search=search,
-        max_iterations=max_iterations,
-    )
-    try:
-        result = agent.run(north_star=north_star)
-    finally:
-        agent.close()
-        close_search = getattr(search, "close", None)
-        if callable(close_search):
-            close_search()
-        llm.close()
-
-    summary = {
-        "north_star": north_star,
-        "iterations": result.iterations,
-        "inserted": result.inserted,
-        "skipped_dup": result.skipped_dup,
-        "job_ids": result.new_job_ids[:10],
-        "queries": result.search_queries[:8],
-        "finish_reason": result.finish_reason[:200],
-        "cost_usd": round(result.total_cost_usd, 5),
-    }
-    try:
-        _hs.init_harness_schema(store)
-        import json
-        with store.connect() as conn:
-            conn.execute(
-                "INSERT INTO harness_events(kind, note, source) VALUES (?, ?, ?)",
-                (
-                    "agent_search_discovered",
-                    json.dumps(summary, ensure_ascii=False, default=str)[:2000],
-                    "ambient",
-                ),
-            )
-    except Exception:
-        log.debug("ambient discovery: failed to record search summary", exc_info=True)
-    return summary
 
 
 def _load_active_north_star(store: Store) -> str:

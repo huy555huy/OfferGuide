@@ -14,7 +14,6 @@ from __future__ import annotations
 import json as _json
 import logging
 import re as _re
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -24,6 +23,7 @@ import httpx
 from ..config import Settings
 from ..llm import LLMClient
 from ..memory import Store
+from ..tools.registry import registry as _registry
 from .memory import MEMORY_TOOL_SCHEMA, MemoryStore
 
 if TYPE_CHECKING:
@@ -80,7 +80,7 @@ class HarnessDeps:
 
     extra_cost_usd: float = 0.0
     """Sub-agent / external LLM cost sink (W15.12 Bug 5 fix). Tools that
-    drive their own LLM calls (e.g. ``discover_jobs`` → JobFinderAgent)
+    drive their own LLM calls (e.g. ``discover_jobs`` → DiscoverySubAgent)
     accumulate cost here so the master loop can include it in
     ``harness_runs.cost_usd``. Reset to 0 at the start of each run."""
 
@@ -101,7 +101,8 @@ _TOOL_DISCOVER_JOBS: dict[str, Any] = {
         "description": (
             "Actively find new JDs matching the user's criteria via web search. "
             "Drives a sub-agent (ReAct: web_search / fetch_url / extract). "
-            "Pass criteria from your worldview understanding of the user. "
+            "Pass criteria only from explicit evidence in worldview, active goals, "
+            "or the user's current request. Do not invent missing preferences. "
             "Use this to do the chore the user dreads — manually scrolling job boards."
         ),
         "parameters": {
@@ -113,7 +114,8 @@ _TOOL_DISCOVER_JOBS: dict[str, Any] = {
                         "Natural-language description of what to look for, "
                         "e.g. 'AI agent / LLM application 暑期实习, prefer "
                         "BAT-tier or AI-native startups, exclude pure research labs.' "
-                        "Pulled from your candidate.md understanding."
+                        "Must be grounded in candidate.md / MEMORY.md / active goals "
+                        "or current user text."
                     ),
                 },
             },
@@ -206,7 +208,9 @@ _TOOL_TAILOR_ADVICE: dict[str, Any] = {
         "description": (
             "Given a specific job, output targeted resume modification "
             "advice (NOT a rewrite — bullet-level suggestions only). "
-            "Call this proactively when you find a job worth applying to."
+            "Call proactively only when the job is actually identified and has "
+            "evidence of being worth applying to (score, explicit user interest, "
+            "or clear goal match)."
         ),
         "parameters": {
             "type": "object",
@@ -299,8 +303,8 @@ _TOOL_NOTIFY_USER: dict[str, Any] = {
             "Push a message to the user's home page (and notification "
             "channel if configured). Use for: high-match jobs found / "
             "silent followup reminders / deadline alerts / important "
-            "insights. **Be selective** — over-notification trains the "
-            "user to ignore you."
+            "insights. **Be selective** and cite the concrete evidence; "
+            "over-notification trains the user to ignore you."
         ),
         "parameters": {
             "type": "object",
@@ -361,9 +365,10 @@ _TOOL_SCHEDULE_NEXT_WAKE: dict[str, Any] = {
         "name": "schedule_next_wake",
         "description": (
             "Tell the harness when to wake you again. **Use this to keep "
-            "ownership** — e.g. after user marks 'applied X', call "
-            "schedule_next_wake(7d, 'check if X responded'). Cron heartbeat "
-            "is just fallback; agent-driven scheduling is the main path."
+            "ownership** when there is a concrete event to follow up — e.g. "
+            "after user marks 'applied X', call schedule_next_wake(7d, "
+            "'check whether the system has recorded a response from X'). "
+            "Do not schedule from a guessed user state."
         ),
         "parameters": {
             "type": "object",
@@ -421,26 +426,119 @@ _TOOL_FETCH_URL: dict[str, Any] = {
 }
 
 
-# Master registry — order matters for prompt clarity (related tools grouped).
-ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
+# ── Evolution tools — agent self-evolves its own SKILL prompts ──
+#
+# These close the GEPA-style self-evolution loop the user designed as the
+# project's core differentiator. The agent reads its own fitness scores,
+# detects SKILLs that are underperforming on real user signal (thumbs /
+# app outcome / follow-through), generates new prompt variants via
+# evolve_skill, and lets gray-release decide what wins. Without these
+# three tools the agent can't drive its own evolution — only the human
+# can, via the /evolution UI.
+
+_TOOL_DETECT_EVOLUTION_CANDIDATES: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "detect_evolution_candidates",
+        "description": (
+            "Find SKILLs whose current live version is underperforming on "
+            "real user signals (thumbs / app outcome / follow-through) and "
+            "is past cooldown — i.e. ripe for a new prompt variant. "
+            "Returns a list of {skill_name, current_version, fitness, "
+            "sample_count, reason}. Call this when you suspect the agent "
+            "is making low-quality outputs in some domain; the result tells "
+            "you which SKILL prompt to evolve."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+_TOOL_EVOLVE_SKILL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "evolve_skill",
+        "description": (
+            "Generate N candidate prompt variants for one SKILL, persisted "
+            "as 'shadow' rows. Variants are NOT live yet — gray-release "
+            "(run_release_cycle) promotes a winner after canary traffic. "
+            "Call this on a SKILL surfaced by detect_evolution_candidates. "
+            "Cost: ~$0.01 per call (one LLM-driven variant-generation pass)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill_name": {
+                    "type": "string",
+                    "description": "Exact SKILL name (e.g. 'score_match').",
+                },
+                "num_variants": {
+                    "type": "integer",
+                    "description": "How many variants to generate (1-5, default 3).",
+                },
+            },
+            "required": ["skill_name"],
+        },
+    },
+}
+
+_TOOL_RUN_RELEASE_CYCLE: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "run_release_cycle",
+        "description": (
+            "Advance the gray-release pipeline once: promote shadow→canary "
+            "for SKILLs with new variants, judge canary→live (or fail) "
+            "based on accumulated A/B signal. Idempotent — call after "
+            "evolve_skill or when you suspect canary signals have ripened."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, report actions but don't commit.",
+                },
+            },
+        },
+    },
+}
+
+
+# Master tool list — order matters for prompt clarity (related tools grouped).
+# The pair (_TOOL_SCHEMA, _exec_func) is the single source of truth: it's
+# registered into the global ToolRegistry as group="main" at module load
+# (via ``_register_main_tools`` at file end), and the LLM-facing list +
+# the dispatch path both come out of that one registration.
+_MAIN_TOOL_ENTRIES: list[tuple[dict[str, Any], str]] = [
     # Memory comes first — it's the agent's brain
-    MEMORY_TOOL_SCHEMA,
+    (MEMORY_TOOL_SCHEMA, "_exec_memory"),
     # Active (agent should proactively call)
-    _TOOL_SEARCH_OFFICIAL_JOBS,
-    _TOOL_DISCOVER_JOBS,
-    _TOOL_TAILOR_ADVICE,
-    _TOOL_NOTIFY_USER,
+    (_TOOL_SEARCH_OFFICIAL_JOBS, "_exec_search_official_jobs"),
+    (_TOOL_DISCOVER_JOBS, "_exec_discover_jobs"),
+    (_TOOL_TAILOR_ADVICE, "_exec_tailor_advice"),
+    (_TOOL_NOTIFY_USER, "_exec_notify_user"),
     # Reactive (agent calls when user brings it)
-    _TOOL_FETCH_JD,
-    _TOOL_INTERVIEW_PREP,
-    _TOOL_REFLECT_OUTCOME,
+    (_TOOL_FETCH_JD, "_exec_fetch_jd"),
+    (_TOOL_INTERVIEW_PREP, "_exec_interview_prep"),
+    (_TOOL_REFLECT_OUTCOME, "_exec_reflect_outcome"),
     # Universal capabilities
-    _TOOL_SCORE_MATCH,
-    _TOOL_RECORD_EVENT,
-    _TOOL_ASK_USER,
-    _TOOL_SCHEDULE_NEXT_WAKE,
-    _TOOL_WEB_SEARCH,
-    _TOOL_FETCH_URL,
+    (_TOOL_SCORE_MATCH, "_exec_score_match"),
+    (_TOOL_RECORD_EVENT, "_exec_record_event"),
+    (_TOOL_ASK_USER, "_exec_ask_user"),
+    (_TOOL_SCHEDULE_NEXT_WAKE, "_exec_schedule_next_wake"),
+    (_TOOL_WEB_SEARCH, "_exec_web_search"),
+    (_TOOL_FETCH_URL, "_exec_fetch_url"),
+    # Self-evolution — agent drives SKILL improvement from real signals
+    (_TOOL_DETECT_EVOLUTION_CANDIDATES, "_exec_detect_evolution_candidates"),
+    (_TOOL_EVOLVE_SKILL, "_exec_evolve_skill"),
+    (_TOOL_RUN_RELEASE_CYCLE, "_exec_run_release_cycle"),
+]
+
+
+# Preserve order for the LLM prompt — registry sorts by name, but the prompt
+# benefits from grouping (memory first, evolution last, etc).
+ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    schema for schema, _ in _MAIN_TOOL_ENTRIES
 ]
 
 
@@ -448,16 +546,19 @@ ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 
 def dispatch(name: str, args: dict[str, Any], deps: HarnessDeps) -> str:
-    """Route a tool call to its implementation. Returns string for LLM.
+    """Route a tool call through the global ToolRegistry.
 
-    Errors are returned as 'ERROR: ...' strings rather than raised, so
-    the model can read the error and self-correct.
+    Handlers for the main agent's tools are registered by
+    ``_register_main_tools`` at module load. This wrapper:
+    1. Returns ``'ERROR: unknown tool ...'`` for missing tools (the harness
+       loop matches on the literal "ERROR:" prefix to surface to the model)
+    2. Injects ``deps`` as the registry runtime kwarg
+    3. Translates uncaught handler exceptions into the same ERROR prefix
     """
-    handler = _DISPATCH_TABLE.get(name)
-    if handler is None:
+    if _registry.get(name) is None:
         return f"ERROR: unknown tool {name!r}"
     try:
-        return handler(args, deps)
+        return _registry.dispatch(name, args, deps=deps)
     except Exception as e:
         log.exception("tool %s crashed: args=%s", name, args)
         return f"ERROR: {type(e).__name__}: {e}"
@@ -473,31 +574,36 @@ def _exec_memory(args: dict[str, Any], deps: HarnessDeps) -> str:
 def _exec_discover_jobs(args: dict[str, Any], deps: HarnessDeps) -> str:
     if deps.llm is None:
         return "ERROR: discover_jobs requires LLM (DEEPSEEK_API_KEY not set)"
-    if deps.search is None:
-        return "ERROR: discover_jobs requires SearchBackend (TAVILY_API_KEY not set)"
     criteria = (args.get("criteria") or "").strip()
     if not criteria:
         return "ERROR: discover_jobs requires criteria (one sentence is fine)"
-    from ..agentic.job_finder_agent import JobFinderAgent
-    agent = JobFinderAgent(store=deps.store, llm=deps.llm, search=deps.search)
-    try:
-        result = agent.run(north_star=criteria)
-    finally:
-        agent.close()
-    # Bug 5 fix: propagate sub-agent cost to harness telemetry. Without this,
-    # 5 discover_jobs calls × ~$0.15 = $0.75 invisible in harness_runs.
-    sub_cost = float(getattr(result, "total_cost_usd", 0.0) or 0.0)
-    deps.extra_cost_usd += sub_cost
-    summary = (
-        f"OK discover_jobs done in {result.iterations} iters (sub-agent cost ${sub_cost:.4f}). "
-        f"Inserted {result.inserted} new JDs (job_ids: {result.new_job_ids[:8]}). "
-        f"Skipped {result.skipped_dup} dups. Finish: {result.finish_reason}"
+
+    from ..agents.base import register_universal_tools
+    from ..agents.discovery import DiscoverySubAgent
+    from ..tools import load_all_tools, registry
+
+    load_all_tools()
+    register_universal_tools(registry)
+
+    sub = DiscoverySubAgent(
+        llm=deps.llm,
+        registry=registry,
+        store=deps.store,
+        settings=deps.settings,
+        runtime=deps.runtime,
+        skills=deps.skills,
+        user_profile_text=deps.user_profile_text,
     )
-    if result.notes:
-        # Last few decision steps for the agent to learn from
-        summary += "\nLast 3 sub-agent steps:\n" + "\n".join(
-            f"  · {n[:140]}" for n in result.notes[-3:]
-        )
+    result = sub.run(goal=criteria)
+
+    deps.extra_cost_usd += float(result.cost_usd or 0.0)
+    summary = (
+        f"OK discover_jobs done in {result.iterations} iters "
+        f"({result.tool_calls_made} tool calls, ${result.cost_usd:.4f}). "
+        f"Sub-agent summary: {result.final_answer[:600]}"
+    )
+    if result.error:
+        summary += f"\nNote: sub-agent error: {result.error}"
     return summary
 
 
@@ -922,22 +1028,87 @@ def _exec_fetch_url(args: dict[str, Any], deps: HarnessDeps) -> str:
 # ── Dispatch table ────────────────────────────────────────────────────
 
 
-_DISPATCH_TABLE: dict[str, Callable[[dict[str, Any], HarnessDeps], str]] = {
-    "memory": _exec_memory,
-    "search_official_jobs": _exec_search_official_jobs,
-    "discover_jobs": _exec_discover_jobs,
-    "fetch_jd": _exec_fetch_jd,
-    "score_match": _exec_score_match,
-    "tailor_advice": _exec_tailor_advice,
-    "interview_prep": _exec_interview_prep,
-    "reflect_outcome": _exec_reflect_outcome,
-    "record_event": _exec_record_event,
-    "notify_user": _exec_notify_user,
-    "ask_user": _exec_ask_user,
-    "schedule_next_wake": _exec_schedule_next_wake,
-    "web_search": _exec_web_search,
-    "fetch_url": _exec_fetch_url,
-}
+def _exec_detect_evolution_candidates(args: dict[str, Any], deps: HarnessDeps) -> str:
+    from ..evolution.fitness import detect_evolution_candidates
+    try:
+        triggers = detect_evolution_candidates(deps.store)
+    except Exception as e:
+        return f"ERROR: detect_evolution_candidates failed: {type(e).__name__}: {e}"
+    if not triggers:
+        return "OK no SKILLs ripe for evolution right now (all above threshold or in cooldown)."
+    lines = ["Found {} candidates ripe for evolution:".format(len(triggers))]
+    for t in triggers[:10]:
+        lines.append(
+            f"  · {t.skill_name} v{t.current_version} fitness={t.fitness:.2f} "
+            f"samples={t.sample_count} — {t.reason}"
+        )
+    return "\n".join(lines)
+
+
+def _exec_evolve_skill(args: dict[str, Any], deps: HarnessDeps) -> str:
+    if deps.llm is None:
+        return "ERROR: evolve_skill requires LLM (DEEPSEEK_API_KEY not set)"
+    skill_name = (args.get("skill_name") or "").strip()
+    if not skill_name:
+        return "ERROR: evolve_skill requires skill_name"
+    num_variants = max(1, min(int(args.get("num_variants") or 3), 5))
+    from ..evolution.evolve import evolve_skill as _evolve
+    try:
+        result = _evolve(
+            store=deps.store, llm=deps.llm,
+            skill_name=skill_name, num_variants=num_variants,
+        )
+    except Exception as e:
+        return f"ERROR: evolve_skill failed: {type(e).__name__}: {e}"
+    return (
+        f"OK evolve_skill {skill_name}: parent v{result.parent_version}, "
+        f"generated {result.candidates_generated}, persisted "
+        f"{result.candidates_persisted} as shadow variants "
+        f"({result.variant_versions}). Note: {result.notes[:200]}"
+    )
+
+
+def _exec_run_release_cycle(args: dict[str, Any], deps: HarnessDeps) -> str:
+    from ..evolution.release import run_release_cycle
+    dry_run = bool(args.get("dry_run") or False)
+    try:
+        cycle = run_release_cycle(deps.store, dry_run=dry_run)
+    except Exception as e:
+        return f"ERROR: run_release_cycle failed: {type(e).__name__}: {e}"
+    return cycle.render_summary()
+
+
+def _register_main_tools() -> None:
+    """Register all main-agent tools into the global ToolRegistry.
+
+    Runs once at module load. The registry then drives both schema
+    enumeration (``registry.get_schemas('main')``) and dispatch
+    (``registry.dispatch(name, args, deps=...)``) — there is no second
+    dispatch table that can drift. Handlers keep their ``(args, deps)``
+    signature via the wrapper closure below.
+    """
+    import sys as _sys
+    _this = _sys.modules[__name__]
+
+    def _wrap(handler):
+        def _impl(args: dict[str, Any], **rt: Any) -> str:
+            return handler(args, rt["deps"])
+        return _impl
+
+    for schema, handler_name in _MAIN_TOOL_ENTRIES:
+        handler = getattr(_this, handler_name)
+        tool_name = schema["function"]["name"]
+        # Re-register on hot-reload — registry.register overwrites with a warning.
+        _registry.register(
+            name=tool_name,
+            group="main",
+            schema=schema["function"],
+            handler=_wrap(handler),
+        )
+
+
+# Run registration once at module load — all _exec_* are defined above.
+_register_main_tools()
 
 
 # ── helpers ────────────────────────────────────────────────────────────

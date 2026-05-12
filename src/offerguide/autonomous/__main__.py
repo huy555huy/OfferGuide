@@ -6,11 +6,10 @@ Subcommands::
     python -m offerguide.autonomous run-once     # wake the agent once, exit
     python -m offerguide.autonomous list         # show what jobs are registered
 
-In W13.2 the scheduler registers a single job ``wake_agent`` (default cron:
-every 4 hours from 08:00 to 22:00 Asia/Shanghai). Each fire wakes the
-central AgentLoop with a "巡检" goal — the agent reads the current system
-state and decides which maintenance tools (discover/enrich/classify/etc)
-are worth running this tick.
+The scheduler registers a single job ``wake_agent`` (default cron: hourly
+08:00-22:00 Asia/Shanghai). Each tick polls pending triggers (scheduled
+wakes + lifecycle events) and runs the W15 harness for each; if nothing
+pending, fires a cron heartbeat as a fallback safety net.
 
 Designed to run under launchd (macOS) / systemd (Linux) / a tmux session
 on a small VPS. APScheduler's misfire_grace_time means a sleeping laptop

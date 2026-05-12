@@ -162,6 +162,8 @@
                 <div style="white-space: pre-wrap;">{{ ev.payload.text }}</div>
             {% elif ev.kind == 'error' %}
                 <span style="color:var(--danger);">⚠</span> {{ ev.payload.message }}
+            {% elif ev.kind == 'summary' %}
+                <pre style="white-space: pre-wrap; margin: 0;">{{ ev.payload.text }}</pre>
             {% else %}
                 <pre>{{ ev.payload }}</pre>
             {% endif %}

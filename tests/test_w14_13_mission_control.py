@@ -247,9 +247,9 @@ class TestDaemonCapabilityDescriptions:
         cron schedules."""
         client, _ = app_client
         resp = client.get("/")
-        # discover_jobs_via_search description
-        assert "Tavily" in resp.text
+        # discover_jobs description — references DiscoverySubAgent + verified sources
+        assert "DiscoverySubAgent" in resp.text or "verified" in resp.text
         # auto_score_new_jobs description
         assert "score_match" in resp.text
         # wake_agent description
-        assert "中央 agent" in resp.text or "off-track" in resp.text
+        assert "harness" in resp.text or "中央 agent" in resp.text or "off-track" in resp.text

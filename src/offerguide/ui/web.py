@@ -35,7 +35,6 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from .. import inbox as inbox_mod
-from ..agent import AgentLoop
 from ..application_plan import build_application_plan
 from ..config import Settings
 from ..llm import LLMClient, LLMError
@@ -109,18 +108,16 @@ def create_app(
         #   goals: off-track goals
         #   agent: last critic score (color-coded in template)
         # Single SQL pass each — fast, doesn't dominate page render.
+        # Note: `last_critic` is always None now — W13 LLM-self-critique was
+        # retired; real signal lives in evolution_signals (user thumbs / app
+        # outcome / follow-through), not a per-run score. Kept as a field
+        # so templates with `is not none` guards keep working.
         nav = {"inbox_pending": 0, "goals_off_track": 0, "last_critic": None}
         try:
             with store.connect() as conn:
                 nav["inbox_pending"] = conn.execute(
                     "SELECT COUNT(*) FROM inbox_items WHERE status='pending'"
                 ).fetchone()[0]
-                row = conn.execute(
-                    "SELECT critic_score FROM agent_runs "
-                    "WHERE critic_score IS NOT NULL AND status='ok' "
-                    "ORDER BY started_at DESC LIMIT 1"
-                ).fetchone()
-                nav["last_critic"] = row[0] if row else None
             # Off-track goal count needs goals module (avoid circular)
             try:
                 from .. import goals as _gmod
@@ -158,23 +155,33 @@ def create_app(
           - Quick-stats strip (just numbers, not "推荐操作" — leave that to agent)
           - Quick links to /agent + /apply + /evolution
         """
-        # Most recent agent_run for the hero
-        with store.connect() as conn:
-            row = conn.execute(
-                "SELECT id, goal, final_answer, critic_score, critic_notes, "
-                "       latency_ms, started_at, status, iterations, trigger_kind "
-                "FROM agent_runs WHERE final_answer IS NOT NULL "
-                "  AND status = 'ok' "
-                "ORDER BY started_at DESC LIMIT 1"
-            ).fetchone()
+        # Most recent harness run for the hero. Graceful: harness_runs may
+        # not exist yet on a brand-new install (init_harness_schema runs on
+        # first harness.run, not at web boot).
+        row = None
+        try:
+            with store.connect() as conn:
+                row = conn.execute(
+                    "SELECT id, trigger_kind, trigger_detail, final_text, "
+                    "       started_at, ended_at, iterations, status "
+                    "FROM harness_runs WHERE final_text IS NOT NULL "
+                    "  AND status = 'ok' "
+                    "ORDER BY started_at DESC LIMIT 1"
+                ).fetchone()
+        except Exception:
+            row = None
         latest_run = None
         if row:
+            goal = _extract_trigger_goal(row[2])
+            latency_ms: int | None = None
+            if row[5] is not None and row[4] is not None:
+                latency_ms = int((float(row[5]) - float(row[4])) * 86400 * 1000)
             latest_run = {
-                "id": row[0], "goal": row[1], "final_answer": row[2],
-                "critic_score": row[3], "critic_notes": row[4],
-                "latency_ms": row[5], "started_at": row[6],
-                "status": row[7], "iterations": row[8],
-                "trigger_kind": row[9],
+                "id": row[0], "goal": goal, "final_answer": row[3],
+                "critic_score": None, "critic_notes": None,
+                "latency_ms": latency_ms, "started_at": row[4],
+                "status": row[7], "iterations": row[6],
+                "trigger_kind": row[1],
             }
 
         # Pending agent_suggestion items
@@ -233,12 +240,15 @@ def create_app(
                 "WHERE kind = 'agent_suggestion' "
                 "  AND created_at >= julianday('now') - 7"
             ).fetchone()[0]
-            n_agent_runs_week = conn.execute(
-                "SELECT COUNT(*) FROM agent_runs "
-                "WHERE started_at >= julianday('now') - 7 "
-                "  AND status = 'ok'"
-            ).fetchone()[0]
-            # cost burned by autonomous activity this week (skill_runs + agent_runs)
+            try:
+                n_agent_runs_week = conn.execute(
+                    "SELECT COUNT(*) FROM harness_runs "
+                    "WHERE started_at >= julianday('now') - 7 "
+                    "  AND status = 'ok'"
+                ).fetchone()[0]
+            except Exception:
+                n_agent_runs_week = 0
+            # cost burned by autonomous activity this week (skill_runs + harness_runs)
             cost_week_row = conn.execute(
                 "SELECT "
                 "  COALESCE(SUM(cost_usd), 0) "
@@ -268,10 +278,11 @@ def create_app(
                     "name": "discover_new_jobs",
                     "icon": "🔍",
                     "label": "找新 JD (子 agent)",
-                    "what": "JobFinderAgent 用 Tavily + LLM 自主找 3-5 个匹配 "
-                            "north star 的 JD. 平时由中央 agent 自己调; 这里 "
-                            "▶ 是手动触发, 等不及 cron 时用",
-                    "schedule": "由中央 agent 自主决定 (无独立 cron)",
+                    "what": "DiscoverySubAgent 用 9 个 verified 官方源 fetcher "
+                            "(nowcoder / 腾讯 / 百度 / 字节 / 0voice / 实习僧) "
+                            "找匹配 north star 的 JD. 平时由 harness 主 agent "
+                            "自己调; 这里 ▶ 是手动触发, 等不及 cron 时用",
+                    "schedule": "由 harness 主 agent 自主决定 (无独立 cron)",
                 },
                 {
                     "name": "score_unscored_jobs",
@@ -550,44 +561,51 @@ def create_app(
 
     @app.post("/api/home/wake-agent", response_class=JSONResponse)
     async def home_wake_agent(request: Request) -> Any:
-        """Trigger an agent run from the home page (manual user kickoff).
+        """Trigger a harness run from the home page (manual user kickoff).
 
-        Reuses the /api/agent/stream behavior but with a "巡检" goal preset.
-        Returns the new run's id so the page can poll/redirect.
+        User clicks "wake agent" on home page → harness runs one loop with
+        a user_button trigger, returns the run summary.
         """
-        if runtime is None or not settings.deepseek_api_key:
+        if not settings.deepseek_api_key:
             raise HTTPException(400, "agent 不可用 — 缺 OFFERGUIDE_LLM_API_KEY")
 
-        from ..agent.loop import AgentLoop
+        from ..harness import (
+            HarnessDeps,
+            MemoryStore,
+            TriggerEvent,
+            default_worldview_dir,
+        )
+        from ..harness import _schema as _hs
+        from ..harness import run as harness_run
+
+        _hs.init_harness_schema(store)
         llm = LLMClient(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
             default_model=settings.default_model,
         )
         try:
-            agent = AgentLoop(
-                llm=llm, runtime=runtime, store=store, skills=skills,
-                master_resume_text=profile.raw_resume_text if profile else "",
-                max_iterations=6,
-                # W20.4 — critic 默认 OFF (用户原话: "凭什么能评判你"). 真
-                # evolve signal 来自 user_thumbs / app_outcome / follow_through.
-                # 想强制开 critic: set env OFFERGUIDE_CRITIC_ENABLED=1
-                notifier=notifier,
+            from ..agentic.search import build_default_search
+            try:
+                _search = build_default_search()
+            except Exception:
+                _search = None
+            deps = HarnessDeps(
+                settings=settings, store=store,
+                memory_store=MemoryStore(root=default_worldview_dir(settings)),
+                llm=llm, runtime=runtime, skills=skills,
+                search=_search, notifier=notifier,
+                user_profile_text=profile.raw_resume_text if profile else None,
             )
-            # W14.7-fix: previously this was a blocking sync call inside an
-            # async handler, freezing the entire uvicorn event loop for the
-            # 10-30s the agent ran (matching the front-end's "agent 思考中"
-            # caption). The /api/agent/stream sibling already offloads via
-            # asyncio.to_thread; do the same here.
             import asyncio
             result = await asyncio.to_thread(
-                agent.run,
-                goal=(
-                    "用户刚打开 home 页, 想看你对当前求职状况的评估。"
-                    "看 snapshot, 给一段诚实的当下情况评估 (做了啥 / 待办优先级 / 有没有该提醒的事)。"
-                    "不要为了显得忙就强行调工具——简短判断更有价值。"
+                harness_run,
+                trigger=TriggerEvent(
+                    kind="user_button",
+                    detail={"reason": "home page wake-agent button"},
                 ),
-                trigger_kind="user_button",
+                deps=deps,
+                max_iterations=6,
             )
         finally:
             with contextlib.suppress(Exception):
@@ -596,9 +614,9 @@ def create_app(
         return {
             "run_id": result.run_id,
             "iterations": result.iterations,
-            "critic_score": result.critic_score,
             "latency_ms": result.latency_ms,
-            "final_answer": result.final_answer,
+            "final_answer": result.final_text,
+            "finish_reason": result.finish_reason,
         }
 
     @app.post("/api/home/chat", response_class=JSONResponse)
@@ -719,6 +737,103 @@ def create_app(
                 if deps.llm:
                     deps.llm.close()
         return result.to_dict()
+
+    @app.get("/api/keywords", response_class=JSONResponse)
+    def keywords_list() -> Any:
+        """Current user-managed include/exclude keyword lists for /recommended."""
+        from .. import user_keywords as _uk
+        inc, exc = _uk.list_keywords(store)
+        return {
+            "includes": [{"id": k.id, "keyword": k.keyword} for k in inc],
+            "excludes": [{"id": k.id, "keyword": k.keyword} for k in exc],
+        }
+
+    @app.post("/api/keywords", response_class=JSONResponse)
+    async def keywords_add(request: Request) -> Any:
+        """Add an include/exclude keyword. Body: ``{keyword, kind}``.
+
+        ``kind='include'`` — ambient discovery loop will rotate this into
+        the per-cycle keyword set (verified-official + shixiseng fetchers).
+        ``kind='exclude'`` — /recommended hides cards whose JD text matches.
+        """
+        from .. import user_keywords as _uk
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "JSON body required") from None
+        keyword = (body.get("keyword") or "").strip()
+        kind = body.get("kind") or "include"
+        if not keyword:
+            raise HTTPException(400, "keyword 不能为空")
+        if kind not in ("include", "exclude"):
+            raise HTTPException(400, "kind must be 'include' or 'exclude'")
+        try:
+            was_new, kid = _uk.add_keyword(store, keyword=keyword, kind=kind)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        return {"id": kid, "keyword": keyword, "kind": kind, "added": was_new}
+
+    @app.delete("/api/keywords/{kid}", response_class=JSONResponse)
+    def keywords_remove(kid: int) -> Any:
+        """Remove one user keyword by id."""
+        from .. import user_keywords as _uk
+        removed = _uk.remove_keyword(store, kid)
+        if not removed:
+            raise HTTPException(404, f"keyword#{kid} not found")
+        return {"id": kid, "removed": True}
+
+    @app.post("/api/jobs/{job_id}/report-dead", response_class=JSONResponse)
+    async def report_dead_job(job_id: int, request: Request) -> Any:
+        """User clicked "失效 →" on a /recommended card — mark this row dead.
+
+        Background: ingest captures a JD URL at crawl-time; platforms (especially
+        nowcoder) take down listings days later. The user discovers it as "查无
+        此岗" and would otherwise be stuck seeing the dead card on every visit.
+
+        We don't hard-delete (preserves score history + signal attribution),
+        just stash a flag on jobs.extras_json. /recommended SQL hides any row
+        with extras.dead = true.
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        reason = (payload.get("reason") or "user reported 404 / dead url")[:200]
+
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT extras_json FROM jobs WHERE id = ?", (job_id,),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(404, f"job#{job_id} not found")
+            try:
+                extras = json.loads(row[0] or "{}")
+                if not isinstance(extras, dict):
+                    extras = {}
+            except (json.JSONDecodeError, TypeError):
+                extras = {}
+            extras["dead"] = True
+            extras["dead_reason"] = reason
+            extras["dead_reported_at"] = (
+                __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()
+            )
+            conn.execute(
+                "UPDATE jobs SET extras_json = ? WHERE id = ?",
+                (json.dumps(extras, ensure_ascii=False), job_id),
+            )
+
+        # Log as a harness event so the agent learns 'this source returned a
+        # dead URL' — input for downstream quality decisions.
+        from ..harness import _schema as _hs
+        _hs.init_harness_schema(store)
+        with store.connect() as conn:
+            conn.execute(
+                "INSERT INTO harness_events(kind, job_id, note, source) "
+                "VALUES (?, ?, ?, ?)",
+                ("dead_url_reported", job_id, reason, "user"),
+            )
+        return {"job_id": job_id, "marked_dead": True}
+
 
     @app.post("/api/jobs/{job_id}/track", response_class=JSONResponse)
     def track_job(job_id: int, request: Request) -> Any:
@@ -934,13 +1049,18 @@ def create_app(
 
     @app.get("/jobs/{job_id}/apply-pack", response_class=HTMLResponse)
     async def apply_pack_view(job_id: int, request: Request) -> Any:
-        """W15.23 — 投递包页面.
+        """投递包页面 — **先微调简历, 再生成投递话术**.
 
-        给定一个 job_id, 跑 apply_assistant SKILL 出: 自我介绍话术 +
-        网申表单常见 QA + 投递策略 + pre-submit checklist + skip_reasons.
-        用户复制粘贴去官网/BOSS 投, 不用 OfferGuide 帮按发送.
+        CLAUDE.md 主流程:
+            agent[找岗位] → /recommended → 用户挑 →
+            [投递包: 微调简历 + 自我介绍 + 网申 QA + 内推码] →
+            用户去官网投
 
-        SKILL 输入 verified W15.22: (company, role_focus, job_text, user_profile).
+        实现:
+        - 并行跑 tailor_resume (针对此 JD 的简历) + apply_assistant
+          (自我介绍 + Q&A) 两个 SKILL
+        - 两个都走 use_cache=True, 第一次冷启动 ~30-40s, 之后秒开
+        - 模板顶部先渲染 tailored 简历 + diff, 然后才是网申话术
         """
         with store.connect() as conn:
             row = conn.execute(
@@ -958,11 +1078,25 @@ def create_app(
         }
         application_plan = build_application_plan(job)
 
-        # W19 — invoke apply_assistant via reusable helper.
-        # SKILL inputs verified W15.22: (company, role_focus, job_text, user_profile)
         from ..harness.tools import _format_jd_for_skill
         from ..skill_view import invoke_skill_for_view
-        result = await invoke_skill_for_view(
+
+        # Run tailor_resume + apply_assistant concurrently. Both are LLM
+        # calls (~15-25s each cold) so gather() halves wall time. Cached
+        # invocations short-circuit instantly so warm visits stay snappy.
+        import asyncio as _asyncio
+        tailor_task = invoke_skill_for_view(
+            skill_name="tailor_resume",
+            inputs_builder=lambda _spec, p: {
+                "master_resume": p.raw_resume_text[:6000],
+                "job_text": _format_jd_for_skill(job)[:5000],
+                "company": job["company"],
+                "successful_profile_json": "{}",
+            },
+            settings=settings, profile=profile, runtime=runtime,
+            skills=skills, store=store,
+        )
+        apply_task = invoke_skill_for_view(
             skill_name="apply_assistant",
             inputs_builder=lambda _spec, p: {
                 "company": job["company"],
@@ -973,18 +1107,29 @@ def create_app(
             settings=settings, profile=profile, runtime=runtime,
             skills=skills, store=store,
         )
-        # W20.5 — link this SKILL run to the job + write follow_through signal.
-        # User opening this view = real action (using SKILL output) = real signal.
+        tailor_result, apply_result = await _asyncio.gather(tailor_task, apply_task)
+
+        # Link both SKILL runs to the job for evolution signal attribution.
         _link_skill_to_job_and_signal(
-            skill_name="apply_assistant", skill_run_id=result.skill_run_id,
+            skill_name="tailor_resume", skill_run_id=tailor_result.skill_run_id,
+            job_id=job_id, signal_kind="apply_pack_generated",
+        )
+        _link_skill_to_job_and_signal(
+            skill_name="apply_assistant", skill_run_id=apply_result.skill_run_id,
             job_id=job_id, signal_kind="apply_pack_generated",
         )
         return templates.TemplateResponse(
             request, "apply_pack.html",
             _ctx(request, job=job, application_plan=application_plan,
-                 pack=result.parsed, error=result.error, raw=result.raw_text,
-                 skill_run_id=result.skill_run_id,
-                 cost_usd=result.cost_usd, duration_ms=result.duration_ms,
+                 pack=apply_result.parsed, error=apply_result.error,
+                 raw=apply_result.raw_text,
+                 skill_run_id=apply_result.skill_run_id,
+                 cost_usd=(apply_result.cost_usd or 0) + (tailor_result.cost_usd or 0),
+                 duration_ms=max(apply_result.duration_ms or 0,
+                                 tailor_result.duration_ms or 0),
+                 tailored=tailor_result.parsed,
+                 tailor_error=tailor_result.error,
+                 tailor_run_id=tailor_result.skill_run_id,
                  active_tab="recommended"),
         )
 
@@ -1129,12 +1274,32 @@ def create_app(
             except Exception:
                 pass  # harness_events not initialized yet → no scores
 
+            # User-managed include/exclude keywords (panel on /recommended)
+            from .. import user_keywords as _uk
+            user_kw_inc, user_kw_exc = _uk.list_keywords(store)
+
             candidates: list[dict[str, Any]] = []
             for r in rows:
                 (
                     job_id, title, company, location, url, source,
                     _fetched_at, extras_json, app_status,
                 ) = r
+                # Skip rows the user reported as dead via /api/jobs/{id}/report-dead
+                if extras_json:
+                    try:
+                        _extras_check = json.loads(extras_json)
+                        if isinstance(_extras_check, dict) and _extras_check.get("dead"):
+                            continue
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                # Apply user exclude keywords — match against title+company
+                # (cheap, no JD body fetch needed). The crawl already happened;
+                # this is just a view-time filter.
+                if user_kw_exc:
+                    hay = ((title or "") + " " + (company or ""))
+                    matched = _uk.matches_exclude(hay, user_kw_exc)
+                    if matched:
+                        continue
                 meta = scored_by_job.get(int(job_id))
                 # W17 — classify recruit_type from real platform fields
                 recruit_type = classify_recruit_type({
@@ -1311,6 +1476,8 @@ def create_app(
                 non_big_companies=non_big_companies[:10],
                 big_co_count=sum(1 for c in candidates if c["company"] in big_co_set),
                 cycle_keywords=keyword_explanations,
+                user_keyword_includes=user_kw_inc,
+                user_keyword_excludes=user_kw_exc,
                 active_tab="recommended",
             ),
         )
@@ -2146,20 +2313,23 @@ def create_app(
         try:
             with store.connect() as conn:
                 rows = conn.execute(
-                    "SELECT id, trigger_kind, goal, status, iterations, "
-                    "       critic_score, latency_ms, started_at "
-                    "FROM agent_runs ORDER BY started_at DESC LIMIT 8"
+                    "SELECT id, trigger_kind, trigger_detail, status, iterations, "
+                    "       started_at, ended_at "
+                    "FROM harness_runs ORDER BY started_at DESC LIMIT 8"
                 ).fetchall()
         except Exception:
             rows = []
-        recent_runs = [
-            {
-                "id": r[0], "trigger_kind": r[1], "goal": r[2],
+        recent_runs = []
+        for r in rows:
+            latency_ms: int | None = None
+            if r[6] is not None and r[5] is not None:
+                latency_ms = int((float(r[6]) - float(r[5])) * 86400 * 1000)
+            recent_runs.append({
+                "id": r[0], "trigger_kind": r[1],
+                "goal": _extract_trigger_goal(r[2]),
                 "status": r[3], "iterations": r[4],
-                "critic_score": r[5], "latency_ms": r[6],
-            }
-            for r in rows
-        ]
+                "critic_score": None, "latency_ms": latency_ms,
+            })
         return templates.TemplateResponse(
             request,
             "agent.html",
@@ -2176,21 +2346,20 @@ def create_app(
     async def agent_stream(
         request: Request,
         goal: str,
-        trigger_kind: str = "user_button",
+        trigger_kind: str = "user_input",
         max_iterations: int = 6,
     ) -> StreamingResponse:
-        """SSE endpoint that runs the agent loop in a thread + streams events.
+        """SSE endpoint that runs the harness in a thread + streams events.
 
         Each event becomes one ``data: {...}\\n\\n`` SSE frame. The browser-
         side EventSource (in agent.html) appends each frame to the live
         panel as it arrives. The connection closes after the loop returns.
 
-        Implementation note: AgentLoop is sync (each LLM call blocks), so we
-        run it in a thread via asyncio.to_thread + a thread-safe queue back
-        to the async generator. We never await inside the agent loop itself —
-        that would defeat the per-iteration streaming effect.
+        Implementation note: harness.run is sync (each LLM call blocks), so
+        we run it in a thread via asyncio.to_thread + a thread-safe queue
+        back to the async generator.
         """
-        if runtime is None or not settings.deepseek_api_key:
+        if not settings.deepseek_api_key:
             async def _err_stream():
                 yield (
                     "data: " + json_dumps({
@@ -2200,21 +2369,40 @@ def create_app(
                 )
             return StreamingResponse(_err_stream(), media_type="text/event-stream")
 
+        from ..harness import (
+            HarnessDeps,
+            MemoryStore,
+            TriggerEvent,
+            default_worldview_dir,
+        )
+        from ..harness import _schema as _hs
+        from ..harness import run as harness_run
+        _hs.init_harness_schema(store)
+
         # Build a fresh LLMClient per request (cheap; httpx.Client lifecycle)
         llm = LLMClient(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
             default_model=settings.default_model,
         )
-        agent = AgentLoop(
-            llm=llm,
-            runtime=runtime,
-            store=store,
-            skills=skills,
-            master_resume_text=profile.raw_resume_text if profile else "",
-            max_iterations=max(1, min(int(max_iterations), 12)),
-            notifier=notifier,
+
+        from ..agentic.search import build_default_search
+        try:
+            _search = build_default_search()
+        except Exception:
+            _search = None
+        deps = HarnessDeps(
+            settings=settings, store=store,
+            memory_store=MemoryStore(root=default_worldview_dir(settings)),
+            llm=llm, runtime=runtime, skills=skills,
+            search=_search, notifier=notifier,
+            user_profile_text=profile.raw_resume_text if profile else None,
         )
+        trigger = TriggerEvent(
+            kind=trigger_kind,
+            detail={"message": goal} if trigger_kind == "user_input" else {"reason": goal},
+        )
+        capped_max_iter = max(1, min(int(max_iterations), 12))
 
         main_loop = asyncio.get_running_loop()
         # W14.9: bounded queue + dropped-event counter. An 8-iteration agent
@@ -2232,7 +2420,7 @@ def create_app(
         cancel_event = _threading.Event()
 
         def _on_event_from_thread(ev: Any) -> None:
-            # AgentLoop calls this from its worker thread — bridge to async queue.
+            # harness.run calls this from its worker thread — bridge to async queue.
             # call_soon_threadsafe runs the put on the main event loop so the
             # asyncio.Queue mutation stays on its owning loop (thread-safe).
             def _do_put(payload: dict) -> None:
@@ -2263,9 +2451,10 @@ def create_app(
 
         def _run_blocking() -> None:
             try:
-                result = agent.run(
-                    goal=goal,
-                    trigger_kind=trigger_kind,
+                result = harness_run(
+                    trigger=trigger,
+                    deps=deps,
+                    max_iterations=capped_max_iter,
                     on_event=_on_event_from_thread,
                     cancel_event=cancel_event,
                 )
@@ -2273,8 +2462,9 @@ def create_app(
                     "kind": "_done",
                     "run_id": result.run_id,
                     "iterations": result.iterations,
-                    "critic_score": result.critic_score,
                     "latency_ms": result.latency_ms,
+                    "cost_usd": result.cost_usd,
+                    "finish_reason": result.finish_reason,
                 })
             except Exception as e:
                 _on_event_from_thread({
@@ -2408,19 +2598,21 @@ def create_app(
         meaningful as evidence-of-build for a portfolio.
         """
         with store.connect() as conn:
-            # Agent runs metrics
-            n_agent_runs = conn.execute(
-                "SELECT COUNT(*) FROM agent_runs"
-            ).fetchone()[0]
+            # Harness run metrics (was agent_runs pre-W21)
+            try:
+                n_agent_runs = conn.execute(
+                    "SELECT COUNT(*) FROM harness_runs"
+                ).fetchone()[0]
+                total_cost = conn.execute(
+                    "SELECT SUM(cost_usd) FROM harness_runs"
+                ).fetchone()[0]
+            except Exception:
+                n_agent_runs = 0
+                total_cost = 0.0
             n_skill_runs = conn.execute(
                 "SELECT COUNT(*) FROM skill_runs"
             ).fetchone()[0]
-            avg_critic = conn.execute(
-                "SELECT AVG(critic_score) FROM agent_runs WHERE critic_score IS NOT NULL"
-            ).fetchone()[0]
-            total_cost = conn.execute(
-                "SELECT SUM(cost_usd) FROM agent_runs"
-            ).fetchone()[0]
+            avg_critic = None  # W13 self-critique retired; no per-run score
             # Evolution metrics
             n_variants = conn.execute(
                 "SELECT COUNT(*) FROM skill_variants"
@@ -2431,10 +2623,10 @@ def create_app(
             n_signals = conn.execute(
                 "SELECT COUNT(*) FROM evolution_signals"
             ).fetchone()[0]
-            # Per-skill recent fitness (no SKILL details, just name + count + score)
+            # Per-skill recent fitness (user thumbs is the real-signal channel now)
             skill_rows = conn.execute(
                 "SELECT skill_name, COUNT(*) as n, AVG(signal_value) as avg_v "
-                "FROM evolution_signals WHERE signal_kind='critic' "
+                "FROM evolution_signals WHERE signal_kind='user_thumbs' "
                 "GROUP BY skill_name HAVING n >= 3 "
                 "ORDER BY n DESC LIMIT 12"
             ).fetchall()
@@ -2442,13 +2634,16 @@ def create_app(
                 {"name": r[0], "n_signals": r[1], "avg_critic": r[2]}
                 for r in skill_rows
             ]
-            # Last 14 days agent run count for sparkline
-            daily_rows = conn.execute(
-                "SELECT CAST((julianday('now') - started_at) AS INT) AS days_ago, "
-                "       COUNT(*) AS n "
-                "FROM agent_runs WHERE started_at >= julianday('now') - 14 "
-                "GROUP BY days_ago"
-            ).fetchall()
+            # Last 14 days harness run count for sparkline
+            try:
+                daily_rows = conn.execute(
+                    "SELECT CAST((julianday('now') - started_at) AS INT) AS days_ago, "
+                    "       COUNT(*) AS n "
+                    "FROM harness_runs WHERE started_at >= julianday('now') - 14 "
+                    "GROUP BY days_ago"
+                ).fetchall()
+            except Exception:
+                daily_rows = []
             daily_counts = [0] * 14
             for d, n in daily_rows:
                 if 0 <= d < 14:
@@ -2989,22 +3184,25 @@ def create_app(
 
     @app.get("/agent/runs/{run_id}", response_class=HTMLResponse)
     def agent_run_detail(request: Request, run_id: int) -> Any:
-        """Read a persisted agent_runs row + render its trajectory + critic.
+        """Read a persisted harness_runs row + render its trajectory.
 
-        W14: also surface inbox suggestions this run created (reverse link)
+        Also surfaces inbox suggestions this run created (reverse link)
         and any user_thumbs signals that fed back into evolution_signals.
         """
+        # Make sure the harness schema exists — first visit to /agent/runs/{id}
+        # on a fresh install can land here before any harness.run has fired.
+        from ..harness import _schema as _hs
+        _hs.init_harness_schema(store)
         with store.connect() as conn:
             row = conn.execute(
-                "SELECT trigger_kind, goal, status, iterations, final_answer, "
-                "       trajectory_json, critic_score, critic_notes, latency_ms, "
-                "       started_at, ended_at, error_text, cost_usd "
-                "FROM agent_runs WHERE id = ?",
+                "SELECT trigger_kind, trigger_detail, status, iterations, final_text, "
+                "       tool_calls_json, started_at, ended_at, error_text, cost_usd "
+                "FROM harness_runs WHERE id = ?",
                 (run_id,),
             ).fetchone()
             if row is None:
-                raise HTTPException(404, f"agent_runs#{run_id} not found")
-            # W14: which inbox suggestions came from this run?
+                raise HTTPException(404, f"harness_runs#{run_id} not found")
+            # Which inbox suggestions came from this run?
             sug_rows = conn.execute(
                 "SELECT id, title, status, decided_at, decision_note "
                 "FROM inbox_items "
@@ -3012,20 +3210,32 @@ def create_app(
                 "ORDER BY created_at DESC",
                 (run_id,),
             ).fetchall()
-            # W14: which evolution_signals reference this run?
+            # Which evolution_signals reference this run?
             sig_rows = conn.execute(
                 "SELECT skill_name, skill_version, signal_kind, signal_value, "
                 "       signal_weight, notes "
                 "FROM evolution_signals "
                 "WHERE notes LIKE ? "
                 "ORDER BY created_at DESC LIMIT 20",
-                (f"%agent_run#{run_id}%",),
+                (f"%harness_run#{run_id}%",),
             ).fetchall()
 
+        # tool_calls_json: {"calls": ["iter1.foo(...)", ...], "sub_agent_cost_usd": ...}
         try:
-            trajectory = json_loads(row[5] or "[]")
+            tool_calls_payload = json_loads(row[5] or "{}")
         except json.JSONDecodeError:
-            trajectory = []
+            tool_calls_payload = {}
+        # Wrap each tool-call string as an event with payload so the template
+        # (which expects ev.payload.*) keeps working. harness_runs only logs
+        # one-line summaries (vs. AgentLoop's typed trajectory events) — we
+        # surface them under a `summary` kind that the template renders as plain text.
+        trajectory = [
+            {"kind": "summary", "payload": {"text": str(c)}}
+            for c in (tool_calls_payload.get("calls") or [])
+        ]
+        latency_ms: int | None = None
+        if row[7] is not None and row[6] is not None:
+            latency_ms = int((float(row[7]) - float(row[6])) * 86400 * 1000)
 
         suggestions = [
             {"id": r[0], "title": r[1], "status": r[2],
@@ -3044,14 +3254,16 @@ def create_app(
             _ctx(
                 request,
                 run_id=run_id,
-                trigger_kind=row[0], goal=row[1], status=row[2],
+                trigger_kind=row[0],
+                goal=_extract_trigger_goal(row[1]),
+                status=row[2],
                 iterations=row[3], final_answer=row[4],
                 trajectory=trajectory,
-                critic_score=row[6], critic_notes=row[7],
-                latency_ms=row[8],
-                started_at=row[9], ended_at=row[10],
-                error_text=row[11],
-                cost_usd=row[12],
+                critic_score=None, critic_notes=None,
+                latency_ms=latency_ms,
+                started_at=row[6], ended_at=row[7],
+                error_text=row[8],
+                cost_usd=row[9],
                 suggestions=suggestions,
                 signals=signals,
                 active_tab="agent",
@@ -4656,6 +4868,39 @@ def _extract_boss_id(url: str | None) -> str | None:
 
 
 # ─────────────────────── stats / dashboard helpers ──────────────────
+
+
+def _extract_trigger_goal(trigger_detail_json: str | None) -> str:
+    """Pull a human-readable 'goal' string out of harness_runs.trigger_detail.
+
+    The harness records the *trigger* (cron / event / user_input / scheduled);
+    callers who previously read `agent_runs.goal` now read the trigger
+    detail. For user_input we use `detail.message`; for cron/scheduled we
+    use `detail.reason`; otherwise we synthesize from the event kind.
+    """
+    if not trigger_detail_json:
+        return ""
+    try:
+        d = json_dumps  # ensure module imported; if not, parse manually
+        import json as _j
+        detail = _j.loads(trigger_detail_json)
+    except Exception:
+        return ""
+    if not isinstance(detail, dict):
+        return ""
+    msg = detail.get("message")
+    if isinstance(msg, str) and msg.strip():
+        return msg[:300]
+    reason = detail.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason[:300]
+    event = detail.get("event")
+    if isinstance(event, str) and event.strip():
+        job_id = detail.get("job_id")
+        if job_id:
+            return f"event {event} (job#{job_id})"
+        return f"event {event}"
+    return ""
 
 
 def _quick_stats(store: Store) -> dict[str, Any]:

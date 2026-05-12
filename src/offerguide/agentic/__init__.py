@@ -1,28 +1,29 @@
-"""Agentic layer — components that USE LLM + WebSearch to do real work,
-not regex / hardcoded heuristics.
+"""LLM-backed helpers used outside the main agent loop.
+
+Despite the package name, these are NOT agents in the ReAct-loop sense.
+They are procedural functions that call the LLM where the LLM is the
+right tool (parsing arbitrary email text, filtering interview-corpus
+results), plus a thin search backend.
 
 Modules:
 
 - ``email_classifier_llm`` — DeepSeek-driven email classifier (replaces
   the earlier regex one). Extracts kind + structured info from arbitrary
   HR/recruiter emails.
-- ``corpus_collector`` — Agent that searches the web for 面经 about a
-  specific company, LLM-filters them for quality, dedups, and ingests
-  to ``interview_experiences``. The user no longer has to manually
-  paste; the agent does it.
-- ``meta_agent`` — Top-level orchestrator that runs all of the above
-  on a per-company sweep.
-- ``search`` — Abstract search backend with a DuckDuckGo HTML
-  default implementation (no API key required for prototyping).
+- ``corpus_collector`` — Searches the web for 面经 about a specific
+  company, LLM-filters them for quality, dedups, ingests to
+  ``interview_experiences``.
+- ``company_sweep`` — Top-level procedural helper that runs the above on
+  one company. NOT an agent loop — pure orchestration.
+- ``search`` — Abstract search backend with a Tavily default.
 
-Design principle: every component here uses the LLM where the LLM is
-the right tool. Regex is reserved for *parsing* structured formats
-(ICS, JSON), not classification.
+The W21 SubAgent infrastructure (`offerguide.agents.*`) is the real agent
+layer. This package is utility code.
 """
 
+from .company_sweep import CompanySweepResult, sweep_company
 from .corpus_collector import CorpusCollector
 from .email_classifier_llm import LLMEmailClassification, classify_email_llm
-from .meta_agent import CompanySweepResult, sweep_company
 from .search import SearchHit, build_default_search
 
 __all__ = [

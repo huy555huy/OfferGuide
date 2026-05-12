@@ -84,17 +84,11 @@ class TestNavBadges:
         # W15.16 — tooltip changed from "off-track" English → "偏离轨道" 中文
         assert ('off-track' in resp.text or '偏离轨道' in resp.text)
 
-    def test_agent_critic_badge_color_coded(self, app_client):
-        client, store = app_client
-        with store.connect() as conn:
-            conn.execute(
-                "INSERT INTO agent_runs(trigger_kind, goal, status, "
-                "  iterations, final_answer, critic_score, ended_at) "
-                "VALUES ('test','x','ok',1,'done',0.85, julianday('now'))"
-            )
-        resp = client.get("/")
-        # 0.85 → low (green) badge class
-        assert 'class="nav-badge low">0.85</span>' in resp.text
+    # Removed: agent_critic_badge — W13 LLM-self-critique was retired in
+    # the W21 refactor (CLAUDE.md rule D: LLM can't self-eval). nav badge
+    # for last_critic is now always None; real signal lives in
+    # evolution_signals (user_thumbs / app_outcome / follow_through),
+    # surfaced on the /evolution page.
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -191,27 +185,36 @@ class TestStatusColors:
 
 
 class TestTrajectoryCollapse:
-    def test_state_snapshot_event_renders_inside_details(self, app_client):
+    def test_harness_run_detail_renders_tool_calls(self, app_client):
+        """harness_runs.tool_calls_json renders as a trajectory list on
+        /agent/runs/{id}. (Pre-W21 this tested 'state_snapshot' inside a
+        collapsible <details>; AgentLoop wrote richly typed trajectory_json
+        events. The harness records a flat tool_call_log instead — simpler
+        + cheaper, and matches Claude Code's design.)
+        """
         client, store = app_client
         import json
-        traj = [
-            {"kind": "state_snapshot", "at": "2026-01-01T00:00:00Z",
-             "payload": {"snapshot": "x" * 500}},
-            {"kind": "final", "at": "2026-01-01T00:00:01Z",
-             "payload": {"text": "agent done"}},
-        ]
+        from offerguide.harness import _schema as _hs
+        _hs.init_harness_schema(store)
+        payload = {
+            "calls": [
+                "iter1.memory(command='view') → OK MEMORY.md (16 lines)",
+                "iter2.score_match(job_id=1) → probability=0.65",
+            ],
+            "sub_agent_cost_usd": 0.0,
+        }
         with store.connect() as conn:
             cur = conn.execute(
-                "INSERT INTO agent_runs(trigger_kind, goal, status, "
-                "  iterations, final_answer, trajectory_json, ended_at) "
-                "VALUES ('t','x','ok',1,'done',?, julianday('now'))",
-                (json.dumps(traj, ensure_ascii=False),),
+                "INSERT INTO harness_runs(trigger_kind, trigger_detail, status, "
+                "  iterations, final_text, tool_calls_json, ended_at) "
+                "VALUES ('user_input','{\"message\":\"x\"}','ok',2,'done',?, julianday('now'))",
+                (json.dumps(payload, ensure_ascii=False),),
             )
             run_id = cur.lastrowid
         resp = client.get(f"/agent/runs/{run_id}")
-        # state_snapshot now wrapped in <details> for collapse
-        assert "<details>" in resp.text
-        assert "展开 snapshot" in resp.text
+        assert resp.status_code == 200
+        # tool call summaries surfaced in the detail page
+        assert "memory" in resp.text or "score_match" in resp.text
 
 
 # ═══════════════════════════════════════════════════════════════════

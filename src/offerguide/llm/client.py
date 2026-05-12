@@ -357,7 +357,7 @@ class LLMClient:
         """Chat with OpenAI-spec function/tool calling.
 
         Use this — not ``chat()`` — when you want the model to **decide**
-        which tool to call. The agent loop in ``offerguide.agent.loop``
+        which tool to call. The harness loop in ``offerguide.harness.loop``
         is the primary user. ``tool_choice``:
 
           - ``"auto"`` (default): model picks tool or replies directly

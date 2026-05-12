@@ -213,21 +213,28 @@ def test_apply_pack_view_writes_signal_when_skill_succeeds(tmp_path):
         if original_invoke is not None:
             _sv.invoke_skill_for_view = original_invoke
 
-    # Now verify: link + signal both written
-    assert _count_harness_events(store, "apply_pack_generated", job_id) == 1
+    # Now verify: link + signal both written.
+    # Post-Q2 (W21 follow-up): apply-pack runs BOTH tailor_resume AND
+    # apply_assistant — so we expect 2 harness_events, one per SKILL.
+    # The apply_assistant follow_through signal is still expected (the
+    # signal-attribution-only test stubs both SKILLs to the same run id,
+    # so signal count remains 1 on the apply_assistant skill_name).
+    assert _count_harness_events(store, "apply_pack_generated", job_id) == 2
     assert _count_signals(store, "follow_through", "apply_assistant") == 1
 
-    # Verify the harness_event has the right shape (skill_run_id linked)
+    # Verify at least one harness_event references the apply_assistant SKILL run
     with store.connect() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT json_extract(note, '$.skill_run_id'), "
             "       json_extract(note, '$.skill_name') "
             "FROM harness_events "
             "WHERE kind = 'apply_pack_generated' AND job_id = ?",
             (job_id,),
-        ).fetchone()
-    assert row[0] == fake_apply_skill_run_id
-    assert row[1] == "apply_assistant"
+        ).fetchall()
+    skill_run_ids = {r[0] for r in rows}
+    skill_names = {r[1] for r in rows}
+    assert fake_apply_skill_run_id in skill_run_ids
+    assert "apply_assistant" in skill_names
 
 
 def test_apply_mark_status_interview_fans_to_all_involved_skills(tmp_path):

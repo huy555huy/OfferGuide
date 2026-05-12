@@ -208,14 +208,19 @@ class TestPortfolioPage:
         assert "PrivateCorp" not in resp.text
         assert "private fact" not in resp.text
 
-    def test_per_skill_critic_appears_when_data_present(self, app_client):
-        """Per-SKILL avg critic shows when ≥3 critic signals exist."""
+    def test_per_skill_fitness_appears_when_data_present(self, app_client):
+        """Per-SKILL fitness shows when ≥3 user_thumbs signals exist.
+
+        (Pre-W21 this used 'critic' signals; the LLM-self-critique source
+        was retired and the portfolio now reads from user_thumbs which is
+        the real-signal channel.)
+        """
         client, store = app_client
-        from offerguide.evolution.signals import record_critic_signal
+        from offerguide.evolution.signals import record_user_thumbs
         for _ in range(3):
-            record_critic_signal(
+            record_user_thumbs(
                 store, skill_name="score_match", skill_version="0.1.0",
-                skill_run_id=None, score=0.85,
+                skill_run_id=None, thumbs=1,
             )
         resp = client.get("/portfolio")
         assert "score_match" in resp.text

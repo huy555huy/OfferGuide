@@ -34,9 +34,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..llm import BudgetExceeded, LLMError, enforce_daily_budget
+from collections.abc import Callable, Mapping
+
 from . import _schema
 from .context import ContextManager, SystemFacts
 from .tools import ALL_TOOL_SCHEMAS, HarnessDeps, dispatch
+
+EventCallback = Callable[[Mapping[str, Any]], None]
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +126,8 @@ def run(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     system_facts: SystemFacts | None = None,
     temperature: float = DEFAULT_TEMPERATURE,
+    on_event: EventCallback | None = None,
+    cancel_event: Any = None,
 ) -> RunResult:
     """One agent run. Returns when the model stops calling tools or hits
     max_iterations.
@@ -183,6 +189,14 @@ def run(
     crash_text: str | None = None
     t0 = time.monotonic()
 
+    def _emit(kind: str, **payload: Any) -> None:
+        if on_event is None:
+            return
+        try:
+            on_event({"kind": kind, "run_id": run_id, **payload})
+        except Exception as e:
+            log.debug("on_event callback raised: %s", e)
+
     try:
         # Build initial messages — also wrapped in try so a corrupt
         # worldview file doesn't strand the harness_runs row in 'running'.
@@ -194,6 +208,11 @@ def run(
         ]
 
         for iteration in range(1, max_iterations + 1):
+            if cancel_event is not None and cancel_event.is_set():
+                _emit("_cancelled", iteration=iteration)
+                finish_reason = "cancelled"
+                break
+
             # Pre-call context management
             messages, cleared = ctx_mgr.maybe_clear_tool_results(messages)
             if cleared > 0:
@@ -214,10 +233,19 @@ def run(
                 log.warning("loop iter %d: LLM error: %s", iteration, e)
                 finish_reason = "llm_error"
                 error_text = str(e)
+                _emit("error", iteration=iteration, message=str(e))
                 break
 
             ctx_mgr.last_prompt_tokens = resp.prompt_tokens
             total_cost_usd += resp.cost_usd or 0.0
+
+            _emit(
+                "thinking",
+                iteration=iteration,
+                text=resp.content or "",
+                will_call_tools=bool(resp.tool_calls),
+                tool_call_names=[tc.name for tc in resp.tool_calls],
+            )
 
             # Bug 2 fix: accumulate ANY content from this iteration —
             # some models return reasoning text alongside tool_calls. If the
@@ -252,10 +280,15 @@ def run(
             if not resp.tool_calls:
                 # Model stopped calling tools → end of run
                 finish_reason = "end_turn"
+                _emit("final", iteration=iteration, text=resp.content or "")
                 break
 
             # Execute each tool call (sequential, like Claude Code)
             for tc in resp.tool_calls:
+                _emit(
+                    "tool_call", iteration=iteration,
+                    call_id=tc.id, name=tc.name, arguments=tc.arguments,
+                )
                 tool_t0 = time.monotonic()
                 tool_result = dispatch(tc.name, tc.arguments, deps)
                 tool_dt = time.monotonic() - tool_t0
@@ -267,6 +300,12 @@ def run(
                 tool_call_log.append(
                     f"iter{iteration}.{tc.name}({_brief_args(tc.arguments)})"
                     f" → {tool_result[:60]}"
+                )
+                _emit(
+                    "tool_result", iteration=iteration,
+                    call_id=tc.id, name=tc.name,
+                    result_preview=tool_result[:800],
+                    result_full_len=len(tool_result),
                 )
                 messages.append({
                     "role": "tool",
@@ -349,7 +388,7 @@ def _end_run(
 ) -> None:
     """Commit terminal state to harness_runs.
 
-    Bug 5 fix: ``sub_agent_cost_usd`` (e.g. JobFinderAgent's internal
+    Bug 5 fix: ``sub_agent_cost_usd`` (e.g. DiscoverySubAgent's internal
     LLM calls during discover_jobs) is **already** included in
     ``cost_usd`` by the caller — but we also store it as a JSON field in
     tool_calls_json for /debug visibility ("how much of total was sub-agent").

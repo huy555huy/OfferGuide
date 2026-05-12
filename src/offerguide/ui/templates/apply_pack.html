@@ -117,6 +117,80 @@
         {% if job.location %} · {{ job.location }}{% endif %}
         {% if job.url %} · <a href="{{ job.url }}" target="_blank" rel="noopener">原 JD</a>{% endif %}
     </div>
+    <div class="muted small" style="margin-top: 0.5rem; line-height: 1.6;">
+        投递主流程: <strong>① 用下面这份针对性简历</strong> →
+        <strong>② 复制投递话术 / 网申 Q&A</strong> →
+        ③ 去原 JD 链接投, OfferGuide 不替你按发送.
+    </div>
+</div>
+
+{# ━━━━━━━━━━━━━━━━ ① 针对此岗的简历微调 ━━━━━━━━━━━━━━━━ #}
+<div class="pack-card" style="border-left: 4px solid var(--primary);">
+    <h2>✂ 针对此岗的简历 (第一步)</h2>
+    {% if tailor_error %}
+        <div class="muted small" style="color: var(--danger);">
+            ⚠ 简历微调失败: {{ tailor_error }}
+        </div>
+    {% elif tailored %}
+        {% set lift = (tailored.fit_estimate.after - tailored.fit_estimate.before) if tailored.fit_estimate else 0 %}
+        {% if tailored.fit_estimate %}
+        <div class="muted small" style="margin-bottom: 0.625rem;">
+            命中率预估
+            <strong>{{ "%.0f"|format(tailored.fit_estimate.before * 100) }}% → {{ "%.0f"|format(tailored.fit_estimate.after * 100) }}%</strong>
+            <span style="color: {% if lift >= 0 %}var(--success){% else %}var(--danger){% endif %};">
+                ({% if lift >= 0 %}+{% endif %}{{ "%.0f"|format(lift * 100) }}%)
+            </span>
+            {% if tailored.suggested_filename %}
+                · 建议文件名 <code>{{ tailored.suggested_filename }}</code>
+            {% endif %}
+        </div>
+        {% endif %}
+        {% if tailored.cannot_fake_warnings %}
+        <div style="background: var(--warning-soft); padding: 0.625rem 0.875rem; border-radius: var(--radius-sm); border-left: 3px solid var(--warning); margin-bottom: 0.75rem; font-size: 0.85rem;">
+            🛡 自审拒绝改: <ul style="margin: 0.25rem 0 0; padding-left: 1.25rem;">
+                {% for w in tailored.cannot_fake_warnings %}<li>{{ w }}</li>{% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        <details style="margin-bottom: 0.75rem;">
+            <summary style="cursor: pointer; font-weight: 600;">
+                📝 展开看 tailored markdown ({{ (tailored.tailored_markdown or '')|length }} 字)
+            </summary>
+            <div class="copy-block" style="margin-top: 0.5rem; max-height: 480px; overflow-y: auto; font-family: var(--font-mono); font-size: 0.78rem;" id="tailored-md-block">{{ tailored.tailored_markdown }}</div>
+            <button class="copy-btn" type="button"
+                    onclick="navigator.clipboard.writeText(document.getElementById('tailored-md-block').textContent); this.textContent='已复制'">
+                📋 复制 markdown
+            </button>
+        </details>
+        {% if tailored.change_log %}
+        <details>
+            <summary style="cursor: pointer; font-weight: 600;">
+                🔍 改了 {{ tailored.change_log|length }} 处 (展开看 diff)
+            </summary>
+            <div style="margin-top: 0.5rem;">
+                {% for c in tailored.change_log[:12] %}
+                <div style="background: var(--bg-subtle); border-left: 3px solid var(--primary); padding: 0.5rem 0.75rem; margin-bottom: 0.375rem; border-radius: var(--radius-sm); font-size: 0.82rem;">
+                    <strong>{{ c.section }}</strong>
+                    <span class="muted small" style="margin-left: 0.5rem;">[{{ c.kind }}]</span>
+                    <div style="margin-top: 0.25rem;">
+                        <span style="color: var(--danger); text-decoration: line-through; opacity: 0.85;">{{ c.before }}</span>
+                        →
+                        <span style="color: var(--success);">{{ c.after }}</span>
+                    </div>
+                    {% if c.rationale %}
+                    <div class="muted small" style="margin-top: 0.25rem; font-style: italic;">{{ c.rationale }}</div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </details>
+        {% endif %}
+        <div class="muted small" style="margin-top: 0.625rem;">
+            ℹ 如果你要拿到原 .docx 保格式版, 去 <a href="/tailor?job_id={{ job.id }}">/tailor</a> 点 "📄 .docx 版".
+        </div>
+    {% else %}
+        <div class="muted small">SKILL 返回非 JSON, 没法渲染. 可去 <a href="/tailor?job_id={{ job.id }}">/tailor</a> 重试.</div>
+    {% endif %}
 </div>
 
 {% if application_plan %}

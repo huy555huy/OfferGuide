@@ -158,24 +158,12 @@ def test_load_real_resume_extracts_text() -> None:
 # ---- agent ----------------------------------------------------------------
 
 
-# ---- agent (W13.1: build_graph removed; AgentLoop is the new entry) -------
-
-
-def test_agent_loop_is_top_level_export() -> None:
-    """AgentLoop replaces build_graph as the canonical agent entry point."""
-    assert hasattr(offerguide, "AgentLoop")
-    # Smoke-construct: AgentLoop requires llm/runtime/store/skills, but we can
-    # at least verify the symbol resolves and is callable
-    assert callable(offerguide.AgentLoop)
-
-
 # ---- public API -----------------------------------------------------------
 
 
 def test_public_api_surface() -> None:
     """Lock down what offerguide exports at the top level — refactors must update __all__."""
     expected = {
-        "AgentLoop",
         "SkillSpec",
         "Store",
         "UserProfile",

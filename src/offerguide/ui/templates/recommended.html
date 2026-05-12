@@ -217,6 +217,61 @@
 </div>
 {% endif %}
 
+<div class="card" style="margin: 0.875rem 0;">
+    <details>
+        <summary style="cursor: pointer; font-weight: 600;">
+            ⚙ 自定义 keyword (你说了算)
+            <span class="muted small" style="margin-left: 0.5rem;">
+                想找的会优先送到 agent; 想屏蔽的会在列表里隐藏
+            </span>
+        </summary>
+        <div style="margin-top: 0.75rem; display: grid; gap: 0.75rem;">
+            <div>
+                <div style="font-size: 0.82rem; font-weight: 600; margin-bottom: 0.375rem;">
+                    ➕ 想找 (include)
+                </div>
+                <div id="kw-includes" style="display: flex; flex-wrap: wrap; gap: 0.375rem; margin-bottom: 0.375rem;">
+                    {% for k in user_keyword_includes %}
+                    <span class="kw-chip user-kw" data-id="{{ k.id }}" style="background: var(--success-soft); border: 1px solid var(--success);">
+                        {{ k.keyword }}
+                        <button type="button" onclick="removeUserKeyword({{ k.id }}, this)"
+                                style="border: none; background: transparent; color: var(--danger); cursor: pointer; margin-left: 0.25rem; padding: 0;">×</button>
+                    </span>
+                    {% endfor %}
+                </div>
+                <form onsubmit="addUserKeyword(event, 'include')" style="display: flex; gap: 0.375rem;">
+                    <input type="text" name="keyword" placeholder="例: RAG 工程师" maxlength="80"
+                           style="flex: 1; padding: 0.375rem 0.625rem; border: 1px solid var(--border); border-radius: var(--radius-sm);">
+                    <button type="submit" class="btn ghost" style="padding: 0.375rem 0.75rem;">加</button>
+                </form>
+            </div>
+            <div>
+                <div style="font-size: 0.82rem; font-weight: 600; margin-bottom: 0.375rem;">
+                    🚫 不要找 (exclude)
+                </div>
+                <div id="kw-excludes" style="display: flex; flex-wrap: wrap; gap: 0.375rem; margin-bottom: 0.375rem;">
+                    {% for k in user_keyword_excludes %}
+                    <span class="kw-chip user-kw" data-id="{{ k.id }}" style="background: var(--danger-soft); border: 1px solid var(--danger);">
+                        {{ k.keyword }}
+                        <button type="button" onclick="removeUserKeyword({{ k.id }}, this)"
+                                style="border: none; background: transparent; color: var(--danger); cursor: pointer; margin-left: 0.25rem; padding: 0;">×</button>
+                    </span>
+                    {% endfor %}
+                </div>
+                <form onsubmit="addUserKeyword(event, 'exclude')" style="display: flex; gap: 0.375rem;">
+                    <input type="text" name="keyword" placeholder="例: 量化交易 / 电话销售" maxlength="80"
+                           style="flex: 1; padding: 0.375rem 0.625rem; border: 1px solid var(--border); border-radius: var(--radius-sm);">
+                    <button type="submit" class="btn ghost" style="padding: 0.375rem 0.75rem;">加</button>
+                </form>
+            </div>
+            <div class="muted small">
+                ℹ <strong>include</strong> 下次 agent 找岗时优先用这些 keyword;
+                <strong>exclude</strong> 立即生效, 含这词的岗位直接从列表里隐藏.
+            </div>
+        </div>
+    </details>
+</div>
+
 {% if total_pool > 0 %}
 <div class="diversity-bar">
     <span><strong>{{ total_pool }}</strong> 个候选岗位</span>
@@ -350,11 +405,15 @@
             {% endif %}
         </div>
         <div class="actions">
-            <a href="/jobs/{{ c.job_id }}/apply-pack" class="primary">📋 准备投递</a>
+            <a href="/jobs/{{ c.job_id }}/apply-pack" class="primary"
+               onclick="onApplyPackClick(this)">📋 准备投递</a>
             {% if c.url %}
             <a href="{{ c.url }}" target="_blank" rel="noopener">{{ c.application_plan.action_label }} →</a>
             {% endif %}
             <span class="muted small">{{ c.application_plan.platform_label }}</span>
+            <button type="button" class="btn ghost" style="margin-left: auto; font-size: 0.78rem; padding: 0.25rem 0.5rem;"
+                    title="点开链接发现 404 / 已下架? 标记此岗失效, 之后不再出现"
+                    onclick="reportDead({{ c.job_id }}, this)">⚠ 失效</button>
         </div>
     </div>
 {% endfor %}
@@ -383,6 +442,107 @@ async function runAutoDiscover(btn) {
         }
         window.toast('新岗位已入库，正在刷新列表', 'success', 2000);
         setTimeout(() => location.reload(), 900);
+    } catch (e) {
+        window.toast('网络错误: ' + e, 'error', 4000);
+        btn.disabled = false;
+        btn.textContent = original;
+    }
+}
+
+// 点 "📋 准备投递" 后立刻给视觉反馈 — apply-pack 第一次会跑 ~20s LLM,
+// 没 feedback 用户会觉得点了没反应. 缓存命中时 endpoint 几乎瞬间返回,
+// 这个 loading state 也几乎不可见, 不会干扰熟手节奏.
+function onApplyPackClick(link) {
+    if (link.dataset.busy === '1') return false;
+    link.dataset.busy = '1';
+    link.style.opacity = '0.7';
+    link.style.pointerEvents = 'none';
+    link.innerHTML = '⏳ 生成投递包...';
+    // 不阻止 navigate. 用户回来时 page reload, busy 标记自然消失.
+    return true;
+}
+
+async function addUserKeyword(ev, kind) {
+    ev.preventDefault();
+    const form = ev.target;
+    const input = form.querySelector('input[name=keyword]');
+    const keyword = input.value.trim();
+    if (!keyword) return;
+    try {
+        const r = await fetch('/api/keywords', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({keyword, kind}),
+        });
+        if (!r.ok) {
+            const txt = await r.text();
+            window.toast('加 keyword 失败: ' + txt.slice(0, 160), 'error', 4000);
+            return;
+        }
+        const data = await r.json();
+        // Append a chip then clear input
+        const container = document.getElementById(kind === 'include' ? 'kw-includes' : 'kw-excludes');
+        const chip = document.createElement('span');
+        chip.className = 'kw-chip user-kw';
+        chip.dataset.id = data.id;
+        chip.style.cssText = kind === 'include'
+            ? 'background: var(--success-soft); border: 1px solid var(--success);'
+            : 'background: var(--danger-soft); border: 1px solid var(--danger);';
+        chip.innerHTML = `${data.keyword} <button type="button" onclick="removeUserKeyword(${data.id}, this)" style="border:none;background:transparent;color:var(--danger);cursor:pointer;margin-left:0.25rem;padding:0;">×</button>`;
+        container.appendChild(chip);
+        input.value = '';
+        if (kind === 'exclude') {
+            window.toast('已加排除 keyword, 即将刷新列表', 'success', 1500);
+            setTimeout(() => location.reload(), 800);
+        } else {
+            window.toast('已加 include keyword (下次 agent 找岗时生效)', 'success', 2500);
+        }
+    } catch (e) {
+        window.toast('网络错误: ' + e, 'error', 4000);
+    }
+}
+
+async function removeUserKeyword(kid, btn) {
+    try {
+        const r = await fetch(`/api/keywords/${kid}`, {method: 'DELETE'});
+        if (!r.ok) {
+            window.toast('删除失败', 'error', 3000);
+            return;
+        }
+        const chip = btn.closest('.kw-chip');
+        if (chip) chip.remove();
+        window.toast('已删除', 'success', 1500);
+        // If we just removed an exclude, refresh to re-show hidden cards
+        if (chip && chip.parentElement && chip.parentElement.id === 'kw-excludes') {
+            setTimeout(() => location.reload(), 800);
+        }
+    } catch (e) {
+        window.toast('网络错误: ' + e, 'error', 4000);
+    }
+}
+
+async function reportDead(jobId, btn) {
+    if (!confirm('确认这个岗位的链接失效 / 已下架? 之后不会再出现在列表里.')) return;
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = '标记中...';
+    try {
+        const r = await fetch(`/api/jobs/${jobId}/report-dead`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({reason: 'user reported dead from /recommended'}),
+        });
+        if (!r.ok) {
+            const txt = await r.text();
+            window.toast('标记失败: ' + txt.slice(0, 160), 'error', 4000);
+            btn.disabled = false;
+            btn.textContent = original;
+            return;
+        }
+        // Hide card immediately
+        const card = btn.closest('.rec-card') || btn.closest('.card') || btn.parentElement.parentElement;
+        if (card) card.style.display = 'none';
+        window.toast('已标记失效, 列表已刷新', 'success', 2500);
     } catch (e) {
         window.toast('网络错误: ' + e, 'error', 4000);
         btn.disabled = false;

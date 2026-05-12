@@ -4,7 +4,6 @@ Top-level public API is intentionally small. Sub-packages expose the surface
 area that's reasonable to consume from outside.
 """
 
-from .agent import AgentLoop
 from .memory import Store
 from .profile import UserProfile, load_resume_pdf
 from .skills import SkillSpec, discover_skills, load_skill
@@ -12,7 +11,6 @@ from .skills import SkillSpec, discover_skills, load_skill
 __version__ = "0.0.1"
 
 __all__ = [
-    "AgentLoop",
     "SkillSpec",
     "Store",
     "UserProfile",

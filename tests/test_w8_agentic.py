@@ -24,7 +24,7 @@ from offerguide.agentic.email_classifier_llm import (
     classify_email_batch_llm,
     classify_email_llm,
 )
-from offerguide.agentic.meta_agent import sweep_company
+from offerguide.agentic.company_sweep import sweep_company
 from offerguide.agentic.search import (
     SearchHit,
     StubSearch,

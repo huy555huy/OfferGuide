@@ -9,8 +9,6 @@ that drives evolution decisions.
 
 Signal sources (each has a ``record_*`` function):
 
-- **critic**: AgentLoop's self-critique LLM judges each agent run. Routed to
-  the SKILLs that ran during the trajectory. Auto-written by AgentLoop.
 - **user_thumbs**: When the user clicks 👍 / 👎 on an agent suggestion in
   the inbox. Carries the most weight because it's direct user signal.
 - **app_outcome**: Application this run influenced reached an outcome
@@ -20,6 +18,10 @@ Signal sources (each has a ``record_*`` function):
   agent made? Quick signal, less reliable than thumbs but always available.
 - **eval_synthetic**: ``meta_evolve_skill`` running a candidate variant
   against recent real inputs and scoring with a critic LLM.
+- **critic**: legacy slot for an external LLM judge of a trajectory.
+  No live writer (W13 AgentLoop self-critique was retired — LLM-self-eval
+  is reflexively biased; real signal comes from the three user-grounded
+  channels above). Slot kept so future external annotators can plug in.
 
 This module only WRITES signals. Reading + aggregation lives in
 ``fitness.py``. Generating new variants lives in ``evolve.py``.
@@ -84,11 +86,12 @@ def record_critic_signal(
     score: float,
     notes: str | None = None,
 ) -> int | None:
-    """Record a self-critique score (0..1) for one SKILL invocation.
+    """Record an external critic score (0..1) for one SKILL invocation.
 
-    Called by AgentLoop after each ``critique`` event — but only for SKILLs
-    that actually ran during the trajectory (we don't critique lookups).
-    Returns the new evolution_signals.id, or None on failure.
+    Legacy slot: W13 AgentLoop wrote self-critique scores here, but that
+    path was retired (LLM self-eval is reflexively biased). The function
+    is kept so a future external annotator (human or non-self LLM judge)
+    can plug in. Returns the new evolution_signals.id, or None on failure.
     """
     if score is None:
         return None

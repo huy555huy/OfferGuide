@@ -3,15 +3,51 @@
 {% block content %}
 
 <style>
-    .tailor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    /* minmax(0, 1fr) is critical — bare `1fr` in CSS grid is minmax(auto, 1fr),
+       so a long company name in one row will expand the column past 50%
+       and push the right-hand "Master 简历" card out of the viewport. */
+    .tailor-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 1rem;
+    }
     @media (max-width: 920px) { .tailor-grid { grid-template-columns: 1fr; } }
     .job-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
-    .job-row { padding: 0.625rem 0.875rem; border-bottom: 1px solid var(--border-soft); cursor: pointer; }
+    /* Transparent default border-left reserves the 3px slot so selecting
+       a row doesn't shift its content right (the previous CSS had no
+       default border, so clicking made the layout jump — "点击的时候画面是怪的"). */
+    .job-row {
+        padding: 0.625rem 0.875rem;
+        border-bottom: 1px solid var(--border-soft);
+        border-left: 3px solid transparent;
+        cursor: pointer;
+    }
     .job-row:hover { background: var(--bg-subtle); }
-    .job-row.selected { background: var(--primary-soft); border-left: 3px solid var(--primary); }
-    .job-row .top { display: flex; gap: 0.5rem; align-items: baseline; }
+    .job-row.selected { background: var(--primary-soft); border-left-color: var(--primary); }
+    /* Two-row grid keeps company + title on one line (truncated with ellipsis)
+       and pushes meta (location · source · 字数) into its own column on the
+       right, vertically centered. Previous flex layout had no min-width
+       guards so long company names stomped the layout. */
+    .job-row .top {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        column-gap: 0.625rem;
+        align-items: center;
+    }
+    .job-row .top .company-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
     .job-row .company { font-weight: 600; }
-    .job-row .meta { color: var(--text-muted); font-size: 0.78rem; margin-left: auto; }
+    .job-row .company-title .sep { color: var(--text-muted); margin: 0 0.375rem; }
+    .job-row .meta {
+        color: var(--text-muted);
+        font-size: 0.78rem;
+        white-space: nowrap;
+        flex-shrink: 0;
+    }
     .resume-preview {
         font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.6;
         background: var(--bg-subtle); padding: 0.875rem; border-radius: var(--radius-sm);
@@ -42,8 +78,11 @@
                            {% if selected_job_id == j.id|string %}checked{% endif %}
                            onchange="document.querySelectorAll('.job-row').forEach(r=>r.classList.remove('selected'));this.parentElement.classList.add('selected')">
                     <div class="top">
-                        <span class="company">{{ j.company }}</span>
-                        <span>{{ j.title|truncate(40) }}</span>
+                        <span class="company-title" title="{{ j.company }} · {{ j.title }}">
+                            <span class="company">{{ j.company }}</span>
+                            <span class="sep">·</span>
+                            <span>{{ j.title }}</span>
+                        </span>
                         <span class="meta">{{ j.location }} · {{ j.source }} · {{ j.raw_text_len }} 字</span>
                     </div>
                 </label>
@@ -57,7 +96,7 @@
                         title="保留 Word 格式; master 简历必须是 .docx">
                     📄 .docx 版 (保格式可下载)
                 </button>
-                <span id="spinner" class="muted htmx-indicator">⏳ Claude Sonnet 30-90 秒…</span>
+                <span id="spinner" class="muted htmx-indicator">⏳ 生成中 10-30 秒…</span>
             </div>
         </form>
         {% else %}

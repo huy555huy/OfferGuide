@@ -74,6 +74,7 @@ class SkillRuntime:
         strict_inputs: bool = True,
         inject_long_term_memory: bool = True,
         consult_variant_registry: bool = True,
+        use_cache: bool = False,
     ) -> SkillResult:
         """Render the SKILL with `inputs`, call the LLM, store the run, return SkillResult.
 
@@ -146,6 +147,45 @@ class SkillRuntime:
         input_hash = _hash_invocation(
             skill_name=spec.name, version=effective_version, inputs=canonical,
         )
+
+        # ── Cache lookup ────────────────────────────────────────────
+        # ``use_cache=True`` skips the LLM call when the same
+        # (skill_name, effective_version, input_hash) already produced an
+        # output. Important UX fix: pre-cache, /jobs/{id}/apply-pack ran
+        # apply_assistant for 30+s on every refresh and felt unresponsive
+        # ("点了准备投递没反应"). View endpoints opt in; agent / evolution
+        # paths keep cache OFF so they always get fresh runs.
+        if use_cache:
+            with self._store.connect() as conn:
+                cached = conn.execute(
+                    "SELECT id, output_json, cost_usd, latency_ms "
+                    "FROM skill_runs "
+                    "WHERE skill_name = ? AND skill_version = ? "
+                    "  AND input_hash = ? AND output_json IS NOT NULL "
+                    "ORDER BY id DESC LIMIT 1",
+                    (spec.name, effective_version, input_hash),
+                ).fetchone()
+            if cached is not None:
+                run_id, cached_text, cached_cost, cached_latency = cached
+                cached_parsed: dict[str, Any] | None = None
+                if json_mode:
+                    try:
+                        obj = json.loads(cached_text or "")
+                        cached_parsed = (
+                            obj if isinstance(obj, dict) else {"_value": obj}
+                        )
+                    except json.JSONDecodeError:
+                        cached_parsed = None
+                return SkillResult(
+                    raw_text=cached_text or "",
+                    parsed=cached_parsed,
+                    skill_name=spec.name,
+                    skill_version=effective_version,
+                    skill_run_id=int(run_id),
+                    input_hash=input_hash,
+                    cost_usd=float(cached_cost or 0.0),
+                    latency_ms=int(cached_latency or 0),
+                )
 
         t0 = time.monotonic()
         resp = self._llm.chat(

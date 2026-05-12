@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Literal
 
+from ._markdown import MarkdownBlock, render_block, render_markdown_document
 from .memory import Store
 
 log = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ PatternKind = Literal[
     "repeated_mistake", # same error pattern N times
     "success_pattern",  # something agent does well that should continue
 ]
+
+GoalAssessmentState = Literal["ok", "watch", "off_track", "unknown"]
 
 
 # ─────────────────────────── Goals ───────────────────────────
@@ -56,6 +59,17 @@ class Goal:
     updated_at: float
     achieved_at: float | None
     notes: str | None
+
+
+@dataclass(frozen=True)
+class GoalAssessment:
+    """Explicitly labeled heuristic assessment for prompt/UI use."""
+
+    state: GoalAssessmentState
+    label: str
+    summary: str
+    basis: tuple[str, ...] = ()
+    confidence: float = 0.0
 
 
 def add_goal(
@@ -159,46 +173,132 @@ class GoalProgress:
     offers: int
     rejects: int
 
+    def assess(self) -> GoalAssessment:
+        """Return an explicit heuristic assessment for prompt/UI use."""
+        if self.goal.target_date is None or self.days_left is None:
+            return GoalAssessment(
+                state="unknown",
+                label="未定截止",
+                summary="没有 target_date, 不做节奏判断",
+                basis=("open-ended goal",),
+                confidence=0.2,
+            )
+        if self.offers > 0:
+            return GoalAssessment(
+                state="ok",
+                label="已达成",
+                summary="已有 offer",
+                basis=(f"offers={self.offers}",),
+                confidence=0.95,
+            )
+        if self.days_left < 0:
+            return GoalAssessment(
+                state="off_track",
+                label="已过期",
+                summary=f"已过期 {-self.days_left} 天",
+                basis=(f"days_left={self.days_left}",),
+                confidence=0.9,
+            )
+        if self.apps_active <= 0:
+            return GoalAssessment(
+                state="watch",
+                label="需复核",
+                summary="没有在飞申请",
+                basis=("apps_active=0", f"days_left={self.days_left}"),
+                confidence=0.8,
+            )
+
+        ratio = self.apps_active / max(self.days_left, 1)
+        if ratio >= 0.3:
+            return GoalAssessment(
+                state="ok",
+                label="节奏正常",
+                summary=f"apps_active/days_left = {self.apps_active}/{self.days_left}",
+                basis=(f"ratio={ratio:.2f}",),
+                confidence=0.55,
+            )
+        return GoalAssessment(
+            state="watch",
+            label="需复核",
+            summary=f"apps_active/days_left = {self.apps_active}/{self.days_left}",
+            basis=(f"ratio={ratio:.2f}",),
+            confidence=0.55,
+        )
+
     def render_for_prompt(self) -> str:
         """Render as a compact prompt block. Agent sees this and reasons against it."""
-        lines = [f"### Goal #{self.goal.id}: {self.goal.title}"]
-        if self.goal.target_date and self.days_left is not None:
-            if self.days_left < 0:
-                lines.append(f"  ⚠ 已过期 {-self.days_left} 天 (target: {self.goal.target_date})")
-            else:
-                lines.append(f"  剩余 {self.days_left} 天 (target: {self.goal.target_date})")
-        if self.goal.target_metric:
-            lines.append(f"  目标指标: {self.goal.target_metric}")
-        if self.goal.description:
-            lines.append(f"  说明: {self.goal.description[:200]}")
-
-        lines.append(
-            f"  Funnel: {self.apps_total} 投 → {self.apps_active} 进行 → "
-            f"{self.interviews_scheduled} 面试排期 → {self.offers} offer "
-            f"({self.rejects} 拒)"
+        assessment = self.assess()
+        target_line: str | None = None
+        if self.goal.target_date is not None:
+            target_line = f"- target_date: {self.goal.target_date}"
+        elif self.days_left is None:
+            target_line = "- target_date: —"
+        blocks: list[MarkdownBlock | str] = [
+            render_block(
+                f"Goal #{self.goal.id}: {self.goal.title}",
+                lines=tuple(
+                    line for line in (
+                        target_line,
+                        f"- 剩余: {self.days_left} 天" if self.days_left is not None else None,
+                        f"- 目标指标: {self.goal.target_metric}" if self.goal.target_metric else None,
+                        f"- 说明: {self.goal.description[:200]}" if self.goal.description else None,
+                    )
+                    if line is not None
+                ),
+                level=3,
+            ),
+            render_block(
+                "Funnel 事实",
+                lines=(
+                    f"- 投递: {self.apps_total}",
+                    f"- 进行中: {self.apps_active}",
+                    f"- 面试排期: {self.interviews_scheduled}",
+                    f"- 面试结束: {self.interviews_done}",
+                    f"- offer: {self.offers}",
+                    f"- 拒绝: {self.rejects}",
+                ),
+                level=3,
+            ),
+        ]
+        if self.apps_silent_14d > 0 or self.apps_silent_7d > 0:
+            blocks.append(
+                render_block(
+                    "沉默信号 (事实)",
+                    lines=(
+                        f"- 14+ 天未记录新进展: {self.apps_silent_14d}",
+                        f"- 7-14 天未记录新进展: {max(0, self.apps_silent_7d - self.apps_silent_14d)}",
+                        "- 这表示系统未记录新状态, 不是对用户/公司状态的结论。",
+                    ),
+                    level=3,
+                )
+            )
+        blocks.append(
+            render_block(
+                f"评估 ({assessment.label})",
+                lines=(
+                    f"- state: {assessment.state}",
+                    f"- summary: {assessment.summary}",
+                    *(f"- basis: {b}" for b in assessment.basis),
+                    f"- confidence: {assessment.confidence:.2f}",
+                    "- 这是启发式判断, 不是事实。",
+                ),
+                level=3,
+            )
         )
-        if self.apps_silent_14d > 0:
-            lines.append(f"  ⚠ {self.apps_silent_14d} 个申请超 14 天没回 (大概率挂了)")
-        elif self.apps_silent_7d > 0:
-            lines.append(f"  · {self.apps_silent_7d} 个申请 7-14 天没回")
-        return "\n".join(lines)
+        return render_markdown_document(*blocks)
 
     @property
     def is_on_track(self) -> bool:
-        """Heuristic: enough apps in flight relative to time remaining?
+        """Compatibility alias for older callers."""
+        return self.assess().state == "ok"
 
-        Rough rule: if user wants 1 offer and has 14 days left, need at least
-        5 active apps (assuming ~20% reply rate). This is a starting heuristic
-        the agent should question, not blindly trust.
-        """
-        if self.days_left is None:
-            return True  # open-ended, always "on track"
-        if self.offers > 0:
-            return True
-        if self.days_left > 0:
-            ratio = self.apps_active / max(self.days_left, 1)
-            return ratio >= 0.3  # need at least 1 app per 3 remaining days
-        return False
+    @property
+    def assessment_state(self) -> GoalAssessmentState:
+        return self.assess().state
+
+    @property
+    def assessment_label(self) -> str:
+        return self.assess().label
 
 
 def compute_progress(store: Store, goal: Goal) -> GoalProgress:
