@@ -3,8 +3,9 @@
 **国内校招 Ambient 求职 Agent — 反 auto-applier 路线, 做 search / draft / track, 决策留给你.**
 
 > **不是 LangChain wrapper, 不是 Manus 复刻, 不是 ChatGPT 代写简历**. 借鉴
-> Anthropic *Effective Harnesses for Long-Running Agents* + Cognition Devin
-> 的 ambient design, 国内校招特化, 自实现 Python harness 25k LOC.
+> Anthropic *Effective Harnesses for Long-Running Agents* 的真实 primitives
+> （default-fail contract / fresh evaluator / progress handoff）+ Cognition Devin
+> 的 ambient design, 国内校招特化.
 
 ## 为什么是这个项目
 
@@ -24,13 +25,14 @@ OfferGuide 反方向走: **不替你点投递, 帮你投得更准**.
 
 ## 3 个 design decision (跟同质 agent 项目的核心差异)
 
-### 1. 自实现 Anthropic-style harness, 拒绝 LangChain
+### 1. 真实 Anthropic-style harness primitives, 拒绝一轮式 Agent
 
 LangChain agents 是 reactive turn loops + chains, 短任务还行, 求职是长跑场景 — 7 天后回来查回应, agent 不能每次重头读 history. 所以:
 
-- **Single master loop** (no planner / executor / reflector chain — Anthropic 反对的 anti-pattern)
-- **File-based worldview markdown** — agent 自己 6-command memory tool 维护 `.offerguide/worldview/*.md`
-- **Agent 自决 schedule_next_wake** — 用户标"投了" → agent 自己 schedule(7d) 检查, 不用 cron
+- **Default-fail contract** — `test-results.json` 里每个项目默认 `passes: false`, 没证据不能改成通过
+- **Fresh-context evaluator** — `.claude/agents/evaluator.md` 只读检查 diff + evidence, 不让 builder 自评
+- **Agent-maintained handoff** — `PROGRESS.md` 记录进度/证据/下一步, 下一轮从冷上下文继续
+- **OfferGuide application loop** — `src/offerguide/harness/` 是产品内 agent loop: chat / tools / memory / scheduled wake
 
 ### 2. 不替用户决策, 国内 false-positive 成本不可逆
 
@@ -122,7 +124,7 @@ OfferGuide 反方向走：**不点投递**，做真正提高 reply rate 的事�
 
 ```
         ┌─────────────────────────────────────────────────────────────┐
-        │  harness — single master loop (W15)                         │
+        │  application agent loop (src/offerguide/harness, W15)       │
         │  "dumb on purpose; coordinates Claude's decisions,          │
         │   doesn't make them" — agency is in-context, not in code   │
         │                                                             │
@@ -190,7 +192,8 @@ Persistence (single SQLite file, sqlite-vec for embeddings):
 
 | Decision | Choice | Why (with source) |
 |---|---|---|
-| Agent topology | **Single harness master loop** (W15) + **W21 SubAgent** for specialized domains | [Anthropic agent guide](https://www.anthropic.com/research/building-effective-agents): "single agent, agency in-context, no planner/executor/reflector chain"; sub-agent pattern from [Hermes Agent](https://github.com/nousresearch/hermes-agent) `delegate_tool.py` |
+| Agent topology | **Single application agent loop** (W15) + **W21 SubAgent** for specialized domains | [Anthropic agent guide](https://www.anthropic.com/research/building-effective-agents): "single agent, agency in-context, no planner/executor/reflector chain"; sub-agent pattern from [Hermes Agent](https://github.com/nousresearch/hermes-agent) `delegate_tool.py` |
+| Long-running harness | **Anthropic CWC primitives**: `test-results.json`, `PROGRESS.md`, `.claude/hooks/*`, `.claude/agents/evaluator.md` | [Effective Harnesses for Long-Running Agents](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents): default-fail contract, fresh-context evaluator, agent-maintained handoff |
 | Skill format | **Hermes SKILL.md** (design + variant runtime) | [Hermes Agent](https://github.com/nousresearch/hermes-agent) ICLR 2026 Oral, MIT |
 | Self-evolution | **Closed-loop GEPA-style** (3 real-feedback signal channels, no LLM self-critique) | LLM-self-eval is reflexively biased; signals come from user 👍/👎 + app outcome + follow-through. [GEPA paper](https://arxiv.org/abs/2507.19457) is the algorithm reference |
 | Vector store | **sqlite-vec** (single-user) | local-first, zero ops; Qdrant overkill at our scale |
@@ -324,8 +327,16 @@ curl -X POST http://localhost:8000/api/evolution/evolve/score_match
 ## Repo layout
 
 ```
+.claude/                    # Anthropic CWC long-running harness primitives
+├── CLAUDE.md               # handoff + one-feature-at-a-time convention
+├── settings.json           # PreToolUse / Stop hook wiring
+├── agents/evaluator.md     # fresh-context skeptical evaluator
+└── hooks/                  # kill-switch, steer, evidence gate, stop commit
+PROGRESS.md                 # agent-maintained handoff
+test-results.json           # default-fail contract; evidence required before pass
+
 src/offerguide/
-├── harness/              # W15 master loop — single ReAct loop, file-based
+├── harness/              # W15 application agent loop — chat/tools/memory/wakes
 │   ├── loop.py           #   worldview, agency in-context
 │   ├── tools.py          #   17 main-agent tools (single registry via
 │   │                     #   _MAIN_TOOL_ENTRIES — schema + dispatch both
@@ -451,10 +462,14 @@ tests/                    # 329 tests, all green
        (user_thumbs / app_outcome / follow_through) feeding `evolution_signals`
        → `fitness.compute_fitness` → variant lifecycle (shadow → canary → live)
        via `SkillRuntime` traffic split. Replaces W6 DSPy/GEPA framework.
-- [x] **W15** — **harness** rewrite (Anthropic-style single master loop): 400-line
+- [x] **W15** — application agent loop: 400-line
        `loop.py`, file-based worldview (`.offerguide/worldview/*.md`), 6-command
        memory tool, file-based agency-in-context. `instructions.md` is the agent's
        "soul prompt". Cron + chat endpoint both go through `harness.run_one`.
+- [x] **W22** — real Anthropic long-running harness primitives at repo root:
+       `test-results.json` default-fail contract, `.claude/hooks/verify-gate.sh`
+       evidence gate, `.claude/agents/evaluator.md` fresh-context evaluator,
+       `PROGRESS.md` handoff, plus `AGENT_STOP` / `STEER.md` operator controls.
 - [x] **W15.23** — ambient discovery loop (4 parallel stages: nowcoder / 0voice
        GitHub repo / verified官方 / shixiseng) + score_match on newly-ingested
        jobs each cycle.

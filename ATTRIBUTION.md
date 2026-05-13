@@ -65,6 +65,19 @@ The observation-action-feedback structure of our autonomous jobs is inspired by:
 None of these projects' code lives in our tree. We borrow design patterns + cite
 each here per their MIT licenses' attribution requirements.
 
+## Anthropic CWC long-running harness primitives
+
+**[anthropics/cwc-long-running-agents](https://github.com/anthropics/cwc-long-running-agents)**
+(Apache 2.0) provides the concrete Claude Code harness primitives we adapt in
+`.claude/`: default-fail contract (`test-results.json` + evidence gate),
+fresh-context evaluator (`.claude/agents/evaluator.md`), agent-maintained
+handoff (`PROGRESS.md`), plus `AGENT_STOP` and `STEER.md` operator controls.
+
+The files under `.claude/` retain Anthropic's copyright/SPDX headers where the
+shell hook or evaluator structure is directly adapted. OfferGuide-specific
+changes add job-search truthfulness rules and a project-specific smoke-test
+convention.
+
 ## Web search backend
 
 **[DuckDuckGo HTML SERP](https://html.duckduckgo.com)** (no license needed for

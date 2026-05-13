@@ -1,4 +1,4 @@
-"""W15 harness — minimal scaffold + agent self-determination.
+"""W15 application agent loop — chat/tools/memory/scheduled wakes.
 
 Structure:
 - ``instructions.md`` — agent's "soul" prompt (loaded by context.py)
@@ -8,16 +8,20 @@ Structure:
 - ``loop.py`` — single-threaded master loop (the heart)
 - ``triggers.py`` — event-driven primary path + cron fallback
 - ``feedback.py`` — bridge user reactions → GEPA evolution signals
-- ``_schema.py`` — harness-owned DB tables (runs / events / scheduled wakes)
+- ``_schema.py`` — loop-owned DB tables (runs / events / scheduled wakes)
 
-Design principle (Anthropic + W15 user direction):
-- **Harness is dumb on purpose.** It coordinates Claude's decisions; it
-  doesn't make them.
+Boundary note:
+- This package is OfferGuide's in-product agent loop. It is not the whole
+  Anthropic long-running harness primitive set. The repo-root `.claude/`,
+  `PROGRESS.md`, and `test-results.json` files carry the default-fail
+  contract / fresh evaluator / handoff harness.
+- **The loop is dumb on purpose.** It coordinates model decisions; it doesn't
+  make them.
 - **Agency is in-context.** Planning, reflection, communication judgment,
   causal reasoning — all done by the model in one master loop, not in
   separate sub-systems.
-- **Persistence is file-based.** Worldview is markdown the agent owns;
-  harness just provides the I/O primitives.
+- **Persistence is file-based.** Worldview is markdown the agent owns; this
+  loop just provides the I/O primitives.
 - **Safety is at the boundary.** Permissions / hooks / sandboxing live
   outside the prompt; not encoded as "if X then Y" rules in the model
   context.

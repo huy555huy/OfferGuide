@@ -1,0 +1,22 @@
+{
+  "anthropic-harness-primitives-installed": {
+    "passes": true,
+    "evidence": "harness-related-tests-result.txt",
+    "notes": "pytest tests/test_anthropic_harness_primitives.py tests/test_project_vault.py tests/test_evidence_first_context.py passed and verifies the official-style .claude hooks, evaluator, handoff, operator controls, default-fail contract, and current truthfulness guards."
+  },
+  "project-vault-truthfulness-loop": {
+    "passes": false,
+    "evidence": "",
+    "notes": "Project-library outputs must preserve missing facts and risk flags instead of inventing metrics, users, deployment status, or impact."
+  },
+  "resume-tailor-no-fake-claims-loop": {
+    "passes": false,
+    "evidence": "",
+    "notes": "Resume tailoring must not mark unsupported claims complete without evidence or a user-supplied fact."
+  },
+  "agent-chat-artifact-loop": {
+    "passes": false,
+    "evidence": "",
+    "notes": "The chat-first agent loop must produce visible artifacts and changelogs without requiring users to navigate old workflow pages."
+  }
+}

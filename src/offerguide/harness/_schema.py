@@ -1,8 +1,8 @@
-"""Harness-owned DB tables.
+"""Application-loop DB tables.
 
-These tables are *harness state* (not domain state like jobs/applications).
+These tables are loop telemetry/state (not domain state like jobs/applications).
 They live alongside the existing OfferGuide schema in the same SQLite
-file, but the harness owns reading/writing them.
+file, but the agent loop owns reading/writing them.
 
 Why not put in `memory/db.py`? Conceptually these belong to the harness
 abstraction layer, not the core data model. Keeping them here makes

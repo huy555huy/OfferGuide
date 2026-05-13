@@ -1,4 +1,4 @@
-"""Single-threaded master loop — the heart of the W15 harness.
+"""Single-threaded master loop for OfferGuide's application agent.
 
 Anthropic's published agent loop pattern (verbatim from research):
 
@@ -11,10 +11,10 @@ Anthropic's published agent loop pattern (verbatim from research):
            return final text → mark complete
 
 That's it. No planner-executor-reflector chain. No "if-then-else what to do
-next" hardcoded in harness. The model decides moment-by-moment what to call,
+next" hardcoded in the loop. The model decides moment-by-moment what to call,
 when to ask user, when to update memory, when to stop.
 
-Our loop adds two harness-layer responsibilities (because OpenAI-compat
+Our loop adds two runtime responsibilities (because OpenAI-compat
 DeepSeek doesn't do them server-side):
 - Token estimation + compaction (in context.py)
 - Tool-result clearing on long runs (in context.py)
@@ -23,6 +23,9 @@ Plus persistence:
 - Insert harness_runs row at start, update at end (id flows into deps so
   tools can record references)
 - Track tool calls + cost (including sub-agent costs) for /debug telemetry
+
+The Anthropic long-running harness primitives live at repo root in `.claude/`,
+`PROGRESS.md`, and `test-results.json`.
 """
 
 from __future__ import annotations

@@ -40,7 +40,21 @@ resume.pdf
 .DS_Store
 .idea/
 .vscode/
-.claude/
+.claude/*
+!.claude/CLAUDE.md
+!.claude/settings.json
+!.claude/agents/
+!.claude/agents/evaluator.md
+!.claude/hooks/
+!.claude/hooks/*.sh
+.claude/settings.local.json
+.claude/worktrees/
+.claude/launch.json
+.claude/.evidence-reads
+
+# Anthropic-style long-running harness operator controls
+AGENT_STOP
+STEER.md
 
 # 个人开发日志——面试自用，不推 GitHub
 DEVLOG.md

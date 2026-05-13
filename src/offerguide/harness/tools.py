@@ -1,6 +1,6 @@
-"""Tool schemas + dispatch for the W15 harness.
+"""Tool schemas + dispatch for the W15 application agent loop.
 
-Harness tools are **capabilities** the agent can choose; the agent decides
+These tools are **capabilities** the agent can choose; the agent decides
 when/how to use them. No hardcoded "if condition X, call tool Y" logic — that's
 the model's job, framed by ``instructions.md``.
 

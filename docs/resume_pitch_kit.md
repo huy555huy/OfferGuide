@@ -13,7 +13,7 @@
 > **OfferGuide — Ambient 求职 Agent (国内校招版)**
 > 个人项目 · Python / FastAPI / SQLite · 25k LOC · 2026.4 - 至今 · GitHub: [...]
 >
-> - **自实现 Anthropic-style minimal harness**: single master loop + 13 specialized tools + memory tool (6 commands on file-based worldview markdown, agent 自维护). **拒绝 LangChain wrapper**, 借鉴 Cognition Devin / Manus 的 ambient 设计哲学.
+> - **Anthropic CWC-style long-running harness primitives**: `test-results.json` default-fail contract + fresh evaluator + `PROGRESS.md` handoff, 防止 agent 无证据标完成；产品内另有 single application agent loop + memory tool + scheduled wake.
 > - **12 evolvable SKILLs** (Hermes-format prompts, Anthropic Agent Skills 标准兼容) + GEPA-style evolution scaffold + user feedback bridge (用户 thumbs up/down → evolution_signals → SKILL 长期进化).
 > - **DeepSeek-V4 backend**: prompt-cache-aware cost tracking (~10% cache-hit rate, 60% input cost 节省) + per-day budget guardrail (防 agent 跑飞).
 > - **Browser extension (Chrome MV3)**: 一键 sync BOSS 推荐池 N 个岗位到本地 agent — 用户在 BOSS 自己刷, agent 后台 score 排序 + 主动通知.
@@ -25,7 +25,7 @@
 > **OfferGuide — Ambient Job-Hunt Agent for Chinese Campus Recruitment**
 > Personal project · Python / FastAPI / SQLite · 25k LOC · GitHub: [...]
 >
-> - **Self-implemented Anthropic-style minimal harness**: single master loop + 13 specialized tools + memory tool with 6 file-based commands on agent-maintained worldview markdown. **Deliberately not a LangChain wrapper** — design philosophy from Anthropic's "Effective Harnesses for Long-Running Agents" + Cognition Devin / Manus ambient design.
+> - **Anthropic CWC-style long-running harness primitives**: default-fail `test-results.json`, fresh evaluator, and `PROGRESS.md` handoff so the agent cannot mark work complete without evidence; the product runtime separately uses a single application agent loop with memory and scheduled wakes.
 > - **12 evolvable SKILLs** (Hermes-format prompts, Anthropic Agent Skills standard compatible) with GEPA-style evolution scaffold and user-feedback signal bridge.
 > - **DeepSeek-V4 backend** with prompt-cache-aware cost tracking + per-day budget guardrail.
 > - **Strategic positioning**: anti-auto-applier (the AIHawk → archived 2026/4 / LazyApply → Trustpilot 2.1★ category). Decision-aid + post-application tracking instead. Empty market in 国内 校招.
@@ -47,9 +47,9 @@
 
 > "LangChain agents 是 reactive turn loops with chains — 一连串 prompt 模板 + 状态管理.
 >
-> 我要的是 **ambient agent** — model in the driver's seat, file-based persistent memory, agent 自决 schedule_next_wake. 这是 Anthropic 公开 *Effective Harnesses for Long-Running Agents* 那篇博客的设计哲学, 跟 LangChain 完全反向.
+> 我要的是 **ambient agent** — model in the driver's seat, file-based persistent memory, agent 自决 schedule_next_wake. 产品内 agent loop 借鉴的是 Anthropic 的 simple agent loop 原则；长任务质量控制则直接用了他们 CWC repo 里的 default-fail contract / evaluator / handoff primitives.
 >
-> LangChain 适合 RAG QA 这种短任务. 求职 Agent 是长跑场景 — 7 天后回来查回应, agent 不能每次重头读 history. 所以我自实现 single master loop + worldview markdown 让 agent 自己写持久化笔记."
+> LangChain 适合 RAG QA 这种短任务. 求职 Agent 是长跑场景 — 7 天后回来查回应, agent 不能每次重头读 history. 所以我用 single application agent loop + worldview markdown 让 agent 自己写持久化笔记, 再用 harness contract 防止它无证据宣称完成."
 
 ### Q2: "为什么不替用户点投递?"
 
@@ -62,15 +62,16 @@
 ### Q3: "Anthropic harness 你借鉴了什么改了什么?"
 
 > "**借鉴**:
-> - Single master loop (no planner / executor / reflector chain)
+> - 真实 CWC harness primitives: default-fail `test-results.json`, evidence gate, fresh-context evaluator, `PROGRESS.md` handoff
+> - 产品内 agent loop: single loop (no planner / executor / reflector chain)
 > - File-based worldview markdown (agent 自维护) — 比 SQL 表更适合 agent 思考
-> - 6-command memory tool (view / create / str_replace / insert / delete / rename) on `.offerguide/worldview/*.md`
 > - Agent 自决 schedule_next_wake (`agent.run()` 内部调 tool)
 >
 > **改**:
 > - DeepSeek 没 native context_management, 自实现 compaction (40K trigger) + tool-result clearing (15K trigger)
 > - 加 GEPA evolution scaffold — 接 user feedback signals 让 SKILL prompt 长期进化, Anthropic 的 SKILL 是手写的
-> - 国内特化校招日历 + docx 段落保格式 tailor"
+> - 国内特化校招日历 + docx 段落保格式 tailor
+> - 简历/项目库多一层 truthfulness gate: 没有证据就保留 missing facts, 不编性能提升/用户数/排名"
 
 ### Q4: "GEPA 进化跑过几轮?"
 
@@ -143,7 +144,7 @@
 **标题候选** (按 click rate 排):
 
 1. "**我自己写了个求职 Agent 找 2026 暑期实习, 第一周拿到 N 个 BOSS 回应**"  ← 最稳
-2. "**为什么我不用 LangChain — 自实现 Anthropic-style ambient agent 找暑期实习的 7 天复盘**"
+2. "**为什么我不用 LangChain — 用 Anthropic CWC harness 思路做求职 Agent 的 7 天复盘**"
 3. "**自动投递死了 — 我用反方向的 AI 求职 agent 找 2026 暑期, 第一周拿了 N 个面试**"
 
 **大纲**:
@@ -158,8 +159,8 @@
    - AIHawk 归档 / LazyApply 2.1 星 数据
    - "false-positive 成本不可逆" 论点
 
-3. 技术 (500 字) — Anthropic harness 借鉴 + 改 (Q3 答案)
-   - 单 loop / worldview markdown / GEPA scaffold
+3. 技术 (500 字) — Anthropic harness primitives 借鉴 + 改 (Q3 答案)
+   - default-fail contract / evaluator / handoff / 单 loop / worldview markdown / GEPA scaffold
 
 4. 第一周数据 (400 字) — 关键, 必须有真数字
    - 评了 X 个 JD, 投了 Y 个, BOSS 回复 Z 个
