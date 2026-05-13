@@ -79,6 +79,54 @@ def test_chat_raises_on_non_2xx() -> None:
         c.chat([{"role": "user", "content": "hi"}])
 
 
+def test_chat_retries_transient_transport_error_once() -> None:
+    calls = {"n": 0}
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF")
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-v4-flash",
+                "choices": [{"message": {"content": "recovered"}}],
+            },
+        )
+
+    c = _client_with_transport(handler)
+    resp = c.chat([{"role": "user", "content": "hi"}])
+
+    assert resp.content == "recovered"
+    assert calls["n"] == 2
+
+
+def test_chat_with_tools_retries_transient_transport_error_once() -> None:
+    calls = {"n": 0}
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadError("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF")
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-v4-flash",
+                "choices": [{"message": {"content": "tool loop recovered"}}],
+            },
+        )
+
+    c = _client_with_transport(handler)
+    resp = c.chat_with_tools(
+        [{"role": "user", "content": "hi"}],
+        tools=[],
+        cache_system_prompt=False,
+    )
+
+    assert resp.content == "tool loop recovered"
+    assert calls["n"] == 2
+
+
 def test_chat_raises_on_missing_choices() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"model": "m"})

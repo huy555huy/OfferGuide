@@ -147,6 +147,15 @@
 
 <div id="result" style="margin-top: 1rem;"></div>
 
+{% if latest_agent_tailor %}
+<div style="margin-top: 1rem;">
+    <div class="section-title">Agent 最近生成的简历微调</div>
+    {% with tailored=latest_agent_tailor.tailored, run_id=latest_agent_tailor.run_id, job_title=latest_agent_tailor.job_title, job_company=latest_agent_tailor.job_company %}
+        {% include "_tailor_result.html" %}
+    {% endwith %}
+</div>
+{% endif %}
+
 {# W14 联动: 已生成过的 tailored docx 列表 #}
 {% if existing_tailored %}
 <div class="card" style="margin-top: 1rem;">

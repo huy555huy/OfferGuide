@@ -111,6 +111,49 @@ class TestHomeRendering:
         for link in ["/", "/today", "/applications", "/tailor", "/mock", "/evolution", "/inbox"]:
             assert f'href="{link}"' in resp.text
 
+    def test_tailor_page_shows_agent_generated_tailor_result(self, app_client):
+        from offerguide.harness import _schema as harness_schema
+
+        client, store = app_client
+        harness_schema.init_harness_schema(store)
+        with store.connect() as conn:
+            conn.execute(
+                "INSERT INTO jobs(source, title, company, raw_text, content_hash) "
+                "VALUES ('manual', 'AI Agent 实习', '字节', ?, 'h_tailor_agent')",
+                ("负责 AI Agent 工程化和 RAG 系统建设。" * 20,),
+            )
+            job_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "INSERT INTO skill_runs(skill_name, skill_version, input_hash, "
+                "input_json, output_json, cost_usd, latency_ms) "
+                "VALUES ('tailor_resume', '0.2.0', 'h_agent_tailor', '{}', ?, 0, 1)",
+                ("""
+                {
+                  "suggested_filename": "HuYang_ByteDance_AI_Agent.pdf",
+                  "tailored_markdown": "真实微调后的简历正文",
+                  "fit_estimate": {"before": 0.4, "after": 0.6, "rationale": "更贴 JD"},
+                  "change_log": [
+                    {"kind": "emphasize", "section": "项目", "before": "旧表达", "after": "新表达", "rationale": "突出 Agent loop"}
+                  ],
+                  "cannot_fake_warnings": ["不要写没有证据的准确率提升"]
+                }
+                """,),
+            )
+            skill_run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "INSERT INTO harness_events(kind, job_id, note, source) "
+                "VALUES ('tailor_resume_generated', ?, ?, 'agent')",
+                (job_id, f'{{"skill_run_id": {skill_run_id}, "view": "/tailor"}}'),
+            )
+
+        resp = client.get("/tailor")
+
+        assert resp.status_code == 200
+        assert "Agent 最近生成的简历微调" in resp.text
+        assert "HuYang_ByteDance_AI_Agent.pdf" in resp.text
+        assert "真实微调后的简历正文" in resp.text
+        assert "不要写没有证据的准确率提升" in resp.text
+
 
 class TestWakeAgentEndpoint:
     def test_wake_agent_requires_runtime(self, tmp_path):

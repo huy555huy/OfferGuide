@@ -3490,6 +3490,7 @@ def create_app(
             for r in jobs_rows
         ]
         master_resume_text = profile.raw_resume_text if profile else ""
+        latest_agent_tailor = _latest_agent_tailor_result(store)
 
         # W14: existing tailored docx history
         existing_tailored: list[dict] = []
@@ -3513,6 +3514,7 @@ def create_app(
                 jobs=jobs,
                 selected_job_id=job_id,
                 master_resume=master_resume_text,
+                latest_agent_tailor=latest_agent_tailor,
                 existing_tailored=existing_tailored,
                 active_tab="tailor",
             ),
@@ -5239,6 +5241,63 @@ def _recent_agent_artifacts(store: Store, *, limit: int = 6) -> list[dict[str, A
         artifact["when_ago"] = _humanize_age(age)
         artifacts.append(artifact)
     return artifacts
+
+
+def _latest_agent_tailor_result(store: Store) -> dict[str, Any] | None:
+    """Latest tailor_resume artifact produced by Agent Chat, for /tailor."""
+    from ..harness import _schema as _hs
+
+    try:
+        _hs.init_harness_schema(store)
+        with store.connect() as conn:
+            rows = conn.execute(
+                "SELECT job_id, note FROM harness_events "
+                "WHERE kind = 'tailor_resume_generated' "
+                "ORDER BY created_at DESC, id DESC LIMIT 20"
+            ).fetchall()
+    except Exception:
+        return None
+
+    for job_id, note in rows:
+        try:
+            payload = json_loads(note or "{}")
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        srid = payload.get("skill_run_id")
+        if isinstance(srid, str) and srid.isdigit():
+            srid = int(srid)
+        if not isinstance(srid, int):
+            continue
+        try:
+            with store.connect() as conn:
+                row = conn.execute(
+                    "SELECT output_json FROM skill_runs "
+                    "WHERE id = ? AND skill_name = 'tailor_resume'",
+                    (srid,),
+                ).fetchone()
+                job_row = conn.execute(
+                    "SELECT title, company FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+        except Exception:
+            continue
+        if row is None:
+            continue
+        try:
+            tailored = json_loads(row[0] or "{}")
+        except Exception:
+            continue
+        if not isinstance(tailored, dict):
+            continue
+        return {
+            "run_id": srid,
+            "job_title": (job_row[0] if job_row else "") or f"job#{job_id}",
+            "job_company": (job_row[1] if job_row else "") or "",
+            "tailored": tailored,
+        }
+    return None
 
 
 def _artifact_from_event_row(row: Any) -> dict[str, Any] | None:

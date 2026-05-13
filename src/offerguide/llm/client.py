@@ -19,6 +19,7 @@ Confirmed model ids from https://api-docs.deepseek.com/quick_start/pricing
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from collections.abc import Mapping
@@ -31,6 +32,9 @@ from .pricing import estimate_cost_usd as _estimate_cost
 
 DEFAULT_DEEPSEEK_BASE = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_TRANSPORT_RETRIES = 1
+
+log = logging.getLogger(__name__)
 
 Role = Literal["system", "user", "assistant"]
 
@@ -260,6 +264,30 @@ class LLMClient:
         )
         self._http = httpx.Client(timeout=timeout_s)
 
+    def _post_chat_completions(self, body: dict[str, Any]) -> httpx.Response:
+        last_error: httpx.HTTPError | None = None
+        for attempt in range(DEFAULT_TRANSPORT_RETRIES + 1):
+            try:
+                return self._http.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=body,
+                )
+            except httpx.HTTPError as e:
+                last_error = e
+                if attempt >= DEFAULT_TRANSPORT_RETRIES:
+                    break
+                log.warning(
+                    "LLM transport error, retrying once: %s: %s",
+                    type(e).__name__,
+                    e,
+                )
+                time.sleep(0.25)
+        raise LLMError(f"HTTP transport error: {last_error}") from last_error
+
     def chat(
         self,
         messages: list[Mapping[str, str]],
@@ -285,17 +313,7 @@ class LLMClient:
             body.update(extra)
 
         t0 = time.monotonic()
-        try:
-            resp = self._http.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            )
-        except httpx.HTTPError as e:
-            raise LLMError(f"HTTP transport error: {e}") from e
+        resp = self._post_chat_completions(body)
 
         latency_ms = int((time.monotonic() - t0) * 1000)
         if resp.status_code != 200:
@@ -409,17 +427,7 @@ class LLMClient:
             body.update(extra)
 
         t0 = time.monotonic()
-        try:
-            resp = self._http.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            )
-        except httpx.HTTPError as e:
-            raise LLMError(f"HTTP transport error: {e}") from e
+        resp = self._post_chat_completions(body)
 
         latency_ms = int((time.monotonic() - t0) * 1000)
         if resp.status_code != 200:
