@@ -58,7 +58,7 @@ class TestHomeRendering:
         resp = client.get("/")
         assert resp.status_code == 200
         assert "Agent Chat" in resp.text
-        assert "最近 Agent 运行" in resp.text
+        assert "最近执行记录" in resp.text
 
     def test_home_does_not_show_running_or_failed_runs_in_hero(self, app_client):
         """Only ok runs land in the hero (failed/running runs would be confusing)."""

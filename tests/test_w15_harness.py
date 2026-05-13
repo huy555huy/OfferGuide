@@ -754,6 +754,12 @@ class TestHomeWithW15:
         assert resp.status_code == 200
         assert "Agent Chat" in resp.text
         assert "runAgent" in resp.text
+        assert "和 Agent 对话" in resp.text
+        assert "下一句话" in resp.text
+        assert "发送给 Agent" in resp.text
+        assert "Enter 发送" in resp.text
+        assert "trigger_kind=user_input" in resp.text
+        assert "trigger_kind=user_button" not in resp.text
 
     def test_home_surfaces_recent_agent_artifacts(self, web_client):
         client, store = web_client
@@ -1492,9 +1498,12 @@ class TestReviewFixes:
         """W15.16 — '唤醒 agent' / 'trajectory' 这些 internal 术语该被替换."""
         client, _ = web_client
         resp = client.get("/")
-        assert "启动 Agent" in resp.text
+        assert "发送给 Agent" in resp.text
         # 不应再出现 "唤醒 agent" 这种生硬翻译
         # (允许 details/comments — 检查可见 UI 部分)
+        assert "Goal (自然语言)" not in resp.text
+        assert "事件流 (live)" not in resp.text
+        assert "最近 Agent 运行" not in resp.text
         # 老的 "trajectory" 链接文字被改
         assert "执行记录" in resp.text or "Trajectory" not in resp.text
 
