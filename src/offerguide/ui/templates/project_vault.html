@@ -1,0 +1,231 @@
+{% extends "base.html" %}
+{% block title %}OfferGuide — Project Vault{% endblock %}
+{% block content %}
+
+<style>
+    .vault-guide {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+    }
+    .vault-guide > div {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 0.875rem 1rem;
+    }
+    .vault-guide strong {
+        display: block;
+        margin-bottom: 0.25rem;
+        color: var(--text);
+    }
+    .vault-guide span {
+        color: var(--text-muted);
+        font-size: 0.85rem;
+    }
+    .vault-form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.625rem;
+    }
+    .market-context-box {
+        margin-top: 0.5rem;
+        padding: 0.75rem;
+        border: 1px dashed var(--border);
+        border-radius: var(--radius-sm);
+        background: var(--bg-elev);
+    }
+    .market-context-box p {
+        margin: 0 0 0.6rem;
+        color: var(--text-muted);
+        font-size: 0.86rem;
+    }
+    @media (max-width: 760px) {
+        .vault-form-grid { grid-template-columns: 1fr; }
+    }
+</style>
+
+<div class="page-title">
+    <div>
+        <h1>项目事实档案</h1>
+        <p>
+            按主流方向、真实工作、贡献边界和可追问点保存项目素材。
+            这里不是“简历美化器”，也不强迫填写没有证据的提升百分比。
+        </p>
+    </div>
+</div>
+
+<div class="vault-guide">
+    <div>
+        <strong>先看同类说法</strong>
+        <span>参考公开发布稿、技术解读和 README，校准这个方向通常怎么讲。</span>
+    </div>
+    <div>
+        <strong>再写真实工作</strong>
+        <span>区分“团队做了什么”和“我具体做了什么”，避免面试一追问就散。</span>
+    </div>
+    <div>
+        <strong>最后守边界</strong>
+        <span>明确可以说、谨慎说、不要说的内容，让简历和复试准备更可防守。</span>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>新建项目档案</h2>
+        <span class="meta">必填项很少，先把真实事实放进来就够</span>
+    </div>
+    <form hx-post="/api/project-vault/insert" hx-target="#project-list" hx-swap="innerHTML"
+          hx-on::after-request="if(event.detail.successful) this.reset()">
+        <div class="vault-form-grid">
+            <label class="field">
+                <span class="label-text">项目名称</span>
+                <input type="text" name="title" required placeholder="例: OfferGuide / RemeDi / 校园二手交易系统">
+            </label>
+            <label class="field">
+                <span class="label-text">项目方向</span>
+                <input type="text" name="mainstream_direction" required
+                       placeholder="例: LLM 应用 / 后端系统 / 数据分析"
+                       list="direction-suggestions">
+                <datalist id="direction-suggestions">
+                    {% for d in recommended_directions %}<option value="{{ d }}">{% endfor %}
+                </datalist>
+            </label>
+        </div>
+
+        <div class="vault-form-grid" style="margin-top:0.5rem;">
+            <label class="field">
+                <span class="label-text">项目任务</span>
+                <textarea name="project_task" rows="3" required
+                          placeholder="这个项目实际要完成什么？不要拔高。"></textarea>
+            </label>
+            <label class="field">
+                <span class="label-text">我的真实工作</span>
+                <textarea name="my_work" rows="3" required
+                          placeholder="我具体做了哪些部分？哪些不是我做的？"></textarea>
+            </label>
+            <label class="field">
+                <span class="label-text">典型问题</span>
+                <textarea name="typical_problem" rows="3"
+                          placeholder="这个方向通常解决什么问题？本项目对应哪个小问题？"></textarea>
+            </label>
+            <label class="field">
+                <span class="label-text">方法路线</span>
+                <textarea name="method_route" rows="3"
+                          placeholder="采用了什么主流方法、框架、模型或工程方案？为什么选它？"></textarea>
+            </label>
+        </div>
+
+        <div class="market-context-box">
+            <p>
+                这一步是“语境校准”，不是给项目加战绩。AI 会查同类项目/产品/论文的公开说法，
+                帮你整理这个方向通常如何解释问题和价值；指标、规模、排名不能直接借用。
+            </p>
+            <div class="actions" style="margin-bottom:0.6rem;">
+                <button type="button"
+                        hx-post="/api/project-vault/draft-market-context"
+                        hx-include="closest form"
+                        hx-target="#market-context-draft"
+                        hx-swap="innerHTML"
+                        hx-indicator="#market-context-spinner">
+                    查同类项目怎么说
+                </button>
+                <span id="market-context-spinner" class="htmx-indicator muted small">
+                    <span class="spinner"></span> 正在搜索和总结...
+                </span>
+            </div>
+            <div id="market-context-draft">
+                <label class="field">
+                    <span class="label-text">外部表达参考</span>
+                    <textarea name="market_context" rows="4"
+                              placeholder="可手动写，也可点上面的按钮生成：同类项目通常怎么解释问题、用户价值、系统能力和边界。"></textarea>
+                </label>
+                <label class="field" style="margin-top:0.5rem;">
+                    <span class="label-text">参考来源</span>
+                    <textarea name="reference_sources" rows="3"
+                              placeholder="公开发布稿、技术博客、README、论文或产品文档链接。"></textarea>
+                </label>
+            </div>
+        </div>
+
+        <div class="vault-form-grid" style="margin-top:0.5rem;">
+            <label class="field">
+                <span class="label-text">关键难点</span>
+                <textarea name="key_difficulties" rows="3"
+                          placeholder="真实卡住过的地方：数据质量、联调、模型不稳定、部署环境等。"></textarea>
+            </label>
+            <label class="field">
+                <span class="label-text">解决过程</span>
+                <textarea name="resolution_process" rows="3"
+                          placeholder="怎么定位、尝试、取舍，最后怎么处理？"></textarea>
+            </label>
+        </div>
+
+        <div class="vault-form-grid" style="margin-top:0.5rem;">
+            <label class="field">
+                <span class="label-text">贡献类型</span>
+                <select name="contribution_type">
+                    {% for value, label in contribution_labels.items() %}
+                    <option value="{{ value }}">{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label class="field">
+                <span class="label-text">可防守置信度 (0-1)</span>
+                <input type="number" name="confidence" min="0" max="1" step="0.05" value="0.5">
+            </label>
+        </div>
+
+        <label class="field" style="margin-top:0.5rem;">
+            <span class="label-text">创新 / 改进 / 主要贡献</span>
+            <textarea name="contribution_detail" rows="3"
+                      placeholder="克制地写：方法创新、工程改进、应用迁移、流程改进、组合实现，或只是主要贡献。"></textarea>
+        </label>
+
+        <div class="vault-form-grid" style="margin-top:0.5rem;">
+            <label class="field">
+                <span class="label-text">项目产出</span>
+                <textarea name="project_outputs" rows="3"
+                          placeholder="代码、报告、演示、模型、系统页面、实验对比、部署链接等。"></textarea>
+            </label>
+            <label class="field">
+                <span class="label-text">证据材料</span>
+                <textarea name="evidence" rows="3"
+                          placeholder="链接、截图路径、报告路径、实验记录、repo、论文笔记等。"></textarea>
+            </label>
+            <label class="field">
+                <span class="label-text">可追问点</span>
+                <textarea name="askable_points" rows="3"
+                          placeholder="老师/面试官可能问什么？我能讲清楚哪些细节？"></textarea>
+            </label>
+            <label class="field">
+                <span class="label-text">表达边界</span>
+                <textarea name="expression_boundary" rows="3"
+                          placeholder="可以说 / 谨慎说 / 不要说。"></textarea>
+            </label>
+        </div>
+
+        <label class="field" style="margin-top:0.5rem;">
+            <span class="label-text">不要写 / 不要说</span>
+            <textarea name="do_not_claim" rows="2"
+                      placeholder="没有证据的数据、不是自己做的模块、讲不清的贡献，先写这里。"></textarea>
+        </label>
+
+        <label class="field" style="margin-top:0.5rem;">
+            <span class="label-text">标签（逗号分隔）</span>
+            <input type="text" name="tags" placeholder="resume, interview, ai-agent, backend, thesis">
+        </label>
+
+        <div class="actions" style="margin-top:0.75rem;">
+            <button type="submit">存入项目库</button>
+            <span class="muted small">后续简历微调和复试准备会优先引用这些可防守事实</span>
+        </div>
+    </form>
+</div>
+
+<div id="project-list">
+    {% include "_project_list.html" %}
+</div>
+
+{% endblock %}

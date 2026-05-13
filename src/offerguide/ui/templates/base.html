@@ -642,12 +642,13 @@
                 </div>
             </details>
 
-            {# 简历: 微调 + 项目库 #}
+            {# 简历: 微调 + 项目事实档案 + 公开作品集 #}
             <details class="nav-more">
-                <summary class="{% if active_tab in ('tailor','portfolio') %}active{% endif %}">📝 简历</summary>
+                <summary class="{% if active_tab in ('tailor','project_vault','portfolio') %}active{% endif %}">📝 简历</summary>
                 <div class="nav-more-panel">
-                    <a href="/tailor"    class="{% if active_tab == 'tailor' %}active{% endif %}">简历微调 (保 docx 格式)</a>
-                    <a href="/portfolio" class="{% if active_tab == 'portfolio' %}active{% endif %}">📦 项目库</a>
+                    <a href="/tailor"        class="{% if active_tab == 'tailor' %}active{% endif %}">简历微调 (保 docx 格式)</a>
+                    <a href="/project-vault" class="{% if active_tab == 'project_vault' %}active{% endif %}">项目事实档案</a>
+                    <a href="/portfolio"     class="{% if active_tab == 'portfolio' %}active{% endif %}">公开作品集指标</a>
                 </div>
             </details>
 

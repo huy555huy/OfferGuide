@@ -780,11 +780,18 @@ def _exec_tailor_advice(args: dict[str, Any], deps: HarnessDeps) -> str:
         return f"ERROR: job {job_id} not found"
     if not deps.user_profile_text:
         return "ERROR: no user resume loaded"
+    try:
+        from .. import project_vault as _pv
+        profile_with_projects = _pv.append_to_profile_text(
+            deps.store, deps.user_profile_text, max_project_chars=3500,
+        )
+    except Exception:
+        profile_with_projects = deps.user_profile_text
     # W15.22 — verified against tailor_resume SKILL.md (inputs: master_resume,
     # job_text, company, successful_profile_json). Pre-W15.22 passed
     # job_title/jd_text/current_resume — all wrong.
     inputs = {
-        "master_resume": deps.user_profile_text[:6000],
+        "master_resume": profile_with_projects[:9000],
         "job_text": _format_jd_for_skill(job)[:4000],
         "company": job.get("company", ""),
         "successful_profile_json": "{}",  # no successful_profile pipeline yet → empty
@@ -815,13 +822,21 @@ def _exec_interview_prep(args: dict[str, Any], deps: HarnessDeps) -> str:
     job = _load_job(deps.store, job_id)
     if job is None:
         return f"ERROR: job {job_id} not found"
+    profile_text = deps.user_profile_text or ""
+    try:
+        from .. import project_vault as _pv
+        profile_text = _pv.append_to_profile_text(
+            deps.store, profile_text, max_project_chars=3500,
+        )
+    except Exception:
+        pass
     # W15.22 — verified against prepare_interview SKILL.md (inputs: company,
     # job_text, user_profile, past_experiences). Pre-W15.22 passed
     # job_title/jd_text/candidate_resume/round — all wrong.
     inputs = {
         "company": job.get("company", ""),
         "job_text": _format_jd_for_skill(job)[:4000],
-        "user_profile": (deps.user_profile_text or "")[:4000],
+        "user_profile": profile_text[:8000],
         "past_experiences": (args.get("past_experiences") or "(无)"),
     }
     result = deps.runtime.invoke(spec, inputs)

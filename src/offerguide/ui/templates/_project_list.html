@@ -1,0 +1,57 @@
+<div class="card">
+    <div class="card-header">
+        <h2>项目档案 · {{ projects|length }} 个</h2>
+        {% if just_added %}<span class="meta" style="color: var(--success);">✓ 新增 #{{ just_added }}</span>{% endif %}
+    </div>
+
+    {% if not projects %}
+    <div class="empty">
+        <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">📁</div>
+        <div>项目库还空着</div>
+        <div class="small muted">先录 2-3 个最重要项目。真实、可追问，比漂亮但虚的 bullet 更有用。</div>
+    </div>
+    {% else %}
+    {% for p in projects %}
+    <div style="padding: 1rem; margin-bottom: 0.75rem; background: var(--bg-elev);
+                border: 1px solid var(--border); border-radius: var(--radius-sm);
+                border-left: 3px solid var(--primary);">
+        <div style="display:flex;gap:0.5rem;align-items:baseline;margin-bottom:0.45rem;">
+            <strong style="font-family: var(--font-serif); font-size: 1.05rem;">{{ p.title }}</strong>
+            <span class="pill">{{ p.mainstream_direction }}</span>
+            <span class="pill">{{ p.contribution_label }}</span>
+            {% for t in p.tags %}<span class="pill">{{ t }}</span>{% endfor %}
+            <span class="muted small" style="margin-left:auto;">
+                conf {{ "%.2f"|format(p.confidence) }} · #{{ p.id }}
+            </span>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.625rem;font-size:0.86rem;">
+            <div><strong style="color: var(--primary);">任务:</strong> {{ p.project_task }}</div>
+            <div><strong style="color: var(--primary);">我的工作:</strong> {{ p.my_work }}</div>
+            {% if p.typical_problem %}<div><strong>典型问题:</strong> {{ p.typical_problem }}</div>{% endif %}
+            {% if p.method_route %}<div><strong>方法路线:</strong> {{ p.method_route }}</div>{% endif %}
+            {% if p.market_context %}<div><strong>外部表达参考:</strong> {{ p.market_context }}</div>{% endif %}
+            {% if p.reference_sources %}<div><strong>参考来源:</strong> {{ p.reference_sources }}</div>{% endif %}
+            {% if p.contribution_detail %}<div><strong>贡献边界:</strong> {{ p.contribution_detail }}</div>{% endif %}
+            {% if p.key_difficulties %}<div><strong>关键难点:</strong> {{ p.key_difficulties }}</div>{% endif %}
+            {% if p.resolution_process %}<div><strong>解决过程:</strong> {{ p.resolution_process }}</div>{% endif %}
+            {% if p.project_outputs %}<div><strong>产出:</strong> {{ p.project_outputs }}</div>{% endif %}
+            {% if p.evidence %}<div><strong>证据:</strong> {{ p.evidence }}</div>{% endif %}
+            {% if p.askable_points %}<div><strong>可追问:</strong> {{ p.askable_points }}</div>{% endif %}
+        </div>
+
+        {% if p.expression_boundary or p.do_not_claim %}
+        <div style="margin-top:0.625rem;padding:0.55rem 0.7rem;background:var(--bg-warm);
+                    border-radius:var(--radius-sm);font-size:0.84rem;">
+            {% if p.expression_boundary %}
+            <div><strong>表达边界:</strong> {{ p.expression_boundary }}</div>
+            {% endif %}
+            {% if p.do_not_claim %}
+            <div style="margin-top:0.25rem;color:var(--danger);"><strong>不要写:</strong> {{ p.do_not_claim }}</div>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+</div>

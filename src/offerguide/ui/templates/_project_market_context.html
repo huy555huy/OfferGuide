@@ -1,0 +1,30 @@
+<div class="market-draft">
+    {% if market_draft.market_context %}
+    <label class="field">
+        <span class="label-text">外部表达参考（可编辑后再入库）</span>
+        <textarea name="market_context" rows="5">{{ market_draft.market_context }}</textarea>
+    </label>
+    {% else %}
+    <label class="field">
+        <span class="label-text">外部表达参考（可编辑后再入库）</span>
+        <textarea name="market_context" rows="5"
+                  placeholder="AI 暂时没有生成内容。可以手动写：同类项目通常怎么解释问题、用户价值、系统能力和边界。"></textarea>
+    </label>
+    {% endif %}
+
+    <label class="field" style="margin-top:0.5rem;">
+        <span class="label-text">参考来源</span>
+        <textarea name="reference_sources" rows="4"
+                  placeholder="公开发布稿、技术博客、README、论文或产品文档链接。">{{ market_draft.reference_sources }}</textarea>
+    </label>
+
+    {% if market_draft.warnings %}
+    <div style="margin-top:0.5rem;padding:0.55rem 0.7rem;background:var(--bg-warm);
+                border-radius:var(--radius-sm);font-size:0.84rem;">
+        <strong>边界提醒:</strong>
+        {% for warning in market_draft.warnings %}
+        <div>{{ warning }}</div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>

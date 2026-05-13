@@ -16,6 +16,7 @@ Tables (additional vector tables in `vec.py`):
 - `evolution_log` — one row per GEPA evolution run
 - `inbox_items` — HITL queue (W4)
 - `interview_experiences` — 面经 corpus for prepare_interview RAG
+- `project_records` — user's truthful project fact vault for resume/interview grounding
 """
 
 from __future__ import annotations
@@ -214,6 +215,64 @@ CREATE TABLE IF NOT EXISTS behavioral_stories (
     confidence        REAL NOT NULL DEFAULT 0.5,   -- user's self-rated readiness (0-1)
     created_at        REAL DEFAULT (julianday('now'))
 );
+
+-- Project fact vault — private grounding material for resume tailoring and
+-- project deep-dive prep. This is deliberately NOT a "metrics brag" table:
+-- the user records mainstream direction, real work, contribution boundary,
+-- artifacts, and "do not claim" guardrails. Downstream SKILLs may use it
+-- as evidence, but must not invent percent lifts / rankings / scale numbers
+-- unless the project_outputs or evidence fields explicitly support them.
+-- `market_context` stores how similar projects/products are commonly
+-- explained in public launch posts, docs, papers, or open-source READMEs.
+-- It is expression reference only, never evidence that the user achieved
+-- the same metrics, scale, or novelty.
+CREATE TABLE IF NOT EXISTS project_records (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    title                 TEXT NOT NULL,
+    mainstream_direction  TEXT NOT NULL,
+        -- e.g. LLM application / recommender systems / backend system / CV / data analysis
+    typical_problem       TEXT,
+        -- What this direction usually solves, and which sub-problem this project touched.
+    project_task          TEXT NOT NULL,
+        -- What the project actually set out to complete, without over-claiming.
+    my_work               TEXT NOT NULL,
+        -- What the user personally did; should distinguish team work vs own work.
+    method_route          TEXT,
+        -- Mainstream method/framework/model/engineering route and why it was chosen.
+    market_context        TEXT,
+        -- Public-context summary: how comparable projects describe the problem,
+        -- value, audience, and system shape. Not a claim about this project.
+    reference_sources     TEXT,
+        -- Source titles/URLs used for market_context.
+    contribution_type     TEXT NOT NULL DEFAULT 'main_contribution',
+        -- method_innovation | engineering_improvement | application_transfer |
+        -- process_improvement | integration | reproduction | main_contribution
+    contribution_detail   TEXT,
+        -- A conservative description of innovation/improvement/contribution.
+    key_difficulties      TEXT,
+        -- Real blockers: data quality, model instability, integration, deployment, etc.
+    resolution_process    TEXT,
+        -- How the user diagnosed/tried/settled. Not a polished fake solution.
+    project_outputs       TEXT,
+        -- Artifacts: code, report, demo, model, comparison table, deployment, etc.
+    evidence              TEXT,
+        -- Links/paths/screenshots/reports/logs that back claims.
+    askable_points        TEXT,
+        -- Interview/professor follow-up points the user can actually answer.
+    expression_boundary   TEXT,
+        -- Can say / be careful saying / do not say.
+    do_not_claim          TEXT,
+        -- Explicit claims that should never be generated into a resume/interview answer.
+    tags_json             TEXT NOT NULL DEFAULT '[]',
+    confidence            REAL NOT NULL DEFAULT 0.5,
+        -- User-rated defensibility/readiness, 0..1.
+    created_at            REAL DEFAULT (julianday('now')),
+    updated_at            REAL DEFAULT (julianday('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_project_records_direction
+    ON project_records(mainstream_direction);
+CREATE INDEX IF NOT EXISTS idx_project_records_confidence
+    ON project_records(confidence, updated_at);
 
 -- ``daemon_runs`` records each scheduled-job execution so the UI can show
 -- "is the autonomous daemon actually running, and what did each job do
@@ -541,6 +600,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "ADD COLUMN quality_classified_at REAL"
             )
 
+    project_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(project_records)").fetchall()
+    }
+    if project_cols:  # only if the table exists
+        if "market_context" not in project_cols:
+            conn.execute("ALTER TABLE project_records ADD COLUMN market_context TEXT")
+        if "reference_sources" not in project_cols:
+            conn.execute("ALTER TABLE project_records ADD COLUMN reference_sources TEXT")
+
 
 class Store:
     """Thin connection-per-call wrapper. Keep operations short — SQLite is fine
@@ -592,5 +660,6 @@ class Store:
                 "interview_experiences",
                 "company_briefs",
                 "behavioral_stories",
+                "project_records",
             ]
             return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}

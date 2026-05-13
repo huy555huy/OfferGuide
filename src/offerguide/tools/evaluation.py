@@ -298,6 +298,13 @@ def _generate_interview_prep_handler(args: dict[str, Any], **rt: Any) -> str:
         return tool_error(f"job#{job_id} not found")
     if not user_profile_text:
         return tool_error("user_profile_text missing")
+    try:
+        from .. import project_vault as _pv
+        user_profile_text = _pv.append_to_profile_text(
+            store, user_profile_text, max_project_chars=3500,
+        )
+    except Exception:
+        pass
 
     # Pull past 面经 if any
     past_experiences_text = ""
@@ -318,7 +325,7 @@ def _generate_interview_prep_handler(args: dict[str, Any], **rt: Any) -> str:
         inputs={
             "company": job["company"],
             "job_text": _format_jd(job)[:5000],
-            "user_profile": user_profile_text[:5000],
+            "user_profile": user_profile_text[:8500],
             "past_experiences": past_experiences_text or "(无过往面经)",
         },
         store=store, runtime=runtime, skills=skills,
@@ -376,11 +383,18 @@ def _tailor_resume_handler(args: dict[str, Any], **rt: Any) -> str:
         return tool_error(f"job#{job_id} not found")
     if not user_profile_text:
         return tool_error("user_profile_text missing")
+    try:
+        from .. import project_vault as _pv
+        user_profile_text = _pv.append_to_profile_text(
+            store, user_profile_text, max_project_chars=3500,
+        )
+    except Exception:
+        pass
 
     out = _invoke_skill(
         name="tailor_resume",
         inputs={
-            "master_resume": user_profile_text[:6000],
+            "master_resume": user_profile_text[:9000],
             "job_text": _format_jd(job)[:4000],
             "company": job["company"],
             "successful_profile_json": "{}",

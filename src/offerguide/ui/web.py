@@ -1078,17 +1078,21 @@ def create_app(
         }
         application_plan = build_application_plan(job)
 
-        from ..harness.tools import _format_jd_for_skill
-        from ..skill_view import invoke_skill_for_view
-
         # Run tailor_resume + apply_assistant concurrently. Both are LLM
         # calls (~15-25s each cold) so gather() halves wall time. Cached
         # invocations short-circuit instantly so warm visits stay snappy.
         import asyncio as _asyncio
+
+        from .. import project_vault as _pv
+        from ..harness.tools import _format_jd_for_skill
+        from ..skill_view import invoke_skill_for_view
+
         tailor_task = invoke_skill_for_view(
             skill_name="tailor_resume",
             inputs_builder=lambda _spec, p: {
-                "master_resume": p.raw_resume_text[:6000],
+                "master_resume": _pv.append_to_profile_text(
+                    store, p.raw_resume_text, max_project_chars=3500,
+                )[:9000],
                 "job_text": _format_jd_for_skill(job)[:5000],
                 "company": job["company"],
                 "successful_profile_json": "{}",
@@ -1173,14 +1177,18 @@ def create_app(
         # W19 — invoke prepare_interview via reusable helper.
         # SKILL inputs verified W15.22:
         #   (company, job_text, user_profile, past_experiences)
+        from .. import project_vault as _pv
         from ..harness.tools import _format_jd_for_skill
         from ..skill_view import invoke_skill_for_view
+
         result = await invoke_skill_for_view(
             skill_name="prepare_interview",
             inputs_builder=lambda _spec, p: {
                 "company": job["company"],
                 "job_text": _format_jd_for_skill(job)[:5000],
-                "user_profile": p.raw_resume_text[:5000],
+                "user_profile": _pv.append_to_profile_text(
+                    store, p.raw_resume_text, max_project_chars=3500,
+                )[:8500],
                 "past_experiences": past_experiences_text or "(无过往面经)",
             },
             settings=settings, profile=profile, runtime=runtime,
@@ -2108,6 +2116,133 @@ def create_app(
                 stories=story_bank.list_all(store, limit=50),
                 just_added=new_story.id,
             ),
+        )
+
+    @app.get("/project-vault", response_class=HTMLResponse)
+    def project_vault_view(request: Request) -> Any:
+        from .. import project_vault
+        return templates.TemplateResponse(
+            request,
+            "project_vault.html",
+            _ctx(
+                request,
+                projects=project_vault.list_all(store, limit=80),
+                recommended_directions=project_vault.RECOMMENDED_DIRECTIONS,
+                contribution_labels=project_vault.CONTRIBUTION_LABELS,
+                active_tab="project_vault",
+            ),
+        )
+
+    @app.post("/api/project-vault/insert", response_class=HTMLResponse)
+    def project_vault_insert(
+        request: Request,
+        title: str = Form(...),
+        mainstream_direction: str = Form(...),
+        project_task: str = Form(...),
+        my_work: str = Form(...),
+        typical_problem: str = Form(""),
+        method_route: str = Form(""),
+        market_context: str = Form(""),
+        reference_sources: str = Form(""),
+        contribution_type: str = Form("main_contribution"),
+        contribution_detail: str = Form(""),
+        key_difficulties: str = Form(""),
+        resolution_process: str = Form(""),
+        project_outputs: str = Form(""),
+        evidence: str = Form(""),
+        askable_points: str = Form(""),
+        expression_boundary: str = Form(""),
+        do_not_claim: str = Form(""),
+        tags: str = Form(""),
+        confidence: str = Form("0.5"),
+    ) -> Any:
+        from .. import project_vault
+        try:
+            conf = max(0.0, min(1.0, float(confidence or "0.5")))
+        except ValueError:
+            conf = 0.5
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        try:
+            record = project_vault.insert(
+                store,
+                title=title,
+                mainstream_direction=mainstream_direction,
+                typical_problem=typical_problem or None,
+                project_task=project_task,
+                my_work=my_work,
+                method_route=method_route or None,
+                market_context=market_context or None,
+                reference_sources=reference_sources or None,
+                contribution_type=contribution_type,
+                contribution_detail=contribution_detail or None,
+                key_difficulties=key_difficulties or None,
+                resolution_process=resolution_process or None,
+                project_outputs=project_outputs or None,
+                evidence=evidence or None,
+                askable_points=askable_points or None,
+                expression_boundary=expression_boundary or None,
+                do_not_claim=do_not_claim or None,
+                tags=tag_list,
+                confidence=conf,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+
+        return templates.TemplateResponse(
+            request,
+            "_project_list.html",
+            _ctx(
+                request,
+                projects=project_vault.list_all(store, limit=80),
+                just_added=record.id,
+            ),
+        )
+
+    @app.post("/api/project-vault/draft-market-context", response_class=HTMLResponse)
+    def project_vault_draft_market_context(
+        request: Request,
+        title: str = Form(""),
+        mainstream_direction: str = Form(""),
+        project_task: str = Form(""),
+        my_work: str = Form(""),
+    ) -> Any:
+        from .. import project_vault
+        from ..agentic.search import build_default_search
+
+        llm = runtime._llm if runtime is not None else None
+        search = None
+        try:
+            search = build_default_search()
+            draft = project_vault.draft_market_context(
+                title=title,
+                mainstream_direction=mainstream_direction,
+                project_task=project_task,
+                my_work=my_work,
+                search=search,
+                llm=llm,
+            )
+        except ValueError as e:
+            draft = project_vault.MarketContextDraft(
+                market_context="",
+                reference_sources="",
+                warnings=[str(e)],
+            )
+        except Exception as e:
+            draft = project_vault.MarketContextDraft(
+                market_context="",
+                reference_sources="",
+                warnings=[f"生成失败: {e}"],
+            )
+        finally:
+            close = getattr(search, "close", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    close()
+
+        return templates.TemplateResponse(
+            request,
+            "_project_market_context.html",
+            _ctx(request, market_draft=draft),
         )
 
     @app.get("/interviews", response_class=HTMLResponse)
@@ -3596,10 +3731,13 @@ def create_app(
             )
 
         try:
+            from .. import project_vault as _pv
             result = runtime.invoke(
                 spec,
                 {
-                    "master_resume": profile.raw_resume_text,
+                    "master_resume": _pv.append_to_profile_text(
+                        store, profile.raw_resume_text, max_project_chars=3500,
+                    ),
                     "job_text": job_text,
                     "company": company,
                     "successful_profile_json": successful_profile_json,

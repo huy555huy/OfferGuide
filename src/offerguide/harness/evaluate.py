@@ -217,10 +217,17 @@ def evaluate_job(
         if tailor_spec is None:
             result.tailor_status = "skipped"
         else:
+            try:
+                from .. import project_vault as _pv
+                resume_for_tailor = _pv.append_to_profile_text(
+                    deps.store, deps.user_profile_text, max_project_chars=3500,
+                )
+            except Exception:
+                resume_for_tailor = deps.user_profile_text
             sr = _invoke_skill(
                 deps, tailor_spec,
                 inputs={
-                    "master_resume": deps.user_profile_text[:6000],
+                    "master_resume": resume_for_tailor[:9000],
                     "job_text": _format_jd_for_skill(job_row)[:4000],
                     "company": job_row["company"] or "",
                     "successful_profile_json": "{}",  # no successful profile pipeline yet
