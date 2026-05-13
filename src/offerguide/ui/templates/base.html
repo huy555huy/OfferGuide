@@ -617,7 +617,8 @@
         <nav>
             {# W15.16 — 5 主 tab + 分组 dropdown (cite: docs/agent_diagnosis_2026-05-07.md §1.2)
                原 19 个 nav 入口大幅简化为 "今日 / 投递 / 面试 / 简历 / Agent" 5 主 + 设置 dropdown #}
-            <a href="/" class="{% if active_tab == 'home' %}active{% endif %}">今日</a>
+            <a href="/" class="{% if active_tab == 'agent' %}active{% endif %}">Agent</a>
+            <a href="/today" class="{% if active_tab == 'home' %}active{% endif %}">今日</a>
 
             {# 投递: 推荐 / 看板 / 记录 / 跟踪 / 漏斗 #}
             <details class="nav-more">
@@ -651,13 +652,6 @@
                     <a href="/portfolio"     class="{% if active_tab == 'portfolio' %}active{% endif %}">公开作品集指标</a>
                 </div>
             </details>
-
-            <a href="/agent" class="{% if active_tab == 'agent' %}active{% endif %}">
-                🤖 Agent
-                {% if nav and nav.last_critic is not none %}
-                <span class="nav-badge {% if nav.last_critic >= 0.7 %}low{% elif nav.last_critic >= 0.4 %}middle{% else %}high{% endif %}">{{ "%.2f"|format(nav.last_critic) }}</span>
-                {% endif %}
-            </a>
 
             {# 设置: Goals / Inbox / 进化 / 对比 / 系统状态 / Debug #}
             <details class="nav-more">

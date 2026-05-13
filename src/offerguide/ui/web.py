@@ -2,8 +2,9 @@
 
 Routes (after W13.1 cleanup):
 
-    GET  /                     daily standup home
-    GET  /agent                W13 central agent loop entry point
+    GET  /                     Agent Chat workbench
+    GET  /today                daily standup / status home
+    GET  /agent                alias for the central agent loop entry point
     GET  /api/agent/stream     SSE streaming agent execution events
     GET  /agent/runs/{id}      view a persisted agent_runs trajectory
     GET  /inbox                pending agent suggestions
@@ -141,6 +142,10 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request) -> Any:
+        return agent_page(request)
+
+    @app.get("/today", response_class=HTMLResponse)
+    def home_legacy(request: Request) -> Any:
         """Home (W13.x rewrite) — agent-driven, not dashboard-driven.
 
         The pre-W13 home was a daemon-style stat panel ("4 stat cards + 5
@@ -2465,12 +2470,26 @@ def create_app(
                 "status": r[3], "iterations": r[4],
                 "critic_score": None, "latency_ms": latency_ms,
             })
+        first_use = False
+        try:
+            with store.connect() as conn:
+                n_jobs = conn.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE length(raw_text) >= 200"
+                ).fetchone()[0]
+                n_goals = conn.execute(
+                    "SELECT COUNT(*) FROM user_goals WHERE status='active'"
+                ).fetchone()[0]
+            first_use = not recent_runs and n_jobs == 0 and n_goals == 0
+        except Exception:
+            first_use = False
         return templates.TemplateResponse(
             request,
             "agent.html",
             _ctx(
                 request,
                 recent_runs=recent_runs,
+                recent_artifacts=_recent_agent_artifacts(store, limit=6),
+                first_use=first_use,
                 skill_count=len(skills),
                 tools_ready=runtime is not None and bool(settings.deepseek_api_key),
                 active_tab="agent",
@@ -3354,6 +3373,16 @@ def create_app(
                 "ORDER BY created_at DESC LIMIT 20",
                 (f"%harness_run#{run_id}%",),
             ).fetchall()
+            artifact_rows = conn.execute(
+                "SELECT id, kind, job_id, note, created_at "
+                "FROM harness_events "
+                "WHERE note LIKE ? AND kind IN ("
+                "  'tailor_resume_generated', 'interview_prep_generated', "
+                "  'project_record_saved', 'project_assessed'"
+                ") "
+                "ORDER BY created_at DESC LIMIT 20",
+                (f"%\"agent_run_id\": {run_id}%",),
+            ).fetchall()
 
         # tool_calls_json: {"calls": ["iter1.foo(...)", ...], "sub_agent_cost_usd": ...}
         try:
@@ -3382,6 +3411,12 @@ def create_app(
              "value": r[3], "weight": r[4], "notes": r[5]}
             for r in sig_rows
         ]
+        artifacts = [
+            artifact for artifact in (
+                _artifact_from_event_row(r) for r in artifact_rows
+            )
+            if artifact is not None
+        ]
 
         return templates.TemplateResponse(
             request,
@@ -3401,6 +3436,7 @@ def create_app(
                 cost_usd=row[9],
                 suggestions=suggestions,
                 signals=signals,
+                artifacts=artifacts,
                 active_tab="agent",
             ),
         )
@@ -5171,6 +5207,96 @@ def _recent_skill_runs(store: Store, *, limit: int = 10) -> list[dict[str, Any]]
         )
     _ = _time  # silence unused
     return out
+
+
+def _recent_agent_artifacts(store: Store, *, limit: int = 6) -> list[dict[str, Any]]:
+    """Latest artifacts produced through Agent Chat tools."""
+    from ..harness import _schema as _hs
+
+    try:
+        _hs.init_harness_schema(store)
+        with store.connect() as conn:
+            rows = conn.execute(
+                "SELECT id, kind, job_id, note, "
+                "(julianday('now') - created_at) * 86400 AS age_seconds "
+                "FROM harness_events "
+                "WHERE kind IN ("
+                "  'tailor_resume_generated', 'interview_prep_generated', "
+                "  'project_record_saved', 'project_assessed'"
+                ") "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    except Exception:
+        return []
+
+    artifacts: list[dict[str, Any]] = []
+    for row in rows:
+        artifact = _artifact_from_event_row(row)
+        if artifact is None:
+            continue
+        age = float(row[4] or 0)
+        artifact["when_ago"] = _humanize_age(age)
+        artifacts.append(artifact)
+    return artifacts
+
+
+def _artifact_from_event_row(row: Any) -> dict[str, Any] | None:
+    event_id, kind, job_id, note = row[0], row[1], row[2], row[3]
+    try:
+        payload = json_loads(note or "{}")
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if kind == "tailor_resume_generated":
+        srid = payload.get("skill_run_id")
+        return {
+            "event_id": event_id,
+            "kind": kind,
+            "label": "简历微调",
+            "title": f"job#{job_id} · skill_run#{srid}",
+            "view": payload.get("view") or "/tailor",
+            "detail": "Agent 生成了 truthful change_log 和定向简历产物",
+        }
+    if kind == "interview_prep_generated":
+        srid = payload.get("skill_run_id")
+        return {
+            "event_id": event_id,
+            "kind": kind,
+            "label": "面试准备",
+            "title": f"job#{job_id} · {payload.get('round') or '面试'} · skill_run#{srid}",
+            "view": payload.get("view") or "/reflect",
+            "detail": "Agent 生成了面试重点、预测问题和弱点清单",
+        }
+    if kind == "project_record_saved":
+        project_id = payload.get("project_id")
+        title = payload.get("title") or f"project#{project_id}"
+        return {
+            "event_id": event_id,
+            "kind": kind,
+            "label": "项目档案",
+            "title": f"{title} · project#{project_id}",
+            "view": payload.get("view") or "/project-vault",
+            "detail": f"方向: {payload.get('direction') or '未记录'}",
+        }
+    if kind == "project_assessed":
+        return {
+            "event_id": event_id,
+            "kind": kind,
+            "label": "项目评估",
+            "title": (
+                "可按 AI Agent 写" if payload.get("is_agent_project")
+                else "先别硬包装成 Agent"
+            ),
+            "view": "/project-vault",
+            "detail": (
+                f"next_action={payload.get('next_action') or 'unknown'} · "
+                f"缺事实 {len(payload.get('missing_facts') or [])} 项"
+            ),
+        }
+    return None
 
 
 def _humanize_age(seconds: float) -> str:

@@ -43,11 +43,8 @@ class TestHomeRendering:
         client, _ = app_client
         resp = client.get("/")
         assert resp.status_code == 200
-        # W14.13: home is Mission Control. On empty DB, daemons each show
-        # "从未跑过" (never run) and the stats strip is hidden (no weekly
-        # activity to report). Mission Control header always present.
-        assert "Mission Control" in resp.text
-        assert "从未跑过" in resp.text or "Scheduler" in resp.text or "Tavily" in resp.text
+        assert "Agent Chat" in resp.text
+        assert "主工作台" in resp.text
 
     def test_home_shows_latest_agent_run(self, app_client):
         client, store = app_client
@@ -60,13 +57,8 @@ class TestHomeRendering:
             )
         resp = client.get("/")
         assert resp.status_code == 200
-        # W14.13: home is now Mission Control. The wake_agent button moved
-        # to the daemon card, triggered via /api/scheduler/trigger/wake_agent.
-        # The latest_run is still queried (it drives parts of next_step) but
-        # not displayed on the hero anymore — instead the Mission Control
-        # daemon cards + activity timeline show what's happening.
-        assert "Mission Control" in resp.text
-        assert "wake_agent" in resp.text  # daemon name appears
+        assert "Agent Chat" in resp.text
+        assert "最近 Agent 运行" in resp.text
 
     def test_home_does_not_show_running_or_failed_runs_in_hero(self, app_client):
         """Only ok runs land in the hero (failed/running runs would be confusing)."""
@@ -85,15 +77,10 @@ class TestHomeRendering:
                 "VALUES ('cron_wake', 'older check', 'ok', 1, "
                 "        'older agent answer', julianday('now') - 0.1)"
             )
-        resp = client.get("/")
-        # W14.13: home is Mission Control. We're not really testing
-        # "older agent answer shows" any more — the contract is "failed
-        # agent runs don't appear in the latest_run query path that drives
-        # next_step / weekly stats". Simplest assertion: the page renders
-        # OK without the failed run text leaking, and Mission Control is
-        # the dominant UI now.
+        resp = client.get("/today")
         assert resp.status_code == 200
         assert "Mission Control" in resp.text
+        assert "older agent answer" not in resp.text
 
     def test_home_lists_pending_agent_suggestions(self, app_client):
         from offerguide import inbox as inbox_mod
@@ -111,7 +98,7 @@ class TestHomeRendering:
         inbox_mod.enqueue(
             store, kind="consider_jd", title="legacy item", body="z",
         )
-        resp = client.get("/")
+        resp = client.get("/today")
         assert resp.status_code == 200
         assert "建议 tailor 字节简历" in resp.text
         assert "silent 14 天" in resp.text
@@ -121,7 +108,7 @@ class TestHomeRendering:
     def test_home_quick_links_present(self, app_client):
         client, _ = app_client
         resp = client.get("/")
-        for link in ["/agent", "/applications", "/tailor", "/mock", "/evolution", "/inbox"]:
+        for link in ["/", "/today", "/applications", "/tailor", "/mock", "/evolution", "/inbox"]:
             assert f'href="{link}"' in resp.text
 
 
@@ -155,4 +142,4 @@ class TestNoOldDashboardLanguage:
         """Even on empty DB, the hero is about agent (not about stats)."""
         client, _ = app_client
         resp = client.get("/")
-        assert "Agent" in resp.text  # Hero title contains "Agent"
+        assert "Agent Chat" in resp.text

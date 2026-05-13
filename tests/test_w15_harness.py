@@ -390,6 +390,34 @@ class TestToolDispatch:
         assert row[0] == "applied"
         assert row[1] == 42
 
+    def test_read_artifact_reads_latest_tailor_event(self, deps):
+        with deps.store.connect() as conn:
+            conn.execute(
+                "INSERT INTO skill_runs(skill_name, skill_version, input_hash, "
+                "input_json, output_json, cost_usd, latency_ms) "
+                "VALUES ('tailor_resume', '0.2.0', 'h_art', '{}', ?, 0.0, 1)",
+                (_json.dumps({
+                    "company": "字节",
+                    "role_focus": "AI Agent 实习",
+                    "suggested_filename": "resume-byte-agent.pdf",
+                    "change_log": ["把项目描述从术语堆叠改成任务-方法-边界"],
+                    "cannot_fake_warnings": ["不要写准确率提升 30%，没有证据"],
+                }, ensure_ascii=False),),
+            )
+            srid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "INSERT INTO harness_events(kind, job_id, note, source) "
+                "VALUES ('tailor_resume_generated', 7, ?, 'agent')",
+                (_json.dumps({"skill_run_id": srid, "view": "/tailor"}, ensure_ascii=False),),
+            )
+
+        out = dispatch("read_artifact", {"artifact_kind": "latest_tailor"}, deps)
+
+        assert out.startswith(f"OK artifact skill_run#{srid}")
+        assert "View: /tailor" in out
+        assert "resume-byte-agent.pdf" in out
+        assert "不要写准确率提升" in out
+
     def test_ask_user_writes_inbox_question(self, deps):
         r = dispatch("ask_user", {
             "question": "你想投北京吗?",
@@ -722,14 +750,30 @@ def web_client(tmp_path):
 class TestHomeWithW15:
     def test_home_renders_worldview_section(self, web_client):
         client, _ = web_client
-        # Hitting / will trigger MemoryStore bootstrap on real worldview dir;
-        # the rendered template surfaces the 心智窗口 card.
         resp = client.get("/")
         assert resp.status_code == 200
-        # New W15 sections present
-        assert "🧠" in resp.text  # 心智窗口
-        assert "💬" in resp.text  # chat input
-        assert "submitAgentChat" in resp.text  # JS handler
+        assert "Agent Chat" in resp.text
+        assert "runAgent" in resp.text
+
+    def test_home_surfaces_recent_agent_artifacts(self, web_client):
+        client, store = web_client
+        harness_schema.init_harness_schema(store)
+        with store.connect() as conn:
+            conn.execute(
+                "INSERT INTO harness_events(kind, note, source) "
+                "VALUES ('project_record_saved', ?, 'agent')",
+                (_json.dumps({
+                    "project_id": 3,
+                    "title": "Deep Research Workspace",
+                    "direction": "AI Agent",
+                    "view": "/project-vault",
+                }, ensure_ascii=False),),
+            )
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "最近产物" in resp.text
+        assert "Deep Research Workspace" in resp.text
+        assert "/project-vault" in resp.text
 
     def test_home_chat_endpoint_requires_llm(self, web_client):
         client, _ = web_client
@@ -1438,20 +1482,17 @@ class TestReviewFixes:
 
     # ── W15.16: 术语去内核化 — user-facing UI 不应该暴露 internal jargon
     def test_home_no_mission_control_visible(self, web_client):
-        """Mission Control 应该已经被改名 '后台任务' (用户视角不该看到框架行话)."""
+        """Root is now the Agent Chat workbench, not the ops dashboard."""
         client, _ = web_client
         resp = client.get("/")
-        # 应该有"后台任务"
-        assert "后台任务" in resp.text
-        # 仍可保留在 collapsed details 里, 但 H2 不该是 Mission Control
-        # (允许 jinja 注释里残留 — 那是给 dev 看的, 不渲染到 visible text)
+        assert "Agent Chat" in resp.text
+        assert "Mission Control" not in resp.text
 
     def test_home_has_dejargonized_button_labels(self, web_client):
         """W15.16 — '唤醒 agent' / 'trajectory' 这些 internal 术语该被替换."""
         client, _ = web_client
         resp = client.get("/")
-        # 用户友好的按钮 label
-        assert "让 agent" in resp.text  # "让 agent 跑一次" / "让 agent 现在跑一次"
+        assert "启动 Agent" in resp.text
         # 不应再出现 "唤醒 agent" 这种生硬翻译
         # (允许 details/comments — 检查可见 UI 部分)
         # 老的 "trajectory" 链接文字被改
@@ -1462,20 +1503,17 @@ class TestReviewFixes:
         client, _ = web_client
         resp = client.get("/")
         # 5 个主分组都在
-        for group_label in ("📤 投递", "🎤 面试", "📝 简历", "🤖 Agent", "⚙ 设置"):
+        for group_label in ("Agent", "今日", "📤 投递", "🎤 面试", "📝 简历", "⚙ 设置"):
             assert group_label in resp.text, f"navbar 缺 {group_label}"
         # 老的 "🎯 Goals" 移到 设置 dropdown 里, 仍然能从"目标"链接进
         assert "🎯 目标" in resp.text or "🎯 Goals" in resp.text
 
     def test_home_has_resume_tailor_hero(self, web_client):
-        """W15.16 — 第二个 hero: 简历定向修改 (国内独有 wedge)."""
+        """Root should route resume tailoring through the main agent chat."""
         client, _ = web_client
         resp = client.get("/")
-        # docx_tailor 第二个 hero 卡
-        assert "这份简历针对这家公司够不够" in resp.text
-        # 提到关键差异化: 保 docx 格式 + 不重写
-        assert "保留 .docx 段落格式" in resp.text or "保 .docx" in resp.text or "保留 " in resp.text
-        assert "不重写" in resp.text or "wording / order / emphasis" in resp.text
+        assert "调简历" in resp.text
+        assert "模型自己看状态、选工具、产出结果" in resp.text
 
     # ── W15.17 正确修法 2: app_limit_with_attribution 返结构化 source 信息
     def test_app_limit_attribution_default_fallback(self, tmp_store):

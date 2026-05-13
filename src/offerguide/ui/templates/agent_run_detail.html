@@ -70,6 +70,24 @@
 </div>
 {% endif %}
 
+{% if artifacts %}
+<div class="card">
+    <div class="card-header">
+        <h2>这次 run 生成/更新的产物 ({{ artifacts|length }})</h2>
+        <span class="meta">Agent Chat 编排，功能页只负责展示</span>
+    </div>
+    {% for a in artifacts %}
+    <div style="display:flex;gap:0.6rem;align-items:flex-start;padding:0.55rem 0;border-bottom:1px solid var(--border-soft);font-size:0.875rem;">
+        <span class="pill">{{ a.label }}</span>
+        <div>
+            <a href="{{ a.view }}"><strong>{{ a.title }}</strong></a>
+            <div class="small muted">{{ a.detail }}</div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
 {# ─────────── W14 联动: evolution signals 这次 run 触发了哪些 ─────────── #}
 
 {% if signals %}

@@ -188,7 +188,7 @@ class TestHomeOnboarding:
         assert "👋 第一次用" in resp.text
         # Three concrete steps with real route links
         assert 'href="/goals"' in resp.text
-        assert 'href="/agent"' in resp.text
+        assert 'href="/"' in resp.text
 
     def test_non_empty_db_hides_first_time_banner(self, fresh_client):
         client, store = fresh_client

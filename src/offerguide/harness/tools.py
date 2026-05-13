@@ -248,6 +248,129 @@ _TOOL_INTERVIEW_PREP: dict[str, Any] = {
 }
 
 
+_TOOL_CAPTURE_PROJECT: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "capture_project",
+        "description": (
+            "Turn a free-form project description into a truthful Project Vault "
+            "assessment. Use when the user asks to整理项目/项目入库/判断是不是 "
+            "AI Agent 项目/为简历或复试准备项目素材. The tool returns whether "
+            "the project is truly agent-like, missing facts, risk flags, next "
+            "questions, and suggested fields. If facts are missing, ask_user "
+            "instead of pretending the project is ready."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "raw_project_note": {
+                    "type": "string",
+                    "description": "User's free-form project description or pasted project notes.",
+                },
+            },
+            "required": ["raw_project_note"],
+        },
+    },
+}
+
+
+_TOOL_SAVE_PROJECT_RECORD: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "save_project_record",
+        "description": (
+            "Persist a confirmed truthful project record into Project Vault. "
+            "Call only after the user provided enough facts or explicitly asked "
+            "to save. Do not invent missing metrics or ownership. If key facts "
+            "are missing, call ask_user first."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "mainstream_direction": {"type": "string"},
+                "project_task": {"type": "string"},
+                "my_work": {"type": "string"},
+                "typical_problem": {"type": "string"},
+                "method_route": {"type": "string"},
+                "market_context": {"type": "string"},
+                "reference_sources": {"type": "string"},
+                "contribution_type": {
+                    "type": "string",
+                    "enum": [
+                        "method_innovation",
+                        "engineering_improvement",
+                        "application_transfer",
+                        "process_improvement",
+                        "integration",
+                        "reproduction",
+                        "main_contribution",
+                    ],
+                },
+                "contribution_detail": {"type": "string"},
+                "key_difficulties": {"type": "string"},
+                "resolution_process": {"type": "string"},
+                "project_outputs": {"type": "string"},
+                "evidence": {"type": "string"},
+                "askable_points": {"type": "string"},
+                "expression_boundary": {"type": "string"},
+                "do_not_claim": {"type": "string"},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "confidence": {"type": "number"},
+            },
+            "required": [
+                "title",
+                "mainstream_direction",
+                "project_task",
+                "my_work",
+            ],
+        },
+    },
+}
+
+
+_TOOL_READ_ARTIFACT: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "read_artifact",
+        "description": (
+            "Read back a generated artifact so Agent Chat can answer follow-up "
+            "questions without sending the user to hunt through pages. Use when "
+            "the user asks what changed in the latest tailored resume, wants the "
+            "latest interview prep, or asks what was saved in Project Vault."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "artifact_kind": {
+                    "type": "string",
+                    "enum": [
+                        "latest_tailor",
+                        "latest_interview_prep",
+                        "latest_project",
+                        "skill_run",
+                        "project_record",
+                    ],
+                    "description": "Which artifact to retrieve.",
+                },
+                "artifact_id": {
+                    "type": "integer",
+                    "description": "Required for skill_run or project_record.",
+                },
+                "job_id": {
+                    "type": "integer",
+                    "description": "Optional filter for latest_tailor/latest_interview_prep.",
+                },
+            },
+            "required": ["artifact_kind"],
+        },
+    },
+}
+
+
 _TOOL_REFLECT_OUTCOME: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -520,6 +643,9 @@ _MAIN_TOOL_ENTRIES: list[tuple[dict[str, Any], str]] = [
     # Reactive (agent calls when user brings it)
     (_TOOL_FETCH_JD, "_exec_fetch_jd"),
     (_TOOL_INTERVIEW_PREP, "_exec_interview_prep"),
+    (_TOOL_CAPTURE_PROJECT, "_exec_capture_project"),
+    (_TOOL_SAVE_PROJECT_RECORD, "_exec_save_project_record"),
+    (_TOOL_READ_ARTIFACT, "_exec_read_artifact"),
     (_TOOL_REFLECT_OUTCOME, "_exec_reflect_outcome"),
     # Universal capabilities
     (_TOOL_SCORE_MATCH, "_exec_score_match"),
@@ -803,10 +929,17 @@ def _exec_tailor_advice(args: dict[str, Any], deps: HarnessDeps) -> str:
             f"Raw (first 500 chars):\n{result.raw_text[:500]}\n"
             f"(skill_run_id={result.skill_run_id})"
         )
+    _record_skill_event(
+        deps, kind="tailor_resume_generated", job_id=job_id,
+        skill_run_id=result.skill_run_id,
+        extra={"view": "/tailor", "result_anchor": f"skill_run#{result.skill_run_id}"},
+    )
     return (
-        f"OK tailor_advice for job#{job_id}:\n"
+        f"OK tailor_advice generated for job#{job_id}. "
+        f"Result: skill_run_id={result.skill_run_id}; view it on /tailor "
+        "or dashboard recent skill runs. Next: summarize key change_log and ask "
+        "the user whether to apply/export it.\n"
         f"  {_json.dumps(result.parsed, ensure_ascii=False, indent=2)[:1500]}\n"
-        f"  (skill_run_id={result.skill_run_id})"
     )
 
 
@@ -846,10 +979,174 @@ def _exec_interview_prep(args: dict[str, Any], deps: HarnessDeps) -> str:
             f"Raw (first 500 chars):\n{result.raw_text[:500]}\n"
             f"(skill_run_id={result.skill_run_id})"
         )
+    _record_skill_event(
+        deps, kind="interview_prep_generated", job_id=job_id,
+        skill_run_id=result.skill_run_id,
+        extra={"view": "/reflect", "round": args.get("round", "?")},
+    )
     return (
-        f"OK interview_prep for job#{job_id} (round: {args.get('round', '?')}):\n"
+        f"OK interview_prep generated for job#{job_id} "
+        f"(round: {args.get('round', '?')}). Result: "
+        f"skill_run_id={result.skill_run_id}; view prep history on /reflect "
+        "or use it for mock/复盘. Next: give the user the top 3 prep priorities.\n"
         f"  {_json.dumps(result.parsed, ensure_ascii=False, indent=2)[:2000]}\n"
-        f"  (skill_run_id={result.skill_run_id})"
+    )
+
+
+def _exec_capture_project(args: dict[str, Any], deps: HarnessDeps) -> str:
+    note = (args.get("raw_project_note") or "").strip()
+    if not note:
+        return "ERROR: capture_project requires raw_project_note"
+    from .. import project_vault
+    try:
+        assessment = project_vault.run_intake_agent(
+            raw_project_note=note,
+            search=deps.search,
+            llm=deps.llm,
+        )
+    except Exception as e:
+        return f"ERROR: capture_project failed: {type(e).__name__}: {e}"
+
+    payload = {
+        "is_agent_project": assessment.is_agent_project,
+        "agent_reason": assessment.agent_reason,
+        "next_action": assessment.next_action,
+        "agent_signals": assessment.agent_signals,
+        "non_agent_signals": assessment.non_agent_signals,
+        "missing_facts": assessment.missing_facts,
+        "risk_flags": assessment.risk_flags,
+        "next_questions": assessment.next_questions,
+        "suggested_fields": assessment.suggested_fields,
+        "market_context": assessment.market_context,
+        "reference_sources": assessment.reference_sources,
+        "action_trace": assessment.action_trace or [],
+    }
+    try:
+        _record_event_row(
+            deps,
+            kind="project_assessed",
+            job_id=None,
+            note=_json.dumps({
+                "is_agent_project": assessment.is_agent_project,
+                "next_action": assessment.next_action,
+                "missing_facts": assessment.missing_facts,
+                "risk_flags": assessment.risk_flags,
+                "agent_run_id": deps.current_run_id,
+            }, ensure_ascii=False),
+        )
+    except Exception as e:
+        log.debug("capture_project: record_event failed: %s", e)
+    return (
+        "OK capture_project assessment. If next_action is ask_user, ask the "
+        "user the next_questions before saving. If ready or user explicitly "
+        "asked to save, call save_project_record with suggested_fields; otherwise "
+        "summarize the draft and risk flags.\n"
+        + _json.dumps(payload, ensure_ascii=False, indent=2)[:3500]
+    )
+
+
+def _exec_save_project_record(args: dict[str, Any], deps: HarnessDeps) -> str:
+    from .. import project_vault
+
+    tags = args.get("tags") or []
+    if not isinstance(tags, list):
+        tags = []
+    try:
+        record = project_vault.insert(
+            deps.store,
+            title=str(args.get("title") or ""),
+            mainstream_direction=str(args.get("mainstream_direction") or ""),
+            typical_problem=_none_if_blank_arg(args.get("typical_problem")),
+            project_task=str(args.get("project_task") or ""),
+            my_work=str(args.get("my_work") or ""),
+            method_route=_none_if_blank_arg(args.get("method_route")),
+            market_context=_none_if_blank_arg(args.get("market_context")),
+            reference_sources=_none_if_blank_arg(args.get("reference_sources")),
+            contribution_type=str(args.get("contribution_type") or "main_contribution"),
+            contribution_detail=_none_if_blank_arg(args.get("contribution_detail")),
+            key_difficulties=_none_if_blank_arg(args.get("key_difficulties")),
+            resolution_process=_none_if_blank_arg(args.get("resolution_process")),
+            project_outputs=_none_if_blank_arg(args.get("project_outputs")),
+            evidence=_none_if_blank_arg(args.get("evidence")),
+            askable_points=_none_if_blank_arg(args.get("askable_points")),
+            expression_boundary=_none_if_blank_arg(args.get("expression_boundary")),
+            do_not_claim=_none_if_blank_arg(args.get("do_not_claim")),
+            tags=[str(t).strip() for t in tags if str(t).strip()],
+            confidence=float(args.get("confidence") or 0.5),
+        )
+    except ValueError as e:
+        return f"ERROR: save_project_record missing required truthful field: {e}"
+    except Exception as e:
+        return f"ERROR: save_project_record failed: {type(e).__name__}: {e}"
+
+    try:
+        _record_event_row(
+            deps,
+            kind="project_record_saved",
+            job_id=None,
+            note=_json.dumps({
+                "project_id": record.id,
+                "title": record.title,
+                "direction": record.mainstream_direction,
+                "view": "/project-vault",
+                "agent_run_id": deps.current_run_id,
+            }, ensure_ascii=False),
+        )
+    except Exception as e:
+        log.debug("save_project_record: record_event failed: %s", e)
+
+    return (
+        f"OK save_project_record stored project#{record.id}: {record.title}. "
+        "View it on /project-vault. Next: tell the user what was saved, "
+        "what remains risky, and how it can feed resume tailoring/interview prep."
+    )
+
+
+def _exec_read_artifact(args: dict[str, Any], deps: HarnessDeps) -> str:
+    kind = (args.get("artifact_kind") or "").strip()
+    artifact_id = args.get("artifact_id")
+    job_id = args.get("job_id") if isinstance(args.get("job_id"), int) else None
+
+    if kind == "skill_run":
+        if not isinstance(artifact_id, int):
+            return "ERROR: read_artifact skill_run requires artifact_id"
+        return _render_skill_run_artifact(deps.store, artifact_id)
+
+    if kind == "project_record":
+        if not isinstance(artifact_id, int):
+            return "ERROR: read_artifact project_record requires artifact_id"
+        return _render_project_artifact(deps.store, artifact_id)
+
+    if kind == "latest_tailor":
+        return _render_latest_skill_artifact(
+            deps.store,
+            skill_name="tailor_resume",
+            event_kind="tailor_resume_generated",
+            view="/tailor",
+            job_id=job_id,
+        )
+
+    if kind == "latest_interview_prep":
+        return _render_latest_skill_artifact(
+            deps.store,
+            skill_name="prepare_interview",
+            event_kind="interview_prep_generated",
+            view="/reflect",
+            job_id=job_id,
+        )
+
+    if kind == "latest_project":
+        with deps.store.connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM project_records ORDER BY updated_at DESC, id DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return "OK no project records saved yet. Ask the user for project facts first."
+        return _render_project_artifact(deps.store, int(row[0]))
+
+    return (
+        "ERROR: read_artifact artifact_kind must be one of latest_tailor, "
+        "latest_interview_prep, latest_project, skill_run, project_record"
     )
 
 
@@ -1165,6 +1462,9 @@ def _load_job(store: Store, job_id: int) -> dict[str, Any] | None:
 def _record_event_row(
     deps: HarnessDeps, *, kind: str, job_id: int | None, note: str,
 ) -> int:
+    from . import _schema
+
+    _schema.init_harness_schema(deps.store)
     with deps.store.connect() as conn:
         cur = conn.execute(
             "INSERT INTO harness_events(kind, job_id, note, source) "
@@ -1172,6 +1472,194 @@ def _record_event_row(
             (kind, job_id, note, "agent"),
         )
         return int(cur.fetchone()[0])
+
+
+def _record_skill_event(
+    deps: HarnessDeps,
+    *,
+    kind: str,
+    job_id: int | None,
+    skill_run_id: int,
+    extra: dict[str, Any] | None = None,
+) -> int:
+    note = {"skill_run_id": skill_run_id}
+    if extra:
+        note.update(extra)
+    if deps.current_run_id is not None:
+        note["agent_run_id"] = deps.current_run_id
+    return _record_event_row(
+        deps,
+        kind=kind,
+        job_id=job_id,
+        note=_json.dumps(note, ensure_ascii=False),
+    )
+
+
+def _none_if_blank_arg(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _render_latest_skill_artifact(
+    store: Store,
+    *,
+    skill_name: str,
+    event_kind: str,
+    view: str,
+    job_id: int | None,
+) -> str:
+    skill_run_id = _latest_skill_run_id_from_events(
+        store,
+        event_kind=event_kind,
+        job_id=job_id,
+    )
+    if skill_run_id is None:
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM skill_runs WHERE skill_name = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (skill_name,),
+            ).fetchone()
+        skill_run_id = int(row[0]) if row else None
+    if skill_run_id is None:
+        suffix = f" for job#{job_id}" if job_id is not None else ""
+        return f"OK no {skill_name} artifact found{suffix}. Generate one first; view target: {view}."
+    return _render_skill_run_artifact(store, skill_run_id)
+
+
+def _latest_skill_run_id_from_events(
+    store: Store,
+    *,
+    event_kind: str,
+    job_id: int | None,
+) -> int | None:
+    try:
+        with store.connect() as conn:
+            if job_id is None:
+                rows = conn.execute(
+                    "SELECT note FROM harness_events WHERE kind = ? "
+                    "ORDER BY created_at DESC, id DESC LIMIT 20",
+                    (event_kind,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT note FROM harness_events WHERE kind = ? AND job_id = ? "
+                    "ORDER BY created_at DESC, id DESC LIMIT 20",
+                    (event_kind, job_id),
+                ).fetchall()
+    except Exception:
+        return None
+    for row in rows:
+        try:
+            payload = _json.loads(row[0] or "{}")
+        except Exception:
+            continue
+        srid = payload.get("skill_run_id") if isinstance(payload, dict) else None
+        if isinstance(srid, int):
+            return srid
+        if isinstance(srid, str) and srid.isdigit():
+            return int(srid)
+    return None
+
+
+def _render_skill_run_artifact(store: Store, skill_run_id: int) -> str:
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT id, skill_name, skill_version, input_json, output_json "
+            "FROM skill_runs WHERE id = ?",
+            (skill_run_id,),
+        ).fetchone()
+    if row is None:
+        return f"ERROR: skill_run#{skill_run_id} not found"
+
+    parsed = _json_obj(row[4])
+    view = _view_for_skill(str(row[1]))
+    summary = _summarize_skill_output(str(row[1]), parsed)
+    return (
+        f"OK artifact skill_run#{row[0]} ({row[1]} v{row[2]}). "
+        f"View: {view}.\n{summary}"
+    )[:4000]
+
+
+def _render_project_artifact(store: Store, project_id: int) -> str:
+    from .. import project_vault
+
+    record = project_vault.get(store, project_id)
+    if record is None:
+        return f"ERROR: project_record#{project_id} not found"
+    lines = [
+        f"OK artifact project#{record.id}: {record.title}. View: /project-vault.",
+        f"- 方向: {record.mainstream_direction}",
+        f"- 任务: {record.project_task}",
+        f"- 我的真实工作: {record.my_work}",
+        f"- 贡献类型: {record.contribution_label}",
+    ]
+    optional = (
+        ("方法路线", record.method_route),
+        ("外部表达参考", record.market_context),
+        ("关键难点", record.key_difficulties),
+        ("解决过程", record.resolution_process),
+        ("证据", record.evidence),
+        ("表达边界", record.expression_boundary),
+        ("不要写", record.do_not_claim),
+    )
+    for label, value in optional:
+        if value:
+            lines.append(f"- {label}: {value}")
+    return "\n".join(lines)[:4000]
+
+
+def _json_obj(raw: str | None) -> dict[str, Any]:
+    try:
+        obj = _json.loads(raw or "{}")
+    except Exception:
+        return {"raw_text": raw or ""}
+    return obj if isinstance(obj, dict) else {"value": obj}
+
+
+def _view_for_skill(skill_name: str) -> str:
+    if skill_name == "tailor_resume":
+        return "/tailor"
+    if skill_name == "prepare_interview":
+        return "/reflect"
+    return "/dashboard"
+
+
+def _summarize_skill_output(skill_name: str, parsed: dict[str, Any]) -> str:
+    if skill_name == "tailor_resume":
+        lines = [
+            f"- 公司/方向: {parsed.get('company') or ''} {parsed.get('role_focus') or ''}".strip(),
+            f"- 建议文件名: {parsed.get('suggested_filename') or '(未提供)'}",
+        ]
+        changes = parsed.get("change_log") or []
+        if isinstance(changes, list) and changes:
+            lines.append("- change_log:")
+            lines.extend(f"  - {str(x)[:220]}" for x in changes[:8])
+        warnings = parsed.get("cannot_fake_warnings") or parsed.get("ai_risk_warnings") or []
+        if isinstance(warnings, list) and warnings:
+            lines.append("- 不可伪造/风险:")
+            lines.extend(f"  - {str(x)[:220]}" for x in warnings[:6])
+        return "\n".join(lines)
+
+    if skill_name == "prepare_interview":
+        lines = [f"- 公司画像: {str(parsed.get('company_snapshot') or '')[:500]}"]
+        focus = parsed.get("prep_focus_areas") or []
+        if isinstance(focus, list) and focus:
+            lines.append("- 备战重点:")
+            lines.extend(f"  - {str(x)[:220]}" for x in focus[:6])
+        questions = parsed.get("expected_questions") or []
+        if isinstance(questions, list) and questions:
+            lines.append("- 预测问题:")
+            lines.extend(f"  - {str(x)[:220]}" for x in questions[:6])
+        weak = parsed.get("weak_spots") or []
+        if isinstance(weak, list) and weak:
+            lines.append("- 弱点:")
+            lines.extend(f"  - {str(x)[:220]}" for x in weak[:6])
+        return "\n".join(lines)
+
+    return _json.dumps(parsed, ensure_ascii=False, indent=2)[:2500]
 
 
 def _seconds_from_now_julianday(delay_seconds: int) -> float:

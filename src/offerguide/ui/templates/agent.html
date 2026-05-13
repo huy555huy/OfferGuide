@@ -81,6 +81,24 @@
     .recent-runs tr:hover { background: var(--bg-subtle); }
     .recent-runs td a { font-family: var(--font-mono); }
 
+    .artifact-list { display: grid; gap: 0.5rem; }
+    .artifact-row {
+        display: block;
+        padding: 0.65rem 0.75rem;
+        background: var(--bg-elev);
+        border: 1px solid var(--border-soft);
+        border-radius: var(--radius-sm);
+        text-decoration: none;
+        color: var(--text);
+    }
+    .artifact-row:hover { border-color: var(--primary); background: var(--primary-soft); }
+    .artifact-row .artifact-top {
+        display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;
+    }
+    .artifact-row .artifact-title { font-weight: 700; }
+    .artifact-row .artifact-detail { color: var(--text-muted); font-size: 0.8rem; }
+    .artifact-row .artifact-time { margin-left: auto; color: var(--text-dim); font-size: 0.75rem; }
+
     .running-indicator {
         display: inline-flex; align-items: center; gap: 0.375rem;
         font-size: 0.825rem; color: var(--primary);
@@ -97,8 +115,8 @@
 
 <div class="page-title">
     <div>
-        <h1>Agent — 模型在主位</h1>
-        <p>不是 Python 决定该调哪个 SKILL, 是 <strong>模型自己看现状决定</strong>。每一步都流式给你看：state 读取 → 思考 → 工具调用 → 结果 → 自我批判 → 收工。共 <strong>{{ skill_count }}</strong> 个 SKILL 作为模型工具。</p>
+        <h1>Agent Chat — 主工作台</h1>
+        <p>你只在这里说目标：找岗位、评 JD、调简历、准备面经、整理项目。模型自己看状态、选工具、产出结果；后面的页面只负责展示刚刚生成的简历、面试准备、项目档案和历史记录。共 <strong>{{ skill_count }}</strong> 个 SKILL / 工具可用。</p>
     </div>
 </div>
 
@@ -115,19 +133,37 @@
 </div>
 {% endif %}
 
+{% if first_use %}
+<div class="card" style="margin-bottom: 1rem; border-color: var(--primary); background: var(--primary-soft);">
+    <div class="card-header">
+        <h2>👋 第一次用? 从 Agent Chat 开始就行</h2>
+        <span class="meta">两条路，哪条都可以</span>
+    </div>
+    <p class="muted" style="margin-top:0;">
+        你可以直接在下面告诉 Agent“我要找 AI Agent 实习 / 帮我整理项目 / 先评这个 JD”，
+        它会自己决定问你、搜索、调工具还是保存产物。
+    </p>
+    <div class="actions">
+        <a class="btn" href="/">在 Agent Chat 说目标</a>
+        <a class="btn secondary" href="/pipeline">先放一个 JD</a>
+        <a class="btn secondary" href="/goals">先设求职目标</a>
+    </div>
+</div>
+{% endif %}
+
 <div class="agent-grid">
 
     <!-- ──────────── 左侧：goal 输入 + 最近 runs ──────────── -->
     <div>
         <div class="card">
             <div class="card-header">
-                <h2>给 Agent 一个目标</h2>
-                <span class="meta">model 自主决定调哪些 SKILL</span>
+                <h2>和 Agent 说你要做什么</h2>
+                <span class="meta">不要找按钮，让模型决定调用哪些工具</span>
             </div>
 
             <label class="field">
                 <span class="label-text">Goal (自然语言)</span>
-                <textarea id="goal-input" rows="3" placeholder="例如：检查最近 3 天新爬的字节 jobs，给评分 + 标记需要重点关注的"></textarea>
+                <textarea id="goal-input" rows="4" placeholder="例如：帮我评估这个 JD 并调简历 / 明天腾讯 AI Agent 一面，帮我准备面经 / 把 websearch 项目整理进项目库，先判断它是不是真的 Agent"></textarea>
             </label>
 
             <div style="margin-top: 0.75rem;">
@@ -149,6 +185,12 @@
                         onclick="setGoal('给我准备明天的字节 AI Agent 一面：先看 user_facts 里有什么相关偏好/项目/弱点，然后跑 prepare_interview，最后总结 3 个最关键的备战点。')">
                     <div class="preset-label">🎤 字节 AI Agent 一面备战</div>
                     <div class="preset-hint">跨 SKILL · 测试上下文使用</div>
+                </button>
+
+                <button type="button" class="preset-btn"
+                        onclick="setGoal('帮我整理一个项目进项目库：先判断它是不是真的 AI Agent 项目，不要被 LLM/API 关键词污染；如果缺事实就追问我，如果足够就调用 capture_project 给出可防守项目档案草稿。项目描述：')">
+                    <div class="preset-label">🧩 整理项目进 Project Vault</div>
+                    <div class="preset-hint">项目采集 · 判断 agent 属性 + 防虚假包装</div>
                 </button>
             </div>
 
@@ -196,6 +238,32 @@
                 <div class="empty-icon">🤖</div>
                 <div class="empty-title">还没有 agent run</div>
                 <div class="empty-hint">用左侧的预设按钮选一个 goal, 或自己写一条让 agent 试试</div>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2>最近产物</h2>
+                <span class="meta">Chat 生成，页面只展示</span>
+            </div>
+            {% if recent_artifacts %}
+            <div class="artifact-list">
+                {% for a in recent_artifacts %}
+                <a class="artifact-row" href="{{ a.view }}">
+                    <div class="artifact-top">
+                        <span class="pill">{{ a.label }}</span>
+                        <span class="artifact-title">{{ a.title }}</span>
+                        <span class="artifact-time">{{ a.when_ago }}</span>
+                    </div>
+                    <div class="artifact-detail">{{ a.detail }}</div>
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty">
+                <div class="empty-title">还没有 chat 产物</div>
+                <div class="empty-hint">让 Agent 调简历、备面试或整理项目后，这里会显示结果沉到哪里。</div>
             </div>
             {% endif %}
         </div>
@@ -279,7 +347,7 @@
                     bodyHtml = `<div class="ev-body">连接结束 · 出错: ${escapeHtml(ev.error)}</div>`;
                 } else {
                     const score = ev.critic_score != null ? `, critic ${ev.critic_score.toFixed(2)}` : '';
-                    bodyHtml = `<div class="ev-body">✓ Agent 收工 · run#${ev.run_id} · ${ev.iterations} 步 · ${(ev.latency_ms/1000).toFixed(1)}s${score}<br><a href="/agent/runs/${ev.run_id}">查看完整 trajectory →</a></div>`;
+                    bodyHtml = `<div class="ev-body">✓ Agent 收工 · run#${ev.run_id} · ${ev.iterations} 步 · ${(ev.latency_ms/1000).toFixed(1)}s${score}<br><a href="/agent/runs/${ev.run_id}">查看完整执行记录 →</a></div>`;
                 }
                 break;
             default:

@@ -10,7 +10,7 @@ wording, but they are never treated as evidence for the user's own results.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
 from .memory import Store
@@ -99,6 +99,32 @@ class MarketContextDraft:
     market_context: str
     reference_sources: str
     warnings: list[str]
+
+
+AgentNextAction = Literal[
+    "ask_user",
+    "research_context",
+    "draft_record",
+    "ready_to_save",
+]
+
+
+@dataclass(frozen=True)
+class ProjectAgentAssessment:
+    """Structured assessment returned by the main agent's project tool."""
+
+    is_agent_project: bool
+    agent_reason: str
+    next_action: AgentNextAction
+    agent_signals: list[str]
+    non_agent_signals: list[str]
+    missing_facts: list[str]
+    risk_flags: list[str]
+    next_questions: list[str]
+    suggested_fields: dict[str, str]
+    market_context: str = ""
+    reference_sources: str = ""
+    action_trace: list[str] | None = None
 
 
 def insert(
@@ -264,6 +290,61 @@ def draft_market_context(
     )
 
 
+def run_intake_agent(
+    *,
+    raw_project_note: str,
+    search: _SearchLike | None = None,
+    llm: _LLMLike | None = None,
+) -> ProjectAgentAssessment:
+    """Assess a free-form project note for the main Agent Chat loop.
+
+    This helper is not the product agent. It is a bounded tool the main agent
+    calls to judge whether a project is truly agent-like, identify missing
+    facts and risk flags, optionally gather public expression context, then
+    return auditable Project Vault fields.
+    """
+    note = raw_project_note.strip()
+    if not note:
+        raise ValueError("raw_project_note is required")
+
+    trace = ["observe: received raw project note"]
+    assessment = _heuristic_agent_assessment(note)
+    trace.append("think: assessed agent signals, missing facts, and risk flags")
+
+    if llm is not None:
+        llm_assessment = _llm_intake_assessment(note, llm=llm)
+        if llm_assessment is not None and _has_meaningful_llm_assessment(llm_assessment):
+            assessment = llm_assessment
+            trace.append("think: incorporated LLM structured assessment")
+
+    if assessment.next_action == "research_context" and search is not None:
+        trace.append("act: searched public references for comparable wording")
+        direction = assessment.suggested_fields.get("mainstream_direction", "")
+        task = assessment.suggested_fields.get("project_task", note[:180])
+        draft = draft_market_context(
+            title=assessment.suggested_fields.get("title", ""),
+            mainstream_direction=direction,
+            project_task=task,
+            my_work=assessment.suggested_fields.get("my_work", ""),
+            search=search,
+            llm=llm,
+        )
+        assessment = replace(
+            assessment,
+            market_context=draft.market_context,
+            reference_sources=draft.reference_sources,
+            risk_flags=_dedupe(assessment.risk_flags + draft.warnings),
+            suggested_fields={
+                **assessment.suggested_fields,
+                "market_context": draft.market_context,
+                "reference_sources": draft.reference_sources,
+            },
+        )
+        trace.append("observe: attached market context as expression reference")
+
+    return replace(assessment, action_trace=trace)
+
+
 def get(store: Store, record_id: int) -> ProjectRecord | None:
     with store.connect() as conn:
         row = conn.execute(_SELECT_SQL + " WHERE id = ?", (record_id,)).fetchone()
@@ -406,6 +487,258 @@ def _clamp_confidence(value: float) -> float:
         return 0.5
 
 
+def _heuristic_agent_assessment(note: str) -> ProjectAgentAssessment:
+    lower = note.lower()
+    signals = _present_keywords(
+        lower,
+        {
+            "目标驱动": ("goal", "目标", "任务", "plan", "规划"),
+            "多步循环": ("loop", "迭代", "多轮", "反复", "step", "workflow"),
+            "工具调用": ("tool", "工具", "search", "搜索", "crawl", "抓取", "python", "api"),
+            "状态/记忆": ("state", "状态", "memory", "记忆", "session", "持久化", "恢复"),
+            "观察反馈": ("observe", "观察", "反馈", "反思", "evidence", "证据"),
+            "自主决策": ("decide", "选择", "判断", "路由", "下一步", "调度"),
+        },
+    )
+    signals = _remove_negated_signals(note, signals)
+    non_agent_signals = _present_keywords(
+        lower,
+        {
+            "单次 LLM 调用": ("一次调用", "单轮", "prompt", "提示词", "包装 api"),
+            "纯 CRUD/表单": ("增删改查", "crud", "表单", "管理系统"),
+            "固定流水线": ("固定流程", "固定 pipeline", "脚本", "批处理"),
+        },
+    )
+    risk_flags = _present_keywords(
+        lower,
+        {
+            "出现未证实数字": ("提升", "%", "准确率", "用户", "排名", "qps", "并发"),
+            "可能夸大创新": ("首创", "sota", "最优", "突破", "创新算法"),
+            "归属边界不清": ("我们", "团队", "参与", "协助"),
+        },
+    )
+    missing_facts = _missing_facts(note, signals)
+    is_agent = len(signals) >= 3 and "工具调用" in signals and (
+        "自主决策" in signals or "多步循环" in signals
+    )
+    next_action = _choose_next_action(
+        missing_facts=missing_facts,
+        risk_flags=risk_flags,
+        has_market_context=False,
+    )
+    direction = "AI Agent" if is_agent else _infer_direction(note)
+    fields = {
+        "title": _infer_title(note),
+        "mainstream_direction": direction,
+        "project_task": _first_sentence(note, limit=180),
+        "my_work": "",
+        "method_route": _join_signal_sentence(signals),
+        "do_not_claim": _join_do_not_claim(risk_flags),
+    }
+    return ProjectAgentAssessment(
+        is_agent_project=is_agent,
+        agent_reason=_agent_reason(is_agent, signals, non_agent_signals),
+        next_action=next_action,
+        agent_signals=signals,
+        non_agent_signals=non_agent_signals,
+        missing_facts=missing_facts,
+        risk_flags=risk_flags,
+        next_questions=_next_questions(missing_facts, risk_flags, is_agent),
+        suggested_fields={k: v for k, v in fields.items() if v},
+    )
+
+
+def _llm_intake_assessment(
+    note: str, *, llm: _LLMLike,
+) -> ProjectAgentAssessment | None:
+    try:
+        resp = llm.chat(
+            messages=[
+                {"role": "system", "content": _INTAKE_AGENT_PROMPT},
+                {"role": "user", "content": note},
+            ],
+            temperature=0.0,
+            json_mode=True,
+        )
+        data = json.loads(resp.content)
+    except Exception:
+        return None
+
+    suggested = data.get("suggested_fields")
+    if not isinstance(suggested, dict):
+        suggested = {}
+    next_action = data.get("next_action")
+    if next_action not in ("ask_user", "research_context", "draft_record", "ready_to_save"):
+        next_action = "ask_user"
+    return ProjectAgentAssessment(
+        is_agent_project=bool(data.get("is_agent_project")),
+        agent_reason=str(data.get("agent_reason") or "").strip(),
+        next_action=next_action,
+        agent_signals=_stringify_list(data.get("agent_signals")),
+        non_agent_signals=_stringify_list(data.get("non_agent_signals")),
+        missing_facts=_stringify_list(data.get("missing_facts")),
+        risk_flags=_stringify_list(data.get("risk_flags")),
+        next_questions=_stringify_list(data.get("next_questions")),
+        suggested_fields={
+            str(k): str(v).strip()
+            for k, v in suggested.items()
+            if str(k).strip() and str(v).strip()
+        },
+    )
+
+
+def _has_meaningful_llm_assessment(assessment: ProjectAgentAssessment) -> bool:
+    return bool(
+        assessment.agent_reason
+        or assessment.agent_signals
+        or assessment.non_agent_signals
+        or assessment.missing_facts
+        or assessment.risk_flags
+        or assessment.next_questions
+        or assessment.suggested_fields
+    )
+
+
+def _present_keywords(lower: str, groups: dict[str, tuple[str, ...]]) -> list[str]:
+    found: list[str] = []
+    for label, needles in groups.items():
+        if any(n in lower for n in needles):
+            found.append(label)
+    return found
+
+
+def _remove_negated_signals(note: str, signals: list[str]) -> list[str]:
+    negated_patterns = {
+        "工具调用": ("没有工具", "无工具", "不调用工具", "没有工具选择"),
+        "状态/记忆": ("没有状态", "无状态", "没有记忆", "没有状态恢复"),
+        "多步循环": ("没有多轮", "无多轮", "单次调用", "单轮"),
+        "自主决策": ("没有决策", "无决策", "固定流程", "固定 pipeline"),
+        "观察反馈": ("没有反馈", "无反馈", "没有观察"),
+    }
+    lower = note.lower()
+    out: list[str] = []
+    for signal in signals:
+        if any(p in lower for p in negated_patterns.get(signal, ())):
+            continue
+        out.append(signal)
+    return out
+
+
+def _missing_facts(note: str, signals: list[str]) -> list[str]:
+    lower = note.lower()
+    missing: list[str] = []
+    checks = (
+        ("我的真实工作", ("我负责", "我实现", "负责", "实现", "搭建", "设计")),
+        ("证据材料", ("github", "repo", "测试", "截图", "报告", "日志", "demo")),
+        ("决策逻辑", ("判断", "选择", "路由", "决定", "策略", "下一步")),
+        ("状态/记忆设计", ("state", "状态", "memory", "session", "持久化", "恢复")),
+        ("失败案例或边界", ("失败", "边界", "限制", "不能", "风险", "问题")),
+    )
+    for label, needles in checks:
+        if not any(n in lower for n in needles):
+            missing.append(label)
+    if "工具调用" in signals and not any(n in lower for n in ("为什么", "选择", "取舍")):
+        missing.append("工具选择取舍")
+    return _dedupe(missing)
+
+
+def _choose_next_action(
+    *, missing_facts: list[str], risk_flags: list[str], has_market_context: bool,
+) -> AgentNextAction:
+    if missing_facts or risk_flags:
+        return "ask_user"
+    if not has_market_context:
+        return "research_context"
+    return "draft_record"
+
+
+def _next_questions(
+    missing_facts: list[str], risk_flags: list[str], is_agent: bool,
+) -> list[str]:
+    questions: list[str] = []
+    for fact in missing_facts[:5]:
+        if fact == "我的真实工作":
+            questions.append("这个项目里哪些模块是你亲自设计或实现的？哪些只是团队/框架已有能力？")
+        elif fact == "证据材料":
+            questions.append("有没有 repo、测试输出、截图、报告或运行日志可以支撑这些描述？")
+        elif fact == "决策逻辑":
+            questions.append("系统每一轮是怎么决定下一步动作的：固定规则、LLM 判断，还是两者结合？")
+        elif fact == "状态/记忆设计":
+            questions.append("agent 的状态保存了什么？中断后能否恢复，后续决策会用哪些历史信息？")
+        elif fact == "失败案例或边界":
+            questions.append("这个系统在哪些情况下会失败或效果不好？你做了哪些限制来避免乱跑？")
+        elif fact == "工具选择取舍":
+            questions.append("为什么选择这些工具/API？有没有尝试过替代方案，最后如何取舍？")
+    if risk_flags:
+        questions.append("这些性能、准确率、用户数或排名有没有证据？如果没有，要不要放入“不要写/不要说”？")
+    if not is_agent:
+        questions.append("这个项目是否存在自主规划、多步循环、工具调用、状态更新？如果没有，就不要硬包装成 Agent。")
+    return questions[:6]
+
+
+def _agent_reason(
+    is_agent: bool, signals: list[str], non_agent_signals: list[str],
+) -> str:
+    if is_agent:
+        return "它具备目标驱动、多步执行、工具调用或状态反馈等 agent 信号，不只是单次 LLM 调用。"
+    if non_agent_signals:
+        return "目前更像普通应用/固定流程：" + "、".join(non_agent_signals) + "；还缺少自主决策和状态反馈。"
+    return "目前材料不足，不能仅凭使用 LLM/API 就判断为 agent；需要补充循环、工具、状态和决策机制。"
+
+
+def _infer_direction(note: str) -> str:
+    lower = note.lower()
+    if any(x in lower for x in ("llm", "大模型", "agent", "智能体")):
+        return "LLM 应用"
+    if any(x in lower for x in ("后端", "接口", "数据库")):
+        return "后端系统"
+    if any(x in lower for x in ("论文", "复现", "实验")):
+        return "科研复现"
+    return "课程项目"
+
+
+def _infer_title(note: str) -> str:
+    first = _first_sentence(note, limit=40)
+    for sep in ("：", ":", "｜", "|", "-"):
+        if sep in first:
+            left = first.split(sep, 1)[0].strip()
+            if 2 <= len(left) <= 40:
+                return left
+    return ""
+
+
+def _first_sentence(text: str, *, limit: int) -> str:
+    cleaned = " ".join(text.strip().split())
+    for sep in ("。", "\n", "；", ";"):
+        if sep in cleaned:
+            cleaned = cleaned.split(sep, 1)[0]
+            break
+    return cleaned[:limit]
+
+
+def _join_signal_sentence(signals: list[str]) -> str:
+    if not signals:
+        return ""
+    return "可围绕这些 agent/工程信号继续核实：" + "、".join(signals)
+
+
+def _join_do_not_claim(risk_flags: list[str]) -> str:
+    if not risk_flags:
+        return ""
+    return "未提供证据前，不要写性能提升、准确率、用户规模、排名、SOTA 或不是自己完成的贡献。"
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        item = item.strip()
+        if item and item not in seen:
+            out.append(item)
+            seen.add(item)
+    return out
+
+
 def _market_context_queries(
     *, title: str, mainstream_direction: str, project_task: str,
 ) -> list[str]:
@@ -482,6 +815,41 @@ _MARKET_CONTEXT_PROMPT = """你是 OfferGuide 的项目表达调研员。你的�
 - 不要声称用户项目达到了公开来源里的性能、准确率、用户数、排名、部署规模。
 - 不要把同类项目的创新写成用户自己的创新。
 - 如果搜索结果只是泛泛介绍，也要诚实写成“可参考表达”，不要拔高。
+- 只返回 JSON，不要 markdown 代码块。
+"""
+
+
+_INTAKE_AGENT_PROMPT = """你是 OfferGuide 主 Agent 的项目事实评估工具。
+你的目标不是润色简历，而是把用户的自由项目描述校准成真实、可防守的项目档案草稿。
+
+你必须独立判断这个项目是不是 AI Agent。不要因为出现 LLM/API/Prompt 就判定为 agent。
+只有同时出现目标驱动、多步循环、工具调用、状态/记忆、观察反馈、自主决策中的多个信号，
+才可以判断为 agent。否则要诚实说它更像 LLM 应用、后端系统、固定流水线或普通项目。
+
+返回严格 JSON:
+{
+  "is_agent_project": true,
+  "agent_reason": "为什么是/不是 agent，必须具体",
+  "next_action": "ask_user | research_context | draft_record | ready_to_save",
+  "agent_signals": ["目标驱动", "工具调用"],
+  "non_agent_signals": ["单次 LLM 调用"],
+  "missing_facts": ["我的真实工作", "证据材料"],
+  "risk_flags": ["出现未证实数字"],
+  "next_questions": ["下一轮最该问用户的问题"],
+  "suggested_fields": {
+    "title": "项目名，如材料不足可省略",
+    "mainstream_direction": "AI Agent / LLM 应用 / 后端系统 / 科研复现等",
+    "project_task": "项目实际任务，克制表述",
+    "my_work": "用户真实工作，材料不足可省略",
+    "method_route": "主流方法/系统路线，材料不足可省略",
+    "do_not_claim": "不应写入简历的内容"
+  }
+}
+
+硬规则:
+- 不编造指标、准确率、性能提升、用户规模、排名、部署结果。
+- 不把团队/开源框架能力写成用户个人贡献。
+- 缺事实时 next_action 优先 ask_user，而不是强行 draft_record。
 - 只返回 JSON，不要 markdown 代码块。
 """
 
