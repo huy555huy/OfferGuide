@@ -253,7 +253,7 @@ class AutonomousScheduler:
 # 2. If nothing pending, fire a heartbeat trigger as a fallback safety net
 #
 # The agent itself decides everything else (what to do, when to next wake,
-# what to update in worldview) via the harness loop in `harness.loop.run`.
+# what to update in worldview) via the agent runtime loop.
 
 
 def build_agent_wake_scheduler(
@@ -330,21 +330,21 @@ def build_agent_wake_scheduler(
             return {"skipped": "no LLM configured"}
 
         # Lazy import to avoid hard dep at import time
-        from ..harness import (
-            HarnessDeps,
+        from ..agent_runtime import (
+            AgentRuntimeDeps,
             MemoryStore,
             default_worldview_dir,
             make_cron_heartbeat,
             poll_pending,
         )
-        from ..harness import _schema as _harness_schema
-        from ..harness import run as harness_run
+        from ..agent_runtime import _schema as _harness_schema
+        from ..agent_runtime import run as agent_runtime_run
 
-        _harness_schema.init_harness_schema(store)
+        _harness_schema.init_agent_runtime_schema(store)
         wdir = default_worldview_dir(settings)
         memory_store = MemoryStore(root=wdir)
 
-        deps = HarnessDeps(
+        deps = AgentRuntimeDeps(
             settings=settings,
             store=store,
             memory_store=memory_store,
@@ -360,14 +360,14 @@ def build_agent_wake_scheduler(
         runs: list[dict[str, Any]] = []
         if pending:
             for pt in pending[:5]:  # cap per-tick to bound cost
-                # Bug 7 fix: cleanup MUST run regardless of harness_run
+                # Bug 7 fix: cleanup MUST run regardless of agent_runtime_run
                 # success/failure. Otherwise a scheduled wake that reliably
                 # crashes the agent gets re-polled forever (infinite cost
                 # loop). We track per-row failures via daemon_runs telemetry.
                 run_ok = False
                 run_summary: dict[str, Any] = {"source": pt.source}
                 try:
-                    res = harness_run(trigger=pt.trigger_event, deps=deps)
+                    res = agent_runtime_run(trigger=pt.trigger_event, deps=deps)
                     run_ok = True
                     run_summary.update({
                         "run_id": res.run_id,
@@ -393,7 +393,7 @@ def build_agent_wake_scheduler(
                             )
         else:
             # Heartbeat fallback: agent looks around, no-ops if nothing to do
-            res = harness_run(
+            res = agent_runtime_run(
                 trigger=make_cron_heartbeat(), deps=deps,
             )
             runs.append({
@@ -426,7 +426,7 @@ def build_agent_wake_scheduler(
 # W15: removed `_discover_via_search_job` and `_auto_score_via_daemon`
 # helpers — they were dead code (not registered as jobs after W14.18
 # collapsed 3 daemons → 1). Discovery now happens via the agent's
-# own `discover_jobs` tool inside the harness loop.
+# own `discover_jobs` tool inside the agent runtime loop.
 
 
 def build_default_scheduler(

@@ -500,9 +500,9 @@ class TestShixisengAmbientWiring:
     def test_shixiseng_in_unscored_sources(self, store):
         """shixiseng source must be in ambient daemon's unscored list, or
         scored events would never fire for shixiseng jobs."""
-        from offerguide.harness import _schema as harness_schema
+        from offerguide.agent_runtime import _schema as harness_schema
         from offerguide.workers.ambient import _load_unscored_discovered_ids
-        harness_schema.init_harness_schema(store)
+        harness_schema.init_agent_runtime_schema(store)
         with store.connect() as conn:
             conn.execute(
                 "INSERT INTO jobs (source, title, company, raw_text, content_hash) "

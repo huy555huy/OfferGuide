@@ -161,7 +161,7 @@ def create_app(
           - Quick links to /agent + /apply + /evolution
         """
         # Most recent harness run for the hero. Graceful: harness_runs may
-        # not exist yet on a brand-new install (init_harness_schema runs on
+        # not exist yet on a brand-new install (init_agent_runtime_schema runs on
         # first harness.run, not at web boot).
         row = None
         try:
@@ -285,9 +285,9 @@ def create_app(
                     "label": "找新 JD (子 agent)",
                     "what": "DiscoverySubAgent 用 9 个 verified 官方源 fetcher "
                             "(nowcoder / 腾讯 / 百度 / 字节 / 0voice / 实习僧) "
-                            "找匹配 north star 的 JD. 平时由 harness 主 agent "
+                            "找匹配 north star 的 JD. 平时由 agent runtime 主 agent "
                             "自己调; 这里 ▶ 是手动触发, 等不及 cron 时用",
-                    "schedule": "由 harness 主 agent 自主决定 (无独立 cron)",
+                    "schedule": "由 agent runtime 主 agent 自主决定 (无独立 cron)",
                 },
                 {
                     "name": "score_unscored_jobs",
@@ -389,7 +389,7 @@ def create_app(
         worldview_summary: dict[str, str] = {}
         worldview_files: list[str] = []
         try:
-            from ..harness import MemoryStore, default_worldview_dir
+            from ..agent_runtime import MemoryStore, default_worldview_dir
             wdir = default_worldview_dir(settings)
             mstore = MemoryStore(root=wdir)
             for fname in ("MEMORY.md", "candidate.md", "tracked-jobs.md", "upcoming-events.md"):
@@ -485,14 +485,14 @@ def create_app(
         # daemon helpers. The endpoint preserves the daemon_runs telemetry
         # contract (mission control timeline) but executes via harness.
         from ..agentic.search import build_default_search
-        from ..harness import (
-            HarnessDeps,
+        from ..agent_runtime import (
+            AgentRuntimeDeps,
             MemoryStore,
             default_worldview_dir,
             make_user_input_trigger,
         )
-        from ..harness import _schema as _harness_schema
-        from ..harness import run as harness_run
+        from ..agent_runtime import _schema as _harness_schema
+        from ..agent_runtime import run as agent_runtime_run
 
         llm = LLMClient(
             api_key=settings.deepseek_api_key,
@@ -503,8 +503,8 @@ def create_app(
             search = build_default_search()
         except Exception:
             search = None
-        _harness_schema.init_harness_schema(store)
-        deps = HarnessDeps(
+        _harness_schema.init_agent_runtime_schema(store)
+        deps = AgentRuntimeDeps(
             settings=settings,
             store=store,
             memory_store=MemoryStore(root=default_worldview_dir(settings)),
@@ -526,7 +526,7 @@ def create_app(
             )
             run_id = int(cur.fetchone()[0])
 
-        # Map old daemon names to a user-input goal the harness agent runs
+        # Map old daemon names to a user-input goal the agent runtime runs
         if job_name == "discover_jobs_via_search":
             user_msg = "(manual trigger) 帮我用 discover_jobs 找几个新岗位."
         elif job_name == "auto_score_new_jobs":
@@ -535,7 +535,7 @@ def create_app(
             user_msg = "(manual trigger) 看下当前状态自己决定干啥."
 
         try:
-            res = harness_run(
+            res = agent_runtime_run(
                 trigger=make_user_input_trigger(user_msg), deps=deps,
                 max_iterations=15,
             )
@@ -566,24 +566,24 @@ def create_app(
 
     @app.post("/api/home/wake-agent", response_class=JSONResponse)
     async def home_wake_agent(request: Request) -> Any:
-        """Trigger a harness run from the home page (manual user kickoff).
+        """Trigger an agent runtime run from the home page.
 
-        User clicks "wake agent" on home page → harness runs one loop with
+        User clicks "wake agent" on home page → agent runtime runs one loop with
         a user_button trigger, returns the run summary.
         """
         if not settings.deepseek_api_key:
             raise HTTPException(400, "agent 不可用 — 缺 OFFERGUIDE_LLM_API_KEY")
 
-        from ..harness import (
-            HarnessDeps,
+        from ..agent_runtime import (
+            AgentRuntimeDeps,
             MemoryStore,
             TriggerEvent,
             default_worldview_dir,
         )
-        from ..harness import _schema as _hs
-        from ..harness import run as harness_run
+        from ..agent_runtime import _schema as _hs
+        from ..agent_runtime import run as agent_runtime_run
 
-        _hs.init_harness_schema(store)
+        _hs.init_agent_runtime_schema(store)
         llm = LLMClient(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
@@ -595,7 +595,7 @@ def create_app(
                 _search = build_default_search()
             except Exception:
                 _search = None
-            deps = HarnessDeps(
+            deps = AgentRuntimeDeps(
                 settings=settings, store=store,
                 memory_store=MemoryStore(root=default_worldview_dir(settings)),
                 llm=llm, runtime=runtime, skills=skills,
@@ -604,7 +604,7 @@ def create_app(
             )
             import asyncio
             result = await asyncio.to_thread(
-                harness_run,
+                agent_runtime_run,
                 trigger=TriggerEvent(
                     kind="user_button",
                     detail={"reason": "home page wake-agent button"},
@@ -626,7 +626,7 @@ def create_app(
 
     @app.post("/api/home/chat", response_class=JSONResponse)
     async def home_chat(request: Request) -> Any:
-        """W15.9 — chat input on home → user_input trigger to harness.
+        """W15.9 — chat input on home → user_input trigger to agent runtime.
 
         User types something ("帮我找几个字节实习" or "我要面字节明天准备一下").
         We package as `user_input` trigger and let the agent decide what tools
@@ -641,16 +641,16 @@ def create_app(
         if len(message) > 2000:
             raise HTTPException(400, "message 太长 (max 2000)")
 
-        from ..harness import (
-            HarnessDeps,
+        from ..agent_runtime import (
+            AgentRuntimeDeps,
             MemoryStore,
             default_worldview_dir,
             make_user_input_trigger,
         )
-        from ..harness import _schema as _hs
-        from ..harness import run as harness_run
+        from ..agent_runtime import _schema as _hs
+        from ..agent_runtime import run as agent_runtime_run
 
-        _hs.init_harness_schema(store)
+        _hs.init_agent_runtime_schema(store)
         llm = LLMClient(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
@@ -662,7 +662,7 @@ def create_app(
                 _search = build_default_search()
             except Exception:
                 _search = None
-            deps = HarnessDeps(
+            deps = AgentRuntimeDeps(
                 settings=settings, store=store,
                 memory_store=MemoryStore(root=default_worldview_dir(settings)),
                 llm=llm, runtime=runtime, skills=skills,
@@ -671,7 +671,7 @@ def create_app(
             )
             import asyncio as _asyncio
             res = await _asyncio.to_thread(
-                harness_run,
+                agent_runtime_run,
                 trigger=make_user_input_trigger(message),
                 deps=deps,
                 max_iterations=15,
@@ -710,15 +710,15 @@ def create_app(
         company_hint = (body.get("company_hint") or "").strip() or None
         title_hint = (body.get("title_hint") or "").strip() or None
 
-        from ..harness import (
-            HarnessDeps,
+        from ..agent_runtime import (
+            AgentRuntimeDeps,
             MemoryStore,
             default_worldview_dir,
         )
-        from ..harness import _schema as _hs
-        from ..harness.evaluate import evaluate_job
-        _hs.init_harness_schema(store)
-        deps = HarnessDeps(
+        from ..agent_runtime import _schema as _hs
+        from ..agent_runtime.evaluate import evaluate_job
+        _hs.init_agent_runtime_schema(store)
+        deps = AgentRuntimeDeps(
             settings=settings, store=store,
             memory_store=MemoryStore(root=default_worldview_dir(settings)),
             llm=LLMClient(
@@ -829,8 +829,8 @@ def create_app(
 
         # Log as a harness event so the agent learns 'this source returned a
         # dead URL' — input for downstream quality decisions.
-        from ..harness import _schema as _hs
-        _hs.init_harness_schema(store)
+        from ..agent_runtime import _schema as _hs
+        _hs.init_agent_runtime_schema(store)
         with store.connect() as conn:
             conn.execute(
                 "INSERT INTO harness_events(kind, job_id, note, source) "
@@ -869,8 +869,8 @@ def create_app(
             app_id = int(cur.fetchone()[0])
 
         # Also fire a harness event so agent knows next wake
-        from ..harness import _schema as _hs
-        _hs.init_harness_schema(store)
+        from ..agent_runtime import _schema as _hs
+        _hs.init_agent_runtime_schema(store)
         with store.connect() as conn:
             conn.execute(
                 "INSERT INTO harness_events(kind, job_id, note, source) "
@@ -913,8 +913,8 @@ def create_app(
         # Schedule a 7-day-out wake to check for response. This wires
         # the "agent ownership" promise: after user marks applied, the
         # agent will proactively wake to check status without user nag.
-        from ..harness import _schema as _hs
-        _hs.init_harness_schema(store)
+        from ..agent_runtime import _schema as _hs
+        _hs.init_agent_runtime_schema(store)
         with store.connect() as conn:
             # 7 days = 7.0 in julianday delta
             conn.execute(
@@ -1089,7 +1089,7 @@ def create_app(
         import asyncio as _asyncio
 
         from .. import project_vault as _pv
-        from ..harness.tools import _format_jd_for_skill
+        from ..agent_runtime.tools import _format_jd_for_skill
         from ..skill_view import invoke_skill_for_view
 
         tailor_task = invoke_skill_for_view(
@@ -1183,7 +1183,7 @@ def create_app(
         # SKILL inputs verified W15.22:
         #   (company, job_text, user_profile, past_experiences)
         from .. import project_vault as _pv
-        from ..harness.tools import _format_jd_for_skill
+        from ..agent_runtime.tools import _format_jd_for_skill
         from ..skill_view import invoke_skill_for_view
 
         result = await invoke_skill_for_view(
@@ -1378,7 +1378,7 @@ def create_app(
 
             # Daily chat budget — count today's greeting_drafted events as proxy
             # (harness_events.created_at is julianday REAL, not datetime).
-            # Table is created lazily by init_harness_schema; treat absence as 0.
+            # Table is created lazily by init_agent_runtime_schema; treat absence as 0.
             today_chats = 0
             try:
                 today_chats_row = conn.execute(
@@ -1629,8 +1629,8 @@ def create_app(
         # Ensure harness tables exist (no-op if already created) so a
         # fresh store doesn't throw OperationalError when /debug is hit
         # before any harness wake.
-        from ..harness import _schema as _hs
-        _hs.init_harness_schema(store)
+        from ..agent_runtime import _schema as _hs
+        _hs.init_agent_runtime_schema(store)
 
         # Daemon status (same logic as home in W14, kept here)
         with store.connect() as conn:
@@ -2503,13 +2503,13 @@ def create_app(
         trigger_kind: str = "user_input",
         max_iterations: int = 6,
     ) -> StreamingResponse:
-        """SSE endpoint that runs the harness in a thread + streams events.
+        """SSE endpoint that runs the agent runtime in a thread + streams events.
 
         Each event becomes one ``data: {...}\\n\\n`` SSE frame. The browser-
         side EventSource (in agent.html) appends each frame to the live
         panel as it arrives. The connection closes after the loop returns.
 
-        Implementation note: harness.run is sync (each LLM call blocks), so
+        Implementation note: agent_runtime.run is sync (each LLM call blocks), so
         we run it in a thread via asyncio.to_thread + a thread-safe queue
         back to the async generator.
         """
@@ -2523,15 +2523,15 @@ def create_app(
                 )
             return StreamingResponse(_err_stream(), media_type="text/event-stream")
 
-        from ..harness import (
-            HarnessDeps,
+        from ..agent_runtime import (
+            AgentRuntimeDeps,
             MemoryStore,
             TriggerEvent,
             default_worldview_dir,
         )
-        from ..harness import _schema as _hs
-        from ..harness import run as harness_run
-        _hs.init_harness_schema(store)
+        from ..agent_runtime import _schema as _hs
+        from ..agent_runtime import run as agent_runtime_run
+        _hs.init_agent_runtime_schema(store)
 
         # Build a fresh LLMClient per request (cheap; httpx.Client lifecycle)
         llm = LLMClient(
@@ -2545,7 +2545,7 @@ def create_app(
             _search = build_default_search()
         except Exception:
             _search = None
-        deps = HarnessDeps(
+        deps = AgentRuntimeDeps(
             settings=settings, store=store,
             memory_store=MemoryStore(root=default_worldview_dir(settings)),
             llm=llm, runtime=runtime, skills=skills,
@@ -2574,7 +2574,7 @@ def create_app(
         cancel_event = _threading.Event()
 
         def _on_event_from_thread(ev: Any) -> None:
-            # harness.run calls this from its worker thread — bridge to async queue.
+            # agent_runtime.run calls this from its worker thread — bridge to async queue.
             # call_soon_threadsafe runs the put on the main event loop so the
             # asyncio.Queue mutation stays on its owning loop (thread-safe).
             def _do_put(payload: dict) -> None:
@@ -2605,7 +2605,7 @@ def create_app(
 
         def _run_blocking() -> None:
             try:
-                result = harness_run(
+                result = agent_runtime_run(
                     trigger=trigger,
                     deps=deps,
                     max_iterations=capped_max_iter,
@@ -3229,8 +3229,8 @@ def create_app(
                 # exist in fresh fixtures — init it here defensively (idempotent)
                 # and fall back to apply_assistant only-attribution if so.
                 try:
-                    from ..harness import _schema as _hs
-                    _hs.init_harness_schema(store)
+                    from ..agent_runtime import _schema as _hs
+                    _hs.init_agent_runtime_schema(store)
                 except Exception:
                     pass
                 with store.connect() as conn:
@@ -3345,8 +3345,8 @@ def create_app(
         """
         # Make sure the harness schema exists — first visit to /agent/runs/{id}
         # on a fresh install can land here before any harness.run has fired.
-        from ..harness import _schema as _hs
-        _hs.init_harness_schema(store)
+        from ..agent_runtime import _schema as _hs
+        _hs.init_agent_runtime_schema(store)
         with store.connect() as conn:
             row = conn.execute(
                 "SELECT trigger_kind, trigger_detail, status, iterations, final_text, "
@@ -4341,7 +4341,7 @@ def create_app(
         # learning loop that lets agent get more selective without if-else
         # rules ("don't push X" — agent learns by seeing X get rejected).
         try:
-            from ..harness import feedback as _hfb
+            from ..agent_runtime import feedback as _hfb
             skill_run_id = None
             if isinstance(item.payload, dict):
                 _srid = item.payload.get("source_skill_run_id")
@@ -4391,7 +4391,7 @@ def create_app(
             raise HTTPException(409, str(e)) from None
 
         try:
-            from ..harness import feedback as _hfb
+            from ..agent_runtime import feedback as _hfb
             _hfb.on_question_answered(
                 store, inbox_id=item_id, option_id=option_id,
                 free_text=free_text,
@@ -4612,7 +4612,7 @@ def create_app(
 
         # Fire harness event so agent's next wake notices new jobs to score
         try:
-            from ..harness import fire_event
+            from ..agent_runtime import fire_event
             if inserted > 0:
                 fire_event(
                     store,
@@ -4660,16 +4660,16 @@ def create_app(
         if profile is None or not profile.raw_resume_text:
             return _ext_response(400, {"error": "未配简历, 去 /profile 上传"})
 
-        from ..harness import (
-            HarnessDeps,
+        from ..agent_runtime import (
+            AgentRuntimeDeps,
             MemoryStore,
             default_worldview_dir,
         )
-        from ..harness import _schema as _hs
-        from ..harness.evaluate import _fetch_and_ingest, _invoke_skill, _safe_float
-        _hs.init_harness_schema(store)
+        from ..agent_runtime import _schema as _hs
+        from ..agent_runtime.evaluate import _fetch_and_ingest, _invoke_skill, _safe_float
+        _hs.init_agent_runtime_schema(store)
 
-        deps = HarnessDeps(
+        deps = AgentRuntimeDeps(
             settings=settings, store=store,
             memory_store=MemoryStore(root=default_worldview_dir(settings)),
             llm=LLMClient(
@@ -4716,7 +4716,7 @@ def create_app(
             # (inputs: job_text, user_profile; outputs: probability, reasoning,
             # dimensions, deal_breakers). Pre-W15.22 used wrong keys → ValueError
             # → 502 every call.
-            from ..harness.tools import _format_jd_for_skill
+            from ..agent_runtime.tools import _format_jd_for_skill
             job_row = {
                 "title": payload.title, "company": payload.company or "",
                 "location": payload.location or "",
@@ -5213,10 +5213,10 @@ def _recent_skill_runs(store: Store, *, limit: int = 10) -> list[dict[str, Any]]
 
 def _recent_agent_artifacts(store: Store, *, limit: int = 6) -> list[dict[str, Any]]:
     """Latest artifacts produced through Agent Chat tools."""
-    from ..harness import _schema as _hs
+    from ..agent_runtime import _schema as _hs
 
     try:
-        _hs.init_harness_schema(store)
+        _hs.init_agent_runtime_schema(store)
         with store.connect() as conn:
             rows = conn.execute(
                 "SELECT id, kind, job_id, note, "
@@ -5245,10 +5245,10 @@ def _recent_agent_artifacts(store: Store, *, limit: int = 6) -> list[dict[str, A
 
 def _latest_agent_tailor_result(store: Store) -> dict[str, Any] | None:
     """Latest tailor_resume artifact produced by Agent Chat, for /tailor."""
-    from ..harness import _schema as _hs
+    from ..agent_runtime import _schema as _hs
 
     try:
-        _hs.init_harness_schema(store)
+        _hs.init_agent_runtime_schema(store)
         with store.connect() as conn:
             rows = conn.execute(
                 "SELECT job_id, note FROM harness_events "

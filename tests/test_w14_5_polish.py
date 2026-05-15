@@ -194,8 +194,8 @@ class TestTrajectoryCollapse:
         """
         client, store = app_client
         import json
-        from offerguide.harness import _schema as _hs
-        _hs.init_harness_schema(store)
+        from offerguide.agent_runtime import _schema as _hs
+        _hs.init_agent_runtime_schema(store)
         payload = {
             "calls": [
                 "iter1.memory(command='view') → OK MEMORY.md (16 lines)",

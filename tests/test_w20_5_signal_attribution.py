@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 
 import offerguide
 from offerguide.config import Settings
-from offerguide.harness import _schema as harness_schema
+from offerguide.agent_runtime import _schema as harness_schema
 from offerguide.profile.schema import UserProfile
 from offerguide.ui.web import create_app
 
@@ -36,7 +36,7 @@ def app_with_scored_job(tmp_path):
     db = tmp_path / "w205.db"
     store = offerguide.Store(db)
     store.init_schema()
-    harness_schema.init_harness_schema(store)
+    harness_schema.init_agent_runtime_schema(store)
 
     profile = UserProfile(raw_resume_text="resume " * 100)
 
@@ -143,7 +143,7 @@ def test_apply_pack_view_writes_signal_when_skill_succeeds(tmp_path):
     db = tmp_path / "w205_b.db"
     store = offerguide.Store(db)
     store.init_schema()
-    harness_schema.init_harness_schema(store)
+    harness_schema.init_agent_runtime_schema(store)
     profile = UserProfile(raw_resume_text="resume " * 100)
 
     # Insert a job + a fake apply_assistant skill_run row to attribute to
@@ -249,7 +249,7 @@ def test_apply_mark_status_interview_fans_to_all_involved_skills(tmp_path):
     db = tmp_path / "w205_c.db"
     store = offerguide.Store(db)
     store.init_schema()
-    harness_schema.init_harness_schema(store)
+    harness_schema.init_agent_runtime_schema(store)
     profile = UserProfile(raw_resume_text="resume " * 100)
 
     with store.connect() as conn:
@@ -320,7 +320,7 @@ def test_apply_mark_with_no_skill_chain_falls_back(tmp_path):
     db = tmp_path / "w205_d.db"
     store = offerguide.Store(db)
     store.init_schema()
-    harness_schema.init_harness_schema(store)
+    harness_schema.init_agent_runtime_schema(store)
     profile = UserProfile(raw_resume_text="resume " * 100)
 
     with store.connect() as conn:

@@ -199,7 +199,7 @@ def check_db_path(repo_root: Path) -> bool:
 
 
 def check_worldview_dir() -> bool:
-    from offerguide.harness import default_worldview_dir
+    from offerguide.agent_runtime import default_worldview_dir
     wdir = default_worldview_dir()
     try:
         wdir.mkdir(parents=True, exist_ok=True)
@@ -274,11 +274,11 @@ def check_db_schema() -> bool:
     try:
         from offerguide import Store
         from offerguide.config import Settings
-        from offerguide.harness import _schema as harness_schema
+        from offerguide.agent_runtime import _schema as harness_schema
         settings = Settings.from_env()
         store = Store(settings.db_path)
         store.init_schema()
-        harness_schema.init_harness_schema(store)
+        harness_schema.init_agent_runtime_schema(store)
         with store.connect() as conn:
             tables = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"

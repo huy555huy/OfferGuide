@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 import offerguide
 from offerguide.config import Settings
-from offerguide.harness import _schema as harness_schema
+from offerguide.agent_runtime import _schema as harness_schema
 from offerguide.profile.schema import UserProfile
 
 # Capture state across the patched coroutine
@@ -55,7 +55,7 @@ tmp = Path(tempfile.mkdtemp(prefix="ogfd_w19_lifespan_"))
 db = tmp / "store.db"
 store = offerguide.Store(db)
 store.init_schema()
-harness_schema.init_harness_schema(store)
+harness_schema.init_agent_runtime_schema(store)
 
 profile = UserProfile(raw_resume_text="测试简历")
 

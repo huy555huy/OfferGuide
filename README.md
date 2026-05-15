@@ -32,7 +32,7 @@ LangChain agents 是 reactive turn loops + chains, 短任务还行, 求职是长
 - **Default-fail contract** — `test-results.json` 里每个项目默认 `passes: false`, 没证据不能改成通过
 - **Fresh-context evaluator** — `.claude/agents/evaluator.md` 只读检查 diff + evidence, 不让 builder 自评
 - **Agent-maintained handoff** — `PROGRESS.md` 记录进度/证据/下一步, 下一轮从冷上下文继续
-- **OfferGuide application loop** — `src/offerguide/harness/` 是产品内 agent loop: chat / tools / memory / scheduled wake
+- **OfferGuide application runtime** — `src/offerguide/agent_runtime/` 是产品内 agent loop: chat / tools / memory / scheduled wake
 
 ### 2. 不替用户决策, 国内 false-positive 成本不可逆
 
@@ -124,7 +124,7 @@ OfferGuide 反方向走：**不点投递**，做真正提高 reply rate 的事�
 
 ```
         ┌─────────────────────────────────────────────────────────────┐
-        │  application agent loop (src/offerguide/harness, W15)       │
+        │  application agent runtime (src/offerguide/agent_runtime)   │
         │  "dumb on purpose; coordinates Claude's decisions,          │
         │   doesn't make them" — agency is in-context, not in code   │
         │                                                             │
@@ -336,7 +336,7 @@ PROGRESS.md                 # agent-maintained handoff
 test-results.json           # default-fail contract; evidence required before pass
 
 src/offerguide/
-├── harness/              # W15 application agent loop — chat/tools/memory/wakes
+├── agent_runtime/        # W15 application agent loop — chat/tools/memory/wakes
 │   ├── loop.py           #   worldview, agency in-context
 │   ├── tools.py          #   17 main-agent tools (single registry via
 │   │                     #   _MAIN_TOOL_ENTRIES — schema + dispatch both
@@ -465,7 +465,7 @@ tests/                    # 329 tests, all green
 - [x] **W15** — application agent loop: 400-line
        `loop.py`, file-based worldview (`.offerguide/worldview/*.md`), 6-command
        memory tool, file-based agency-in-context. `instructions.md` is the agent's
-       "soul prompt". Cron + chat endpoint both go through `harness.run_one`.
+       "soul prompt". Cron + chat endpoint both go through `agent_runtime.run_one`.
 - [x] **W22** — real Anthropic long-running harness primitives at repo root:
        `test-results.json` default-fail contract, `.claude/hooks/verify-gate.sh`
        evidence gate, `.claude/agents/evaluator.md` fresh-context evaluator,

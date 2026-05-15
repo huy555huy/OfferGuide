@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 import offerguide
 from offerguide.config import Settings
-from offerguide.harness import _schema as harness_schema
+from offerguide.agent_runtime import _schema as harness_schema
 from offerguide.match_keywords import (
     ANCHOR_KEYWORDS,
     DEFAULT_KEYWORDS_PER_CYCLE,
@@ -101,7 +101,7 @@ class TestAmbientMultiKeywordDispatch:
 
         store = offerguide.Store(tmp_path / "amb_kw.db")
         store.init_schema()
-        harness_schema.init_harness_schema(store)
+        harness_schema.init_agent_runtime_schema(store)
 
         # Build a fake job that's identical across both keyword calls
         identical_job = RawJob(
@@ -148,7 +148,7 @@ class TestAmbientMultiKeywordDispatch:
 
         store = offerguide.Store(tmp_path / "amb_attr.db")
         store.init_schema()
-        harness_schema.init_harness_schema(store)
+        harness_schema.init_agent_runtime_schema(store)
 
         rj = RawJob(
             source="tencent_campus", source_id="p9", url="https://join.qq.com/x?postId=9",
@@ -188,7 +188,7 @@ def w18_client(tmp_path):
 
     store = offerguide.Store(tmp_path / "w18.db")
     store.init_schema()
-    harness_schema.init_harness_schema(store)
+    harness_schema.init_agent_runtime_schema(store)
     skills = discover_skills(Path(__file__).parent.parent / "src/offerguide/skills")
     s = Settings(deepseek_api_key="", default_model="stub")
     app = create_app(

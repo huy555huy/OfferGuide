@@ -7,7 +7,7 @@ budget. This module enforces a per-UTC-day USD cap by summing recent
 
 Design choice: **enforced at entry points**, not per-LLM-call. The two
 entry points that drive 99% of cost are:
-1. ``harness.run()`` — agent loop with potentially many LLM calls
+1. ``agent_runtime.run()`` — agent loop with potentially many LLM calls
 2. ``evaluate.evaluate_job()`` — direct flow for paste-1-JD
 
 Each calls ``enforce_daily_budget(store)`` once at start. If over
@@ -87,7 +87,7 @@ def get_today_spend_usd(store: Store) -> float:
 def enforce_daily_budget(store: Store, cap_usd: float | None = None) -> None:
     """Raise ``BudgetExceeded`` if today's LLM spend is at/over the cap.
 
-    Call once at the start of any LLM-driven flow (harness loop entry,
+    Call once at the start of any LLM-driven flow (agent runtime loop entry,
     evaluate-job entry). Cheap (1 SQL aggregate query).
     """
     cap = cap_usd if cap_usd is not None else get_daily_cap_usd()

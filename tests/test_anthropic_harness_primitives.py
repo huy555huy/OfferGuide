@@ -5,6 +5,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from offerguide import harness
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -125,3 +127,44 @@ def test_kill_switch_blocks_when_stop_file_exists(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert json.loads(result.stdout)["decision"] == "block"
+
+
+def test_python_harness_api_is_contract_not_agent_runtime(tmp_path: Path) -> None:
+    (tmp_path / ".claude" / "agents").mkdir(parents=True)
+    (tmp_path / ".claude" / "agents" / "evaluator.md").write_text(
+        "PASS or NEEDS_WORK",
+        encoding="utf-8",
+    )
+    (tmp_path / "PROGRESS.md").write_text(
+        "## Done\n\n## In progress\n\n## Next\n\n## Notes\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "test-results.json").write_text(
+        json.dumps(
+            {
+                "feature-a": {
+                    "passes": False,
+                    "evidence": "",
+                    "notes": "default fail",
+                },
+                "feature-b": {
+                    "passes": True,
+                    "evidence": "feature-b-result.txt",
+                    "notes": "verified",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    harness.record_evidence_read("feature-b-result.txt", tmp_path)
+    state = harness.snapshot(tmp_path)
+
+    assert [item.name for item in state.failing_items] == ["feature-a"]
+    assert [item.name for item in state.passing_items] == ["feature-b"]
+    assert state.evidence_reads == ("feature-b-result.txt",)
+    assert state.evaluator_exists is True
+    assert harness.consume_evidence_reads(tmp_path) == ("feature-b-result.txt",)
+    assert harness.consume_evidence_reads(tmp_path) == ()
+    assert not hasattr(harness, "run")
+    assert not hasattr(harness, "AgentRuntimeDeps")

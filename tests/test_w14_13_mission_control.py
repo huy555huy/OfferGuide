@@ -163,13 +163,13 @@ class TestManualTriggerAPI:
         """Manual trigger should write a daemon_runs row (status=ok or
         error) so the timeline reflects the manual run alongside cron runs.
 
-        W15.7: endpoint now routes through harness.run_one — patch that
+        W15.7: endpoint now routes through agent_runtime.run_one — patch that
         instead of the deleted W14 daemon helpers."""
         client, store = app_client
-        from offerguide.harness import RunResult
+        from offerguide.agent_runtime import RunResult
         from offerguide.ui import web as web_mod
 
-        def _fake_harness_run(*, trigger, deps, max_iterations=20):
+        def _fake_agent_runtime_run(*, trigger, deps, max_iterations=20):
             return RunResult(
                 run_id=999, iterations=2,
                 final_text="(stub) discovered 2 new jobs",
@@ -180,14 +180,14 @@ class TestManualTriggerAPI:
 
         # Patch the module-level alias the route imports lazily inside
         # the handler. Easiest: patch on the harness module itself.
-        from offerguide import harness as harness_mod
-        monkeypatch.setattr(harness_mod, "run", _fake_harness_run)
-        # Some lazy imports go through harness.loop.run too — patch both
-        from offerguide.harness import loop as harness_loop_mod
-        monkeypatch.setattr(harness_loop_mod, "run", _fake_harness_run)
-        # And the bound name in ui.web (was imported as `harness_run`)
-        if hasattr(web_mod, "harness_run"):
-            monkeypatch.setattr(web_mod, "harness_run", _fake_harness_run)
+        from offerguide import agent_runtime as harness_mod
+        monkeypatch.setattr(harness_mod, "run", _fake_agent_runtime_run)
+        # Some lazy imports go through agent_runtime.loop.run too — patch both
+        from offerguide.agent_runtime import loop as harness_loop_mod
+        monkeypatch.setattr(harness_loop_mod, "run", _fake_agent_runtime_run)
+        # And the bound name in ui.web (imported as `agent_runtime_run`)
+        if hasattr(web_mod, "agent_runtime_run"):
+            monkeypatch.setattr(web_mod, "agent_runtime_run", _fake_agent_runtime_run)
 
         resp = client.post("/api/scheduler/trigger/discover_jobs_via_search")
         assert resp.status_code == 200
@@ -215,13 +215,13 @@ class TestManualTriggerAPI:
         def _broken(*, trigger, deps, max_iterations=20):
             raise RuntimeError("simulated daemon crash")
 
-        from offerguide import harness as harness_mod
-        from offerguide.harness import loop as harness_loop_mod
+        from offerguide import agent_runtime as harness_mod
+        from offerguide.agent_runtime import loop as harness_loop_mod
         from offerguide.ui import web as web_mod
         monkeypatch.setattr(harness_mod, "run", _broken)
         monkeypatch.setattr(harness_loop_mod, "run", _broken)
-        if hasattr(web_mod, "harness_run"):
-            monkeypatch.setattr(web_mod, "harness_run", _broken)
+        if hasattr(web_mod, "agent_runtime_run"):
+            monkeypatch.setattr(web_mod, "agent_runtime_run", _broken)
 
         resp = client.post("/api/scheduler/trigger/discover_jobs_via_search")
         assert resp.status_code == 500

@@ -39,7 +39,7 @@ logging.basicConfig(
 
 import offerguide
 from offerguide.config import Settings
-from offerguide.harness import _schema as harness_schema
+from offerguide.agent_runtime import _schema as harness_schema
 from offerguide.llm import LLMClient
 from offerguide.profile.loader import load_resume_pdf
 from offerguide.skills import SkillRuntime
@@ -64,7 +64,7 @@ print(f"  DB (tmp):  {db}")
 
 store = offerguide.Store(db)
 store.init_schema()
-harness_schema.init_harness_schema(store)
+harness_schema.init_agent_runtime_schema(store)
 
 # Load real resume
 profile = load_resume_pdf(settings.resume_pdf)

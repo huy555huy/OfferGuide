@@ -112,10 +112,10 @@ class TestHomeRendering:
             assert f'href="{link}"' in resp.text
 
     def test_tailor_page_shows_agent_generated_tailor_result(self, app_client):
-        from offerguide.harness import _schema as harness_schema
+        from offerguide.agent_runtime import _schema as harness_schema
 
         client, store = app_client
-        harness_schema.init_harness_schema(store)
+        harness_schema.init_agent_runtime_schema(store)
         with store.connect() as conn:
             conn.execute(
                 "INSERT INTO jobs(source, title, company, raw_text, content_hash) "

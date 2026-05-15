@@ -235,10 +235,10 @@ def test_run_intake_agent_can_call_search_when_ready_for_context():
 
 
 def test_main_agent_capture_project_tool_exposes_project_assessment(store):
-    from offerguide.harness.memory import MemoryStore
-    from offerguide.harness.tools import HarnessDeps, dispatch
+    from offerguide.agent_runtime.memory import MemoryStore
+    from offerguide.agent_runtime.tools import AgentRuntimeDeps, dispatch
 
-    deps = HarnessDeps(
+    deps = AgentRuntimeDeps(
         settings=Settings(deepseek_api_key="", default_model="stub"),
         store=store,
         memory_store=MemoryStore(root=store.db_path.parent / "worldview"),
@@ -259,10 +259,10 @@ def test_main_agent_capture_project_tool_exposes_project_assessment(store):
 
 
 def test_main_agent_save_project_record_tool_persists_to_vault(store):
-    from offerguide.harness.memory import MemoryStore
-    from offerguide.harness.tools import HarnessDeps, dispatch
+    from offerguide.agent_runtime.memory import MemoryStore
+    from offerguide.agent_runtime.tools import AgentRuntimeDeps, dispatch
 
-    deps = HarnessDeps(
+    deps = AgentRuntimeDeps(
         settings=Settings(deepseek_api_key="", default_model="stub"),
         store=store,
         memory_store=MemoryStore(root=store.db_path.parent / "worldview"),
@@ -297,10 +297,10 @@ def test_main_agent_save_project_record_tool_persists_to_vault(store):
 
 
 def test_main_agent_read_artifact_tool_reads_latest_project(store):
-    from offerguide.harness.memory import MemoryStore
-    from offerguide.harness.tools import HarnessDeps, dispatch
+    from offerguide.agent_runtime.memory import MemoryStore
+    from offerguide.agent_runtime.tools import AgentRuntimeDeps, dispatch
 
-    deps = HarnessDeps(
+    deps = AgentRuntimeDeps(
         settings=Settings(deepseek_api_key="", default_model="stub"),
         store=store,
         memory_store=MemoryStore(root=store.db_path.parent / "worldview"),

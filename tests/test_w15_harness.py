@@ -22,8 +22,8 @@ from fastapi.testclient import TestClient
 
 import offerguide
 from offerguide.config import Settings
-from offerguide.harness import (
-    HarnessDeps,
+from offerguide.agent_runtime import (
+    AgentRuntimeDeps,
     MemoryStore,
     SystemFacts,
     TriggerEvent,
@@ -32,19 +32,19 @@ from offerguide.harness import (
     make_user_input_trigger,
     poll_pending,
 )
-from offerguide.harness import _schema as harness_schema
-from offerguide.harness import (
+from offerguide.agent_runtime import _schema as harness_schema
+from offerguide.agent_runtime import (
     feedback as harness_feedback,
 )
-from offerguide.harness.context import (
+from offerguide.agent_runtime.context import (
     CLEAR_TOOL_RESULTS_TRIGGER_TOKENS,
     COMPACTION_TRIGGER_TOKENS,
     ContextManager,
 )
-from offerguide.harness.loop import RunResult
-from offerguide.harness.loop import run as harness_run
-from offerguide.harness.memory import MEMORY_TOOL_SCHEMA
-from offerguide.harness.tools import ALL_TOOL_SCHEMAS, dispatch
+from offerguide.agent_runtime.loop import RunResult
+from offerguide.agent_runtime.loop import run as agent_runtime_run
+from offerguide.agent_runtime.memory import MEMORY_TOOL_SCHEMA
+from offerguide.agent_runtime.tools import ALL_TOOL_SCHEMAS, dispatch
 from offerguide.llm import LLMResponse, ToolCall
 
 # ═══════════════════════════════════════════════════════════════════
@@ -95,7 +95,7 @@ def tmp_worldview() -> Iterator[Path]:
 def tmp_store(tmp_path) -> offerguide.Store:
     s = offerguide.Store(tmp_path / "harness_test.db")
     s.init_schema()
-    harness_schema.init_harness_schema(s)
+    harness_schema.init_agent_runtime_schema(s)
     return s
 
 
@@ -103,7 +103,7 @@ def tmp_store(tmp_path) -> offerguide.Store:
 def deps(tmp_store, tmp_worldview):
     settings = Settings(deepseek_api_key="x", default_model="stub")
     llm = StubLLM()
-    return HarnessDeps(
+    return AgentRuntimeDeps(
         settings=settings,
         store=tmp_store,
         memory_store=MemoryStore(root=tmp_worldview),
@@ -482,7 +482,7 @@ class TestHarnessLoop:
     def test_loop_records_run_in_harness_runs(self, deps):
         # Stub LLM returns end_turn immediately
         deps.llm.push_text("nothing to do, sleeping")  # type: ignore[union-attr]
-        result = harness_run(
+        result = agent_runtime_run(
             trigger=make_cron_heartbeat(), deps=deps,
             max_iterations=3,
         )
@@ -507,7 +507,7 @@ class TestHarnessLoop:
             arguments={"delay_seconds": 600, "reason": "test"},
         )
         deps.llm.push_text("done")  # type: ignore[union-attr]
-        result = harness_run(
+        result = agent_runtime_run(
             trigger=make_user_input_trigger("找点事做"), deps=deps,
             max_iterations=5,
         )
@@ -529,7 +529,7 @@ class TestHarnessLoop:
                 arguments={"command": "view", "path": "MEMORY.md"},
                 call_id=f"t{i}",
             )
-        result = harness_run(
+        result = agent_runtime_run(
             trigger=make_cron_heartbeat(), deps=deps,
             max_iterations=3,
         )
@@ -537,13 +537,13 @@ class TestHarnessLoop:
         assert result.finish_reason == "max_iterations"
 
     def test_loop_handles_no_llm(self, tmp_store, tmp_worldview):
-        deps_no_llm = HarnessDeps(
+        deps_no_llm = AgentRuntimeDeps(
             settings=Settings(deepseek_api_key="", default_model="stub"),
             store=tmp_store,
             memory_store=MemoryStore(root=tmp_worldview),
             llm=None,
         )
-        result = harness_run(
+        result = agent_runtime_run(
             trigger=make_cron_heartbeat(), deps=deps_no_llm,
         )
         assert result.finish_reason == "no_llm"
@@ -556,7 +556,7 @@ class TestHarnessLoop:
             arguments={"title": "t", "body": "b"},
         )
         deps.llm.push_text("done")  # type: ignore[union-attr]
-        result = harness_run(
+        result = agent_runtime_run(
             trigger=make_cron_heartbeat(), deps=deps,
             max_iterations=3,
         )
@@ -763,7 +763,7 @@ class TestHomeWithW15:
 
     def test_home_surfaces_recent_agent_artifacts(self, web_client):
         client, store = web_client
-        harness_schema.init_harness_schema(store)
+        harness_schema.init_agent_runtime_schema(store)
         with store.connect() as conn:
             conn.execute(
                 "INSERT INTO harness_events(kind, note, source) "
@@ -981,7 +981,7 @@ class TestReviewFixes:
                 arguments={"command": "view", "path": "MEMORY.md"},
                 call_id=f"t{i}",
             )
-        result = harness_run(
+        result = agent_runtime_run(
             trigger=make_cron_heartbeat(), deps=deps,
             max_iterations=2,
         )
@@ -995,7 +995,7 @@ class TestReviewFixes:
 
     def test_end_turn_persists_ok_status(self, deps):
         deps.llm.push_text("nothing to do")  # type: ignore[union-attr]
-        result = harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        result = agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
         with deps.store.connect() as conn:
             row = conn.execute(
                 "SELECT status FROM harness_runs WHERE id = ?",
@@ -1017,7 +1017,7 @@ class TestReviewFixes:
         ))
         # Iter 2: end_turn with final reasoning
         deps.llm.push_text("看完了, 不做事了.")  # type: ignore[union-attr]
-        result = harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        result = agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
         # Both iterations' content present
         assert "我先看一眼" in result.final_text
         assert "看完了" in result.final_text
@@ -1026,7 +1026,7 @@ class TestReviewFixes:
     def test_loop_crash_in_ctx_management_records_error(
         self, tmp_store, tmp_worldview, monkeypatch,
     ):
-        from offerguide.harness import context as ctx_mod
+        from offerguide.agent_runtime import context as ctx_mod
 
         def _exploding_clear(*a, **kw):
             raise RuntimeError("simulated ctx crash")
@@ -1034,13 +1034,13 @@ class TestReviewFixes:
         monkeypatch.setattr(
             ctx_mod.ContextManager, "maybe_clear_tool_results", _exploding_clear,
         )
-        deps = HarnessDeps(
+        deps = AgentRuntimeDeps(
             settings=Settings(deepseek_api_key="x", default_model="stub"),
             store=tmp_store,
             memory_store=MemoryStore(root=tmp_worldview),
             llm=StubLLM(),  # type: ignore[arg-type]
         )
-        result = harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        result = agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
         assert result.finish_reason == "loop_crash"
         with tmp_store.connect() as conn:
             row = conn.execute(
@@ -1053,7 +1053,7 @@ class TestReviewFixes:
 
     # ── Bug 4: paste:// URL stable across processes
     def test_paste_synthetic_url_is_stable(self, deps):
-        from offerguide.harness.tools import _exec_fetch_jd
+        from offerguide.agent_runtime.tools import _exec_fetch_jd
         text = "x" * 250  # ≥ 200 chars to pass validation
 
         # Same content twice → same URL → second is detected as dup
@@ -1069,7 +1069,7 @@ class TestReviewFixes:
         # Pre-set extra_cost_usd to non-zero (simulating leak from prior run)
         deps.extra_cost_usd = 99.99
         deps.llm.push_text("done")  # type: ignore[union-attr]
-        result = harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        result = agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
         # The 99.99 must NOT contaminate this run — loop resets to 0
         # at start, so cost_usd here is just stub LLM's $0.0 + 0
         assert result.cost_usd < 1.0  # nowhere near 99.99
@@ -1092,7 +1092,7 @@ class TestReviewFixes:
 
         deps.llm.chat_with_tools = _patched  # type: ignore[union-attr]
         deps.llm.push_text("done")  # type: ignore[union-attr]
-        result = harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        result = agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
         assert result.cost_usd >= 0.5  # sub-agent cost included
         # Persisted too
         with deps.store.connect() as conn:
@@ -1144,7 +1144,7 @@ class TestReviewFixes:
         assert isinstance(parsed, dict)
         assert "metadata" in parsed
 
-    # ── Bug 7: scheduler cleanup runs even if harness_run fails
+    # ── Bug 7: scheduler cleanup runs even if agent_runtime_run fails
     def test_scheduler_cleanup_runs_on_harness_failure(self, tmp_store):
         # Create a scheduled wake that's due
         with tmp_store.connect() as conn:
@@ -1161,7 +1161,7 @@ class TestReviewFixes:
         assert len(pending) >= 1
         pt = pending[0]
 
-        # Simulate scheduler logic: harness_run fails, but cleanup still runs.
+        # Simulate scheduler logic: agent_runtime_run fails, but cleanup still runs.
         try:
             raise RuntimeError("simulated harness crash")
         except Exception:
@@ -1205,7 +1205,7 @@ class TestReviewFixes:
     # ── Q1: temperature is configurable per-call (W15.13)
     def test_temperature_default_passed_through(self, deps):
         deps.llm.push_text("done")  # type: ignore[union-attr]
-        harness_run(trigger=make_cron_heartbeat(), deps=deps)
+        agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
         # StubLLM stores all chat_with_tools calls
         assert deps.llm.calls  # type: ignore[union-attr]
         last = deps.llm.calls[-1]  # type: ignore[union-attr]
@@ -1213,7 +1213,7 @@ class TestReviewFixes:
 
     def test_temperature_override(self, deps):
         deps.llm.push_text("done")  # type: ignore[union-attr]
-        harness_run(
+        agent_runtime_run(
             trigger=make_user_input_trigger("be creative"),
             deps=deps,
             temperature=0.7,
@@ -1225,7 +1225,7 @@ class TestReviewFixes:
     def test_compaction_threshold_tightened_to_30k(self):
         # The constants are exported. Verify they match the documented
         # tighter values so future drift is caught.
-        from offerguide.harness.context import (
+        from offerguide.agent_runtime.context import (
             CLEAR_TOOL_RESULTS_TRIGGER_TOKENS,
             COMPACTION_TRIGGER_TOKENS,
         )
@@ -1238,8 +1238,8 @@ class TestReviewFixes:
     # ── W15.14: evaluate_job() reactive flow
     def test_evaluate_job_with_paste_text_no_runtime(self, tmp_store, tmp_worldview):
         """No runtime → fetch succeeds, score/tailor skipped (graceful)."""
-        from offerguide.harness.evaluate import evaluate_job
-        deps = HarnessDeps(
+        from offerguide.agent_runtime.evaluate import evaluate_job
+        deps = AgentRuntimeDeps(
             settings=Settings(deepseek_api_key="x", default_model="stub"),
             store=tmp_store,
             memory_store=MemoryStore(root=tmp_worldview),
@@ -1253,8 +1253,8 @@ class TestReviewFixes:
         assert result.tailor_status == "skipped"
 
     def test_evaluate_job_too_short_text(self, tmp_store, tmp_worldview):
-        from offerguide.harness.evaluate import evaluate_job
-        deps = HarnessDeps(
+        from offerguide.agent_runtime.evaluate import evaluate_job
+        deps = AgentRuntimeDeps(
             settings=Settings(deepseek_api_key="x", default_model="stub"),
             store=tmp_store,
             memory_store=MemoryStore(root=tmp_worldview),
@@ -1419,7 +1419,7 @@ class TestReviewFixes:
 
     def test_budget_over_cap_raises(self, tmp_store):
         from offerguide.llm.budget import BudgetExceeded, enforce_daily_budget
-        # Inject a huge harness_run cost
+        # Inject a huge agent_runtime_run cost
         with tmp_store.connect() as conn:
             conn.execute(
                 "INSERT INTO harness_runs(trigger_kind, started_at, cost_usd) "
@@ -1458,14 +1458,14 @@ class TestReviewFixes:
 
     def test_loop_returns_budget_exceeded_finish_reason(self, tmp_store, tmp_worldview):
         """Harness loop refuses to start when over budget."""
-        from offerguide.harness.loop import run as harness_run
-        from offerguide.harness.triggers import make_cron_heartbeat
+        from offerguide.agent_runtime.loop import run as agent_runtime_run
+        from offerguide.agent_runtime.triggers import make_cron_heartbeat
         with tmp_store.connect() as conn:
             conn.execute(
                 "INSERT INTO harness_runs(trigger_kind, started_at, cost_usd) "
                 "VALUES ('cron', julianday('now'), 99.99)"
             )
-        deps = HarnessDeps(
+        deps = AgentRuntimeDeps(
             settings=Settings(deepseek_api_key="x", default_model="stub"),
             store=tmp_store,
             memory_store=MemoryStore(root=tmp_worldview),
@@ -1476,7 +1476,7 @@ class TestReviewFixes:
         prev = _os.environ.get("OFFERGUIDE_DAILY_BUDGET_USD")
         _os.environ["OFFERGUIDE_DAILY_BUDGET_USD"] = "5.0"
         try:
-            result = harness_run(trigger=make_cron_heartbeat(), deps=deps)
+            result = agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
         finally:
             if prev is None:
                 _os.environ.pop("OFFERGUIDE_DAILY_BUDGET_USD", None)
@@ -1816,8 +1816,8 @@ class TestReviewFixes:
 
     def test_recommended_orders_by_score_desc(self, web_client):
         client, store = web_client
-        from offerguide.harness import _schema as hs
-        hs.init_harness_schema(store)
+        from offerguide.agent_runtime import _schema as hs
+        hs.init_agent_runtime_schema(store)
         # Insert 3 jobs + 3 harness_events of kind='scored' (W15.22 path:
         # score is recorded as a harness_event after score_match runs, since
         # SKILL input_json doesn't contain job_id).
@@ -1888,8 +1888,8 @@ class TestReviewFixes:
 
     def test_recommended_daily_budget_shows(self, web_client):
         client, store = web_client
-        from offerguide.harness import _schema as hs
-        hs.init_harness_schema(store)
+        from offerguide.agent_runtime import _schema as hs
+        hs.init_agent_runtime_schema(store)
         # Insert 5 greeting_drafted events today
         with store.connect() as conn:
             for _ in range(5):
@@ -1964,7 +1964,7 @@ class TestReviewFixes:
         skills_by_name = {s.name: s for s in discover_skills(skills_root)}
 
         # Each entry: (SKILL name, sample inputs we'd pass at call site).
-        # Keep this list in sync with src/offerguide/harness/{tools,evaluate}.py
+        # Keep this list in sync with src/offerguide/agent_runtime/{tools,evaluate}.py
         # and src/offerguide/ui/web.py extension/score_inline.
         call_sites = [
             ("score_match", {"job_text": "x" * 100, "user_profile": "y" * 100}),
@@ -1998,7 +1998,7 @@ class TestReviewFixes:
         what /recommended ranks by."""
         from pathlib import Path
 
-        from offerguide.harness.tools import _exec_score_match
+        from offerguide.agent_runtime.tools import _exec_score_match
         from offerguide.skills import discover_skills
         from offerguide.skills._runtime import SkillRuntime
 
@@ -2032,7 +2032,7 @@ class TestReviewFixes:
                 "SELECT id FROM jobs WHERE title='测试岗'"
             ).fetchone()[0]
 
-        deps = HarnessDeps(
+        deps = AgentRuntimeDeps(
             settings=Settings(deepseek_api_key="x", default_model="stub"),
             store=tmp_store,
             memory_store=MemoryStore(root=tmp_worldview),
@@ -2169,7 +2169,7 @@ class TestReviewFixes:
 
     # ── Smell 6: dead code removed (no `_ = tools` statement at top level)
     def test_loop_module_no_dead_imports(self):
-        from offerguide.harness import loop as loop_mod
+        from offerguide.agent_runtime import loop as loop_mod
         src = Path(loop_mod.__file__).read_text(encoding="utf-8")
         # Check non-comment lines only — the comment explaining the fix
         # legitimately mentions the old code.

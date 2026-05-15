@@ -12,7 +12,7 @@ import pytest
 import offerguide
 from offerguide.agents.base import register_universal_tools
 from offerguide.agents.evaluation import EvaluationSubAgent
-from offerguide.harness import _schema as harness_schema
+from offerguide.agent_runtime import _schema as harness_schema
 from offerguide.llm.client import LLMResponse, ToolCall
 from offerguide.tools.registry import ToolRegistry
 
@@ -21,7 +21,7 @@ from offerguide.tools.registry import ToolRegistry
 def store(tmp_path):
     s = offerguide.Store(tmp_path / "eval.db")
     s.init_schema()
-    harness_schema.init_harness_schema(s)
+    harness_schema.init_agent_runtime_schema(s)
     return s
 
 

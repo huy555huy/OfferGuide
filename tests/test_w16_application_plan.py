@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 import offerguide
 from offerguide.application_plan import build_application_plan
 from offerguide.config import Settings
-from offerguide.harness import _schema as harness_schema
+from offerguide.agent_runtime import _schema as harness_schema
 from offerguide.ui.web import create_app
 from offerguide.workers.ambient import _load_unscored_discovered_ids
 
@@ -101,7 +101,7 @@ def test_apply_pack_no_llm_still_renders_real_application_plan(tmp_path: Path) -
 def test_ambient_unscored_queue_includes_agent_search_and_skips_thin(tmp_path: Path) -> None:
     store = offerguide.Store(tmp_path / "ambient.db")
     store.init_schema()
-    harness_schema.init_harness_schema(store)
+    harness_schema.init_agent_runtime_schema(store)
     with store.connect() as conn:
         conn.execute(
             "INSERT INTO jobs(source, title, company, raw_text, content_hash) "

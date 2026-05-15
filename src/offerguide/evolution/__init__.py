@@ -20,7 +20,7 @@ Closed-loop architecture (post-W21 — harness drives, no LLM self-critique):
         ↓
     fitness.compute_fitness  (aggregate signals into one score per skill_version)
         ↓
-    The harness agent calls detect_evolution_candidates as a tool when it
+    The agent runtime calls detect_evolution_candidates as a tool when it
     suspects a SKILL is underperforming. If results say "ripe":
         ↓
     agent calls evolve_skill(name)  →  evolution.evolve.evolve_skill()

@@ -110,8 +110,8 @@ def _link_skill_to_job(store, *, job_id, skill_run_id, skill_name, skill_version
     the W20.5 logic that lets W20.5 multi-SKILL app_outcome attribution
     find which SKILLs touched a given job."""
     try:
-        from ..harness import _schema as _hs
-        _hs.init_harness_schema(store)
+        from ..agent_runtime import _schema as _hs
+        _hs.init_agent_runtime_schema(store)
         with store.connect() as conn:
             conn.execute(
                 "INSERT INTO harness_events(kind, job_id, note, source) "

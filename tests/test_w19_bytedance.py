@@ -7,7 +7,7 @@ import pytest
 
 import offerguide
 from offerguide.application_plan import build_application_plan
-from offerguide.harness import _schema as harness_schema
+from offerguide.agent_runtime import _schema as harness_schema
 from offerguide.platforms.official_jobs import (
     BYTEDANCE_SEARCH_URL,
     SOURCE_LANDSCAPE,
@@ -219,7 +219,7 @@ def test_bytedance_jobs_source_routes_to_bytedance_plan():
 def store(tmp_path):
     s = offerguide.Store(tmp_path / "bd.db")
     s.init_schema()
-    harness_schema.init_harness_schema(s)
+    harness_schema.init_agent_runtime_schema(s)
     return s
 
 

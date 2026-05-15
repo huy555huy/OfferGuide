@@ -21,7 +21,7 @@ os.environ["OFFERGUIDE_NO_AMBIENT"] = "1"
 
 import offerguide
 from offerguide.config import Settings
-from offerguide.harness import _schema as harness_schema
+from offerguide.agent_runtime import _schema as harness_schema
 from offerguide.workers import ambient
 
 
@@ -30,7 +30,7 @@ def setup_store():
     db = tmp / "store.db"
     s = offerguide.Store(db)
     s.init_schema()
-    harness_schema.init_harness_schema(s)
+    harness_schema.init_agent_runtime_schema(s)
     return s, db
 
 
@@ -57,7 +57,7 @@ print("=" * 70)
 LATENCY_PER_JOB = 0.4  # seconds (simulates ~5-10s real LLM, scaled down)
 N_JOBS = 12  # realistic multi-source cycle
 
-import offerguide.harness.tools as _tools_mod
+import offerguide.agent_runtime.tools as _tools_mod
 import offerguide.llm as _llm_mod
 
 original_score_match = _tools_mod._exec_score_match

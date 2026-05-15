@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from offerguide.harness.context import EVIDENCE_FIRST_POLICY
-from offerguide.harness.tools import ALL_TOOL_SCHEMAS
+from offerguide.agent_runtime.context import EVIDENCE_FIRST_POLICY
+from offerguide.agent_runtime.tools import ALL_TOOL_SCHEMAS
 
 
 ROOT = Path(__file__).parent.parent
 
 
 def test_harness_instructions_make_goal_and_user_state_unknown_until_evidenced():
-    instructions = (ROOT / "src/offerguide/harness/instructions.md").read_text(
+    instructions = (ROOT / "src/offerguide/agent_runtime/instructions.md").read_text(
         encoding="utf-8"
     )
     assert "## 证据优先" in instructions
@@ -59,7 +59,7 @@ def test_goals_template_does_not_treat_silence_as_rejection():
 
 
 def test_harness_instructions_are_chat_first_and_result_oriented():
-    instructions = (ROOT / "src/offerguide/harness/instructions.md").read_text(
+    instructions = (ROOT / "src/offerguide/agent_runtime/instructions.md").read_text(
         encoding="utf-8"
     )
     assert "主入口是 Agent Chat" in instructions

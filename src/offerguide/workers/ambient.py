@@ -381,8 +381,8 @@ def _load_unscored_discovered_ids(store: Store, limit: int = 30) -> list[int]:
     big initial backlog.
     """
     try:
-        from ..harness import _schema as _hs
-        _hs.init_harness_schema(store)
+        from ..agent_runtime import _schema as _hs
+        _hs.init_agent_runtime_schema(store)
     except Exception:
         pass
     sources = (
@@ -417,8 +417,8 @@ def _load_unscored_discovered_ids(store: Store, limit: int = 30) -> list[int]:
 def _load_unscored_nowcoder_ids(store: Store, limit: int = 30) -> list[int]:
     """Backward-compatible helper used by tests and older callers."""
     try:
-        from ..harness import _schema as _hs
-        _hs.init_harness_schema(store)
+        from ..agent_runtime import _schema as _hs
+        _hs.init_agent_runtime_schema(store)
     except Exception:
         pass
     with store.connect() as conn:
@@ -494,12 +494,12 @@ def _score_jobs_blocking(
     import os as _os
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from ..harness import HarnessDeps, MemoryStore, default_worldview_dir
-    from ..harness import _schema as _hs
-    from ..harness.tools import _exec_score_match
+    from ..agent_runtime import AgentRuntimeDeps, MemoryStore, default_worldview_dir
+    from ..agent_runtime import _schema as _hs
+    from ..agent_runtime.tools import _exec_score_match
     from ..llm import BudgetExceeded, enforce_daily_budget
 
-    _hs.init_harness_schema(store)
+    _hs.init_agent_runtime_schema(store)
     # Allow env override for users hitting rate limits
     env_par = _os.environ.get("OFFERGUIDE_SCORE_PARALLELISM")
     if env_par:
@@ -518,10 +518,10 @@ def _score_jobs_blocking(
         log.warning("ambient discovery: budget exceeded before scoring: %s", e)
         return
 
-    # Single shared HarnessDeps — store is thread-safe (per-call connect),
+    # Single shared AgentRuntimeDeps — store is thread-safe (per-call connect),
     # runtime is thread-safe (LLMClient.chat is stateless beyond config),
     # MemoryStore writes are append-only.
-    deps = HarnessDeps(
+    deps = AgentRuntimeDeps(
         settings=settings, store=store,
         memory_store=MemoryStore(root=default_worldview_dir(settings)),
         runtime=runtime, skills=skills,

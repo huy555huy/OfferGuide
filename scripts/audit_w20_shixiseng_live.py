@@ -17,7 +17,7 @@ os.environ["OFFERGUIDE_NO_AMBIENT"] = "1"
 
 import offerguide
 from offerguide.application_plan import build_application_plan
-from offerguide.harness import _schema as harness_schema
+from offerguide.agent_runtime import _schema as harness_schema
 from offerguide.recruit_type import classify_recruit_type
 from offerguide.workers.ambient import _crawl_shixiseng_per_keyword
 
@@ -27,7 +27,7 @@ tmp = Path(tempfile.mkdtemp(prefix="ogfd_w20_ssseng_"))
 db = tmp / "store.db"
 store = offerguide.Store(db)
 store.init_schema()
-harness_schema.init_harness_schema(store)
+harness_schema.init_agent_runtime_schema(store)
 print(f"DB: {db}")
 
 # ---- 2. Real crawl 2 keywords ----------------------------------------

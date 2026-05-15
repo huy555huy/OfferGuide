@@ -484,7 +484,7 @@ CREATE INDEX IF NOT EXISTS idx_variants_skill_status ON skill_variants(skill_nam
 CREATE INDEX IF NOT EXISTS idx_variants_status       ON skill_variants(status);
 
 -- ``agent_runs`` — DEPRECATED. W13 central-agent-loop run log. The W21
--- refactor retired AgentLoop in favor of the harness (see ``harness_runs``
+-- refactor retired AgentLoop in favor of the agent runtime (see ``harness_runs``
 -- in ``harness/_schema.py``). This table is kept ONLY so historical data
 -- from pre-W21 installs is still readable; no code writes new rows here.
 -- The UI reads exclusively from harness_runs. New deployments should treat

@@ -24,8 +24,8 @@ _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO / "src"))
 
 from offerguide.config import Settings  # noqa: E402
-from offerguide.harness import default_worldview_dir  # noqa: E402
-from offerguide.harness.memory import MemoryStore  # noqa: E402
+from offerguide.agent_runtime import default_worldview_dir  # noqa: E402
+from offerguide.agent_runtime.memory import MemoryStore  # noqa: E402
 from offerguide.memory import Store  # noqa: E402
 
 _MIGRATED_REASON = "migrated to W15 worldview"

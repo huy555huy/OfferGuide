@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 import offerguide
 from offerguide.config import Settings
-from offerguide.harness import _schema as harness_schema
+from offerguide.agent_runtime import _schema as harness_schema
 from offerguide.recruit_type import (
     CAMPUS_FULLTIME,
     DAILY_INTERN,
@@ -184,7 +184,7 @@ def w17_client(tmp_path):
 
     store = offerguide.Store(tmp_path / "w17.db")
     store.init_schema()
-    harness_schema.init_harness_schema(store)
+    harness_schema.init_agent_runtime_schema(store)
     skills = discover_skills(Path(__file__).parent.parent / "src/offerguide/skills")
     s = Settings(deepseek_api_key="", default_model="stub")
     app = create_app(
