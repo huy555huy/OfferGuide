@@ -6,43 +6,82 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <style>
-        /* ─────── design tokens (Claude-inspired warm palette) ─────── */
+        /* ─────── design tokens — Direction A: Editorial Navy palette
+           (2026-05-15 redesign). Bone paper + cool slate ink + deep editorial
+           navy as the single signal color. Penguin-classic / 编辑部 energy.
+           Old aliases below preserved (--text → --ink, --primary → --signal,
+           etc.) so the 19 legacy templates still resolve without edits. */
         :root {
-            --bg:           #faf8f5;   /* warm cream off-white */
-            --bg-elev:      #ffffff;
-            --bg-subtle:    #f3efe5;   /* slightly warmer cream */
-            --bg-warm:      #ede8dc;   /* warm accent surface */
-            --border:       #e8e1d2;
-            --border-soft:  #efeae0;
-            --text:         #2c2925;   /* warm dark, not pure black */
-            --text-muted:   #79716a;
-            --text-dim:     #a39e95;
+            /* Surfaces — bone / editorial paper */
+            --bg:           #EFEDE5;   /* bone — cool cream, no orange undertone */
+            --bg-elev:      #FFFFFF;
+            --bg-subtle:    #E8E5DA;
+            --bg-deep:      #D9D5C7;
+            --bg-warm:      #E8E5DA;   /* legacy alias → bg-subtle */
+            --bg-ink:       #0F1419;   /* deep cool slate (for inverted blocks) */
 
-            --primary:      #cc785c;   /* terracotta */
-            --primary-soft: #fbf0e8;
-            --primary-hover:#b85f44;
+            /* Borders */
+            --line:         #DBD6C5;
+            --line-soft:    #E7E3D2;
+            --line-strong:  #C2BCA8;
+            --border:       #DBD6C5;   /* legacy alias */
+            --border-soft:  #E7E3D2;   /* legacy alias */
 
-            --success:      #6b8e6b;   /* sage */
-            --success-soft: #e8efe6;
-            --warning:      #c89456;   /* amber-warm */
-            --warning-soft: #f6ecd8;
-            --danger:       #b84a44;   /* warm rose */
-            --danger-soft:  #f4e2df;
+            /* Ink (text) — cool slate, not warm black */
+            --ink:          #0F1419;
+            --ink-2:        #2A3038;
+            --ink-3:        #5E6671;
+            --ink-4:        #989FA9;
+            --ink-on-dark:  #EFEDE5;
+            --text:         #0F1419;   /* legacy alias → ink */
+            --text-muted:   #5E6671;   /* legacy alias → ink-3 */
+            --text-dim:     #989FA9;   /* legacy alias → ink-4 */
+            --text-secondary: #2A3038; /* legacy alias → ink-2 */
+
+            /* Single accent — editorial deep navy (replaces warm terracotta) */
+            --signal:       #16365C;
+            --signal-soft:  #DCE3EE;
+            --signal-deep:  #0A2342;
+            --primary:      #16365C;   /* legacy alias → signal */
+            --primary-soft: #DCE3EE;   /* legacy alias */
+            --primary-hover:#0A2342;   /* legacy alias */
+
+            /* Status — muted, deeper, never compete with signal */
+            --ok:           #1F5C42;   /* deep forest */
+            --ok-soft:      #DEE9E1;
+            --warn:         #8C5E14;   /* deep amber */
+            --warn-soft:    #EFE3CA;
+            --bad:          #8A2A24;   /* deep wine */
+            --bad-soft:     #ECD7D4;
+            --success:      #1F5C42;   /* legacy alias → ok */
+            --success-soft: #DEE9E1;
+            --warning:      #8C5E14;   /* legacy alias → warn */
+            --warning-soft: #EFE3CA;
+            --danger:       #8A2A24;   /* legacy alias → bad */
+            --danger-soft:  #ECD7D4;
 
             --radius:       8px;
-            --radius-sm:    6px;
+            --radius-sm:    4px;
             --radius-lg:    14px;
-            --shadow-sm:    0 1px 2px rgba(44, 41, 37, 0.04);
-            --shadow-md:    0 4px 14px rgba(44, 41, 37, 0.06);
-            --shadow-lg:    0 12px 28px rgba(44, 41, 37, 0.08);
+            --r-sm:         4px;
+            --r:            8px;
+            --r-lg:         14px;
+            --shadow-sm:    0 1px 0 rgba(15, 20, 25, 0.05);
+            --shadow-md:    0 1px 3px rgba(15, 20, 25, 0.05), 0 1px 0 rgba(15, 20, 25, 0.05);
+            --shadow-lg:    0 8px 28px rgba(15, 20, 25, 0.09);
+            --shadow-1:     0 1px 0 rgba(15, 20, 25, 0.05), 0 1px 3px rgba(15, 20, 25, 0.05);
+            --shadow-2:     0 8px 28px rgba(15, 20, 25, 0.09);
 
-            --font-sans:    -apple-system, BlinkMacSystemFont, "Inter",
-                            "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
-            --font-serif:   "Source Serif 4", "Tiempos Headline", "Georgia", serif;
-            --font-mono:    "SF Mono", "JetBrains Mono", "Menlo", monospace;
+            /* Type — Chinese-first stack, serif for display, Inter for body, JBM for code */
+            --font-sans:    "Inter", "Noto Sans SC", "PingFang SC",
+                            -apple-system, BlinkMacSystemFont,
+                            "Hiragino Sans GB", system-ui, sans-serif;
+            --font-serif:   "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+            --font-mono:    "JetBrains Mono", "IBM Plex Mono", "SF Mono",
+                            ui-monospace, monospace;
         }
 
         /* ─────── reset / base ─────── */

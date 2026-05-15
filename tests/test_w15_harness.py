@@ -1487,12 +1487,13 @@ class TestReviewFixes:
         assert "budget" in (result.error_text or "").lower()
 
     # ── W15.16: 术语去内核化 — user-facing UI 不应该暴露 internal jargon
+    # (W21 redesign 2026-05-15: "Mission Control" 重新成了 home 的设计名,
+    # 不再是 "internal jargon" 的同义词. 这个 assert 现在跟设计冲突, 删掉.)
     def test_home_no_mission_control_visible(self, web_client):
         """Root is now the Agent Chat workbench, not the ops dashboard."""
         client, _ = web_client
         resp = client.get("/")
         assert "Agent Chat" in resp.text
-        assert "Mission Control" not in resp.text
 
     def test_home_has_dejargonized_button_labels(self, web_client):
         """W15.16 — '唤醒 agent' / 'trajectory' 这些 internal 术语该被替换."""
