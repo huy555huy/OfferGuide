@@ -166,11 +166,181 @@ def create_app(
         return FileResponse(str(path))
 
     @app.get("/", response_class=HTMLResponse)
-    def home(request: Request) -> Any:
-        return agent_page(request)
+    def mission_control(request: Request) -> Any:
+        """Mission Control — the W21 redesign home (2026-05-15).
+
+        Replaces /today /agent /inbox /goals /dashboard. Layout from
+        static/redesign/screens/a-home.html — bone bg, navy signal, left
+        56px rail + center main + right 360px agent live rail.
+
+        Data binding kept minimal in commit 3 — interrupts / recent_jobs
+        / agent log are wired to real db. Further binding (SSE-streamed
+        agent_now etc.) lands in later commits.
+        """
+        import datetime as _dt
+        import json as _json
+        # Greeting by local hour
+        hour = _dt.datetime.now().hour
+        greeting = "早上好" if hour < 11 else ("下午好" if hour < 18 else "晚上好")
+
+        # Interrupts: pending inbox items (kind=question + agent_suggestion)
+        interrupts: list[dict] = []
+        try:
+            pending = inbox_mod.list_items(store, status="pending", limit=10)
+            for it in pending:
+                meta = []
+                meta.append({"text": it.kind, "cls": "tag"})
+                interrupts.append({
+                    "score": None,
+                    "title": it.title or "(无标题)",
+                    "meta": meta,
+                    "ask": (it.body or "")[:160] if it.body else None,
+                    "href": "/decision/" + str(it.id),
+                    "actions": [{"label": "处理", "kind": "signal"}],
+                })
+        except Exception:
+            pass
+        # Cap to 5 on hero strip
+        interrupts = interrupts[:5]
+
+        # Recent jobs — top 5 most-recently-fetched scored or unscored
+        recent_jobs: list[dict] = []
+        try:
+            with store.connect() as conn:
+                rows = conn.execute(
+                    "SELECT id, title, company, location, source FROM jobs "
+                    "ORDER BY fetched_at DESC LIMIT 5"
+                ).fetchall()
+                jobs_today_count = conn.execute(
+                    "SELECT COUNT(*) FROM jobs "
+                    "WHERE fetched_at >= julianday('now', 'start of day')"
+                ).fetchone()[0]
+                # Try to get scores from harness_events
+                score_map: dict[int, int] = {}
+                try:
+                    for srow in conn.execute(
+                        "SELECT job_id, json_extract(note, '$.probability') "
+                        "FROM harness_events WHERE kind='scored' "
+                        "ORDER BY id DESC"
+                    ).fetchall():
+                        if srow[0] is not None and srow[1] is not None and int(srow[0]) not in score_map:
+                            score_map[int(srow[0])] = int(round(float(srow[1]) * 100))
+                except Exception:
+                    pass
+            _src_map = {
+                "nowcoder": ("牛", "nc"), "tencent_campus": ("腾", "tc"),
+                "tencent_social": ("腾", "tc"), "baidu_campus": ("百", "bd"),
+                "baidu_intern": ("百", "bd"), "bytedance_jobs": ("字", "ali"),
+                "shixiseng": ("僧", ""), "zerovoice_repo": ("0v", ""),
+                "manual": ("M", ""),
+            }
+            for r in rows:
+                jid, title, company, location, source = int(r[0]), r[1] or "(无标题)", r[2] or "?", r[3] or "", r[4] or ""
+                src_label, src_cls = _src_map.get(source, (source[:1].upper() if source else "?", ""))
+                score = score_map.get(jid)
+                tag_cls, tag_label = ("ok", "已评") if score is not None else ("", "待评")
+                recent_jobs.append({
+                    "id": jid, "title": title, "score": score,
+                    "subtitle": f"{source} · {location} · 校招" if location else f"{source} · 校招",
+                    "src_label": src_label, "src_cls": src_cls,
+                    "tag_cls": tag_cls, "tag_label": tag_label,
+                })
+        except Exception:
+            jobs_today_count = 0
+
+        # Agent state — wake count = harness_runs total, today cost from harness_runs+skill_runs
+        wake_count = 0
+        today_cost = 0.0
+        try:
+            with store.connect() as conn:
+                wake_count = conn.execute(
+                    "SELECT COUNT(*) FROM harness_runs"
+                ).fetchone()[0] or 0
+                tc = conn.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0) FROM skill_runs "
+                    "WHERE created_at >= julianday('now', 'start of day')"
+                ).fetchone()
+                today_cost = float(tc[0] or 0.0) if tc else 0.0
+        except Exception:
+            pass
+
+        # Recent agent events (last 6h) — harness_events
+        recent_events: list[dict] = []
+        try:
+            with store.connect() as conn:
+                erows = conn.execute(
+                    "SELECT kind, job_id, note, created_at FROM harness_events "
+                    "WHERE created_at >= julianday('now') - 0.25 "
+                    "ORDER BY id DESC LIMIT 8"
+                ).fetchall()
+            for ek, ej, en, ec in erows:
+                ts = _dt.datetime.fromtimestamp(
+                    (float(ec) - 2440587.5) * 86400, tz=_dt.UTC,
+                ).astimezone().strftime("%H:%M")
+                verb_map = {
+                    "scored": "评估", "applied": "投递", "user_marked_applied": "标记已投",
+                    "tailor_resume_generated": "微调简历", "apply_pack_generated": "生成投递包",
+                    "project_record_saved": "存项目档案", "dead_url_reported": "标失效",
+                }
+                recent_events.append({
+                    "time": ts, "kind": "log",
+                    "verb": verb_map.get(ek, ek),
+                    "obj": f"job#{ej}" if ej else "",
+                    "tail": "",
+                })
+        except Exception:
+            pass
+
+        # Uptime — days since earliest harness_run
+        uptime_str = "—"
+        try:
+            with store.connect() as conn:
+                first = conn.execute(
+                    "SELECT MIN(started_at) FROM harness_runs"
+                ).fetchone()
+            if first and first[0]:
+                delta_days = (_dt.datetime.now().toordinal() -
+                              _dt.datetime.fromtimestamp((float(first[0]) - 2440587.5) * 86400).toordinal())
+                uptime_str = f"{max(0, delta_days)}d"
+        except Exception:
+            pass
+
+        # Hero subtitle — what agent did in last 6h
+        hero_subtitle = (
+            f"Agent 在过去 6 小时里处理了 {len(recent_events)} 件事。"
+            f"今日新发现 {jobs_today_count} 个岗位。"
+            if recent_events or jobs_today_count else
+            "Agent 待命中。粘 JD 评估或等下次 ambient 巡检 (~6h cron)。"
+        )
+
+        ctx = _ctx(
+            request,
+            greeting=greeting,
+            interrupts=interrupts,
+            interrupts_count=len(interrupts),
+            recent_jobs=recent_jobs,
+            jobs_today_count=jobs_today_count,
+            today_cost_usd=today_cost,
+            budget_cap_usd=5.0,
+            wake_count=wake_count,
+            uptime_str=uptime_str,
+            agent_now_task="Agent 在睡 — 等下次 cron 触发或粘 JD",
+            agent_now_progress=None,
+            agent_now_progress_label="",
+            agent_now_eta="",
+            agent_state_dot="ok",
+            agent_state_label="待命",
+            recent_window_label="最近 6 小时",
+            next_wake_label="cron 巡检 ~6h 一次",
+            recent_events=recent_events,
+            hero_subtitle=hero_subtitle,
+        )
+        return templates.TemplateResponse(request, "mission_control.html", ctx)
 
     @app.get("/today", response_class=HTMLResponse)
     def home_legacy(request: Request) -> Any:
+        from fastapi.responses import RedirectResponse as _R
+        return _R(url="/", status_code=301)  # W21 redesign: merged into Mission Control
         """Home (W13.x rewrite) — agent-driven, not dashboard-driven.
 
         The pre-W13 home was a daemon-style stat panel ("4 stat cards + 5
@@ -1913,6 +2083,8 @@ def create_app(
 
     @app.get("/inbox", response_class=HTMLResponse)
     def inbox_view(request: Request) -> Any:
+        from fastapi.responses import RedirectResponse as _R
+        return _R(url="/", status_code=301)  # W21 redesign: merged into Mission Control
         pending = inbox_mod.list_items(store, status="pending", limit=100)
         decided = (
             inbox_mod.list_items(store, status="approved", limit=20)
@@ -2473,6 +2645,8 @@ def create_app(
 
     @app.get("/agent", response_class=HTMLResponse)
     def agent_page(request: Request) -> Any:
+        from fastapi.responses import RedirectResponse as _R
+        return _R(url="/", status_code=301)  # W21 redesign: merged into Mission Control
         """W13 agent loop UI — pick a goal, watch the agent think + act live."""
         # Recent runs to show below the form (audit trail)
         try:
@@ -2846,6 +3020,8 @@ def create_app(
 
     @app.get("/goals", response_class=HTMLResponse)
     def goals_view(request: Request) -> Any:
+        from fastapi.responses import RedirectResponse as _R
+        return _R(url="/", status_code=301)  # W21 redesign: merged into Mission Control
         from .. import goals as _goals
         active = _goals.list_active_goals(store)
         progress_list = [(g, _goals.compute_progress(store, g)) for g in active]
@@ -4323,6 +4499,8 @@ def create_app(
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard_view(request: Request) -> Any:
+        from fastapi.responses import RedirectResponse as _R
+        return _R(url="/", status_code=301)  # W21 redesign: merged into Mission Control
         from .. import briefs as briefs_mod
         return templates.TemplateResponse(
             request,
