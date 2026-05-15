@@ -63,7 +63,7 @@ class TestMissionControlOnHome:
         trigger. The 3 cards stay (wake_agent + 2 manual triggers) but
         labels changed."""
         client, _ = app_client
-        resp = client.get("/")
+        resp = client.get("/today")
         # Header
         assert "Mission Control" in resp.text
         # New canonical names per W14.18 (discover_new_jobs/score_unscored_jobs)
@@ -77,7 +77,7 @@ class TestMissionControlOnHome:
 
     def test_each_daemon_has_trigger_button(self, app_client):
         client, _ = app_client
-        resp = client.get("/")
+        resp = client.get("/today")
         # The triggerDaemon JS function and the "▶ 立刻跑一次" button text
         assert "triggerDaemon" in resp.text
         assert "立刻跑一次" in resp.text
@@ -87,7 +87,7 @@ class TestMissionControlOnHome:
 
     def test_no_daemon_runs_shows_never_run(self, app_client):
         client, _ = app_client
-        resp = client.get("/")
+        resp = client.get("/today")
         assert "从未跑过" in resp.text
 
     def test_with_daemon_runs_shows_last_status(self, app_client):
@@ -100,7 +100,7 @@ class TestMissionControlOnHome:
                 "        '{\"inserted\":3,\"hits_evaluated\":7}', "
                 "        julianday('now') - 0.001, julianday('now'))"
             )
-        resp = client.get("/")
+        resp = client.get("/today")
         # Status pill + summary key=value
         assert "inserted=3" in resp.text or "inserted" in resp.text
         # The "ok" status pill should appear in some form
@@ -127,7 +127,7 @@ class TestActivityTimeline:
                 "VALUES ('auto_score_new_jobs', 'error', "
                 "        'LLM rate limited', '{}')"
             )
-        resp = client.get("/")
+        resp = client.get("/today")
         # Timeline section appears
         assert "活动时间线" in resp.text or "recent activity" in resp.text.lower()
         # Error event surfaces with the error text
@@ -246,7 +246,7 @@ class TestDaemonCapabilityDescriptions:
         must spell out what it does in human-readable Chinese, not just
         cron schedules."""
         client, _ = app_client
-        resp = client.get("/")
+        resp = client.get("/today")
         # discover_jobs description — references DiscoverySubAgent + verified sources
         assert "DiscoverySubAgent" in resp.text or "verified" in resp.text
         # auto_score_new_jobs description

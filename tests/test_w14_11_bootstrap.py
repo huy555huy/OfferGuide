@@ -143,7 +143,7 @@ class TestStateAwareNextStep:
     def test_first_use_shows_two_paths(self, app_client):
         """No goal + no job = brand new. Show both A (paste JD) and B (set goal)."""
         client, _ = app_client
-        resp = client.get("/")
+        resp = client.get("/today")
         assert "👋 第一次用" in resp.text
         # Both calls-to-action should appear
         assert 'href="/pipeline"' in resp.text
@@ -154,7 +154,7 @@ class TestStateAwareNextStep:
         from offerguide import goals as _goals
         client, store = app_client
         _goals.add_goal(store, title="2026 暑期 AI Agent offer")
-        resp = client.get("/")
+        resp = client.get("/today")
         assert "Goal 设好了" in resp.text or "缺 JD" in resp.text
         # Should not show first-use two-path layout anymore
         assert "👋 第一次用" not in resp.text
@@ -168,7 +168,7 @@ class TestStateAwareNextStep:
                 ("x" * 250,),
             )
             new_job_id = cur.lastrowid
-        resp = client.get("/")
+        resp = client.get("/today")
         # Should mention "投递包" and link to the actual job's /apply page
         assert "投递包" in resp.text
         assert f"/apply/{new_job_id}" in resp.text
@@ -187,7 +187,7 @@ class TestStateAwareNextStep:
                 "INSERT INTO applications(job_id, status, applied_at) "
                 "VALUES (?, 'submitted', julianday('now'))", (job_id,),
             )
-        resp = client.get("/")
+        resp = client.get("/today")
         assert "👋 第一次用" not in resp.text
         assert "Goal 设好了" not in resp.text
         assert "去生成投递包" not in resp.text

@@ -61,14 +61,14 @@ class TestNavBadges:
         )
         inbox_mod.decide(store, item.id, decision="approved")
 
-        resp = client.get("/")
+        resp = client.get("/today")
         assert resp.status_code == 200
         # Badge "3" should appear next to inbox link
         assert 'class="nav-badge medium">3</span>' in resp.text
 
     def test_no_inbox_badge_when_empty(self, app_client):
         client, _ = app_client
-        resp = client.get("/")
+        resp = client.get("/today")
         # No "nav-badge medium" should appear (no pending)
         assert 'nav-badge medium' not in resp.text
 
@@ -79,7 +79,7 @@ class TestNavBadges:
             store, title="off-track goal",
             target_date=date.today() + timedelta(days=10),
         )
-        resp = client.get("/")
+        resp = client.get("/today")
         assert 'nav-badge high' in resp.text  # warning class
         # W15.16 — tooltip changed from "off-track" English → "偏离轨道" 中文
         assert ('off-track' in resp.text or '偏离轨道' in resp.text)
@@ -225,7 +225,7 @@ class TestTrajectoryCollapse:
 class TestLoadingStates:
     def test_home_wake_agent_button_has_loading_text(self, app_client):
         client, _ = app_client
-        resp = client.get("/")
+        resp = client.get("/today")
         # W14.13: home now uses Mission Control "▶ 立刻跑一次 (不等 cron)"
         # daemon trigger buttons (one of which is wake_agent) instead of a
         # single hero "唤醒 agent" button. Either loading-text pattern is fine.
@@ -246,7 +246,7 @@ class TestLoadingStates:
 
     def test_global_toast_helper_present(self, app_client):
         client, _ = app_client
-        resp = client.get("/")
+        resp = client.get("/today")
         # The global toast/btnLoading/btnReset helpers should be in base.html
         assert "window.toast" in resp.text
         assert "window.btnLoading" in resp.text
