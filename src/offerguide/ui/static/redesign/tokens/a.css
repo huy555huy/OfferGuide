@@ -1,0 +1,189 @@
+/* ───────────────────────────────────────────────────────
+   Direction A — "Mission Control" · Editorial Navy palette
+   Bone paper + cool slate ink + deep editorial navy as the
+   single signal color. Penguin-classic / 编辑部 energy.
+   ─────────────────────────────────────────────────────── */
+
+:root {
+  /* Surfaces — bone / editorial paper */
+  --bg:           #EFEDE5;   /* bone — cool cream, no orange undertone */
+  --bg-elev:      #FFFFFF;
+  --bg-subtle:    #E8E5DA;
+  --bg-deep:      #D9D5C7;
+  --bg-ink:       #0F1419;   /* deep cool slate */
+
+  /* Borders */
+  --line:         #DBD6C5;
+  --line-soft:    #E7E3D2;
+  --line-strong:  #C2BCA8;
+
+  /* Ink (text) — cool slate, not warm black */
+  --ink:          #0F1419;
+  --ink-2:        #2A3038;
+  --ink-3:        #5E6671;
+  --ink-4:        #989FA9;
+  --ink-on-dark:  #EFEDE5;
+
+  /* Single accent — editorial deep navy */
+  --signal:       #16365C;   /* used ONLY for "decision needed" / CTA */
+  --signal-soft:  #DCE3EE;
+  --signal-deep:  #0A2342;
+
+  /* Status (muted; never compete with signal) */
+  --ok:           #1F5C42;
+  --ok-soft:      #DEE9E1;
+  --warn:         #8C5E14;
+  --warn-soft:    #EFE3CA;
+  --bad:          #8A2A24;
+  --bad-soft:     #ECD7D4;
+
+  /* Type stack — Chinese-first */
+  --font-serif:   "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+  --font-sans:    "PingFang SC", "Inter Tight", "Inter", -apple-system,
+                  BlinkMacSystemFont, "Hiragino Sans GB", system-ui, sans-serif;
+  --font-mono:    "JetBrains Mono", "IBM Plex Mono", "SF Mono", ui-monospace, monospace;
+
+  /* Radius / shadow */
+  --r-sm:  4px;
+  --r:     8px;
+  --r-lg:  14px;
+  --shadow-1: 0 1px 0 rgba(15, 20, 25, 0.05), 0 1px 3px rgba(15, 20, 25, 0.05);
+  --shadow-2: 0 8px 28px rgba(15, 20, 25, 0.09);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+body {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: 0.005em;
+  font-feature-settings: "tnum" on, "ss01" on;
+}
+
+/* ── primitives ── */
+.mono { font-family: var(--font-mono); font-feature-settings: "tnum" on, "zero" on; letter-spacing: -0.01em; }
+.serif { font-family: var(--font-serif); }
+.tnum { font-variant-numeric: tabular-nums; }
+.dim   { color: var(--ink-3); }
+.dim-2 { color: var(--ink-4); }
+
+.kbd {
+  font-family: var(--font-mono); font-size: 11px;
+  padding: 1px 5px; border-radius: 4px;
+  background: var(--bg-subtle); color: var(--ink-2);
+  border: 1px solid var(--line);
+  box-shadow: 0 1px 0 var(--line);
+}
+
+.tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 500;
+  background: var(--bg-subtle); color: var(--ink-2);
+  border: 1px solid var(--line-soft);
+}
+.tag.signal { background: var(--signal-soft); color: var(--signal-deep); border-color: rgba(22, 54, 92, 0.22); }
+.tag.ok     { background: var(--ok-soft); color: var(--ok); border-color: rgba(31, 92, 66, 0.2); }
+.tag.warn   { background: var(--warn-soft); color: var(--warn); border-color: rgba(140, 94, 20, 0.22); }
+.tag.bad    { background: var(--bad-soft); color: var(--bad); border-color: rgba(138, 42, 36, 0.22); }
+.tag.ink    { background: var(--bg-ink); color: var(--ink-on-dark); border-color: var(--bg-ink); }
+
+.dot { width: 6px; height: 6px; border-radius: 999px; background: var(--ink-3); display: inline-block; }
+.dot.live { background: var(--signal); box-shadow: 0 0 0 3px rgba(22, 54, 92, 0.18); animation: pulse 2.4s ease-in-out infinite; }
+.dot.ok { background: var(--ok); }
+.dot.warn { background: var(--warn); }
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(22, 54, 92, 0.18); }
+  50%      { box-shadow: 0 0 0 6px rgba(22, 54, 92, 0.06); }
+}
+
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 12px; border-radius: var(--r-sm);
+  font-family: inherit; font-size: 12.5px; font-weight: 500;
+  border: 1px solid var(--line-strong); background: var(--bg-elev); color: var(--ink);
+  cursor: pointer; transition: background 0.12s, border-color 0.12s;
+  letter-spacing: 0.02em;
+}
+.btn:hover { background: var(--bg-subtle); }
+.btn.primary { background: var(--ink); color: var(--ink-on-dark); border-color: var(--ink); }
+.btn.primary:hover { background: #000; }
+.btn.signal { background: var(--signal); color: #fff; border-color: var(--signal); }
+.btn.signal:hover { background: var(--signal-deep); }
+.btn.ghost { background: transparent; border-color: transparent; padding: 6px 8px; color: var(--ink-3); }
+.btn.ghost:hover { color: var(--ink); background: var(--bg-subtle); }
+.btn.sm { padding: 4px 9px; font-size: 11.5px; }
+
+hr { border: 0; border-top: 1px solid var(--line); margin: 0; }
+.divider-soft { border-top: 1px solid var(--line-soft); }
+
+/* shared horizontal scrollbar killer for previews */
+.no-scroll { overflow: hidden; }
+
+/* ── bracket-tag (borrowed from Direction B — the [ask_user] / [scored] style) ── */
+.bracket-tag {
+  display: inline-flex; gap: 0;
+  font-family: var(--font-mono); font-size: 11px;
+  letter-spacing: 0.02em;
+}
+.bracket-tag::before { content: "["; color: var(--ink-4); }
+.bracket-tag::after { content: "]"; color: var(--ink-4); }
+.bracket-tag > span { padding: 0 1px; }
+.bracket-tag.signal > span { color: var(--signal-deep); }
+.bracket-tag.ok     > span { color: var(--ok); }
+.bracket-tag.warn   > span { color: var(--warn); }
+.bracket-tag.bad    > span { color: var(--bad); }
+.bracket-tag.ink    > span { color: var(--ink-2); }
+.bracket-tag.dim    > span { color: var(--ink-3); }
+
+/* ── uptime strip (lives in topbar — daemon-style meta) ── */
+.uptime {
+  display: inline-flex; align-items: center; gap: 10px;
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--ink-3); letter-spacing: 0.02em;
+}
+.uptime .seg { display: inline-flex; gap: 4px; align-items: center; }
+.uptime .v { color: var(--ink); font-weight: 600; }
+.uptime .sep { color: var(--ink-4); }
+.uptime .live { color: var(--signal); font-weight: 600; }
+.uptime .live::before {
+  content: "●"; margin-right: 4px;
+  animation: pulse-mini 1.6s ease-in-out infinite;
+}
+@keyframes pulse-mini { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+/* ── command bar at bottom (keyboard hints) ── */
+.kbar {
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+  padding: 9px 22px;
+  display: flex; align-items: center; gap: 18px;
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--ink-3);
+}
+.kbar .item { display: inline-flex; gap: 5px; align-items: center; }
+.kbar .item .k {
+  background: var(--bg-elev); padding: 1px 6px;
+  border: 1px solid var(--line); border-radius: 4px;
+  color: var(--ink-2); font-weight: 500;
+}
+.kbar .item:hover .k { border-color: var(--line-strong); color: var(--ink); }
+.kbar .grow { flex: 1; }
+.kbar .right { color: var(--ink-3); }
+.kbar .right b { color: var(--ink); }
+
+/* ── command prompt echo (used in page hero) ── */
+.cmd-echo {
+  font-family: var(--font-mono); font-size: 12.5px;
+  color: var(--ink-2);
+}
+.cmd-echo .ps { color: var(--signal); font-weight: 700; }
+.cmd-echo .arg { color: var(--signal-deep); }
+.cmd-echo .id { color: var(--ink); font-weight: 600; }
+.cmd-echo .ret {
+  display: block; color: var(--ink-3); font-size: 11.5px;
+  margin-top: 4px; padding-left: 0;
+}
+.cmd-echo .ret::before { content: "→ "; color: var(--ink-4); }

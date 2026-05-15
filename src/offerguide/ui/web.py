@@ -53,6 +53,7 @@ json_loads = json.loads
 json_dumps = json.dumps
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
 
 
 def create_app(
@@ -103,6 +104,14 @@ def create_app(
     )
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
+    # Static asset mount — serves the design-redesign mockups directly so
+    # /preview/redesign and /static/redesign/tokens/a.css load without per-file
+    # endpoints. The new W21+ UI design lives under static/redesign/ until it
+    # is wired into Jinja templates page-by-page.
+    if STATIC_DIR.exists():
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
     def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
         # W14.5 — compute nav badges so every page shows live counts:
         #   inbox: pending items
@@ -139,6 +148,22 @@ def create_app(
         }
         base.update(extra)
         return base
+
+    @app.get("/preview/redesign", response_class=HTMLResponse)
+    def preview_redesign(request: Request) -> Any:
+        """Static preview of the redesigned UI mockups.
+
+        The hi-fi redesign (7 screens + tokens, by user 2026-05-15) lives in
+        ``static/redesign/``. This endpoint serves the loader index.html
+        directly so the new design can be viewed alongside the live UI while
+        it gets wired page-by-page into Jinja. Drop this route once the
+        redesign is fully integrated.
+        """
+        from fastapi.responses import FileResponse
+        path = STATIC_DIR / "redesign" / "index.html"
+        if not path.exists():
+            raise HTTPException(404, "redesign preview not installed")
+        return FileResponse(str(path))
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request) -> Any:

@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>A · Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../tokens/a.css">
+<style>
+  body { overflow: hidden; }
+  .app { width: 1440px; height: 900px; display: grid; grid-template-columns: 56px 1fr; }
+
+  .rail {
+    background: var(--bg-elev); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; align-items: center;
+    padding: 14px 0; gap: 2px;
+  }
+  .rail .logo { width: 32px; height: 32px; border-radius: 8px; background: var(--ink); color: var(--ink-on-dark); display: grid; place-items: center; font-family: var(--font-serif); font-weight: 700; font-size: 17px; margin-bottom: 14px; }
+  .rail .item { width: 36px; height: 36px; border-radius: 8px; display: grid; place-items: center; color: var(--ink-3); cursor: pointer; position: relative; }
+  .rail .item.active { background: var(--bg-subtle); color: var(--ink); }
+  .rail .item.active::before { content: ""; position: absolute; left: -10px; top: 8px; bottom: 8px; width: 2px; background: var(--ink); border-radius: 2px; }
+  .rail .item svg { width: 18px; height: 18px; }
+  .rail .spacer { flex: 1; }
+
+  .main { display: flex; flex-direction: column; overflow: hidden; }
+
+  .topbar {
+    height: 52px; padding: 0 28px;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 14px;
+  }
+  .breadcrumb { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .breadcrumb .crumb { color: var(--ink-3); }
+  .breadcrumb .crumb.active { color: var(--ink); font-weight: 500; }
+  .breadcrumb .sep { color: var(--ink-4); }
+  .topbar .grow { flex: 1; }
+
+  /* hero */
+  .scroll { flex: 1; overflow: hidden; padding: 22px 28px 0; }
+  .hero {
+    background: var(--bg-ink); color: var(--ink-on-dark);
+    border-radius: var(--r); padding: 18px 22px;
+    display: grid; grid-template-columns: 1fr repeat(4, auto); gap: 26px;
+    align-items: center; margin-bottom: 18px;
+  }
+  .hero h1 {
+    margin: 0; font-family: var(--font-serif);
+    font-size: 22px; font-weight: 500; letter-spacing: -0.005em;
+    line-height: 1.3;
+  }
+  .hero h1 .acc { color: var(--signal); }
+  .hero .sub { margin-top: 6px; font-size: 12px; color: rgba(246,244,238,0.65); max-width: 540px; }
+  .hero .kpi { text-align: right; padding-left: 22px; border-left: 1px solid rgba(255,255,255,0.1); }
+  .hero .kpi .v {
+    font-family: var(--font-serif); font-size: 24px; font-weight: 600;
+    line-height: 1; letter-spacing: -0.02em;
+  }
+  .hero .kpi .v.up { color: var(--ok); }
+  .hero .kpi .v.sig { color: var(--signal); }
+  .hero .kpi .l { font-family: var(--font-mono); font-size: 10px; color: rgba(246,244,238,0.5); letter-spacing: 0.1em; margin-top: 5px; }
+
+  /* SKILLS strip */
+  .skills {
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    gap: 12px; margin-bottom: 18px;
+  }
+  .skill {
+    background: var(--bg-elev); border: 1px solid var(--line);
+    border-radius: var(--r); padding: 12px 14px;
+    cursor: pointer; transition: border-color 0.1s;
+  }
+  .skill:hover { border-color: var(--line-strong); }
+  .skill.active { border-color: var(--signal); background: var(--bg-elev); box-shadow: 0 0 0 3px var(--signal-soft); }
+  .skill .nm {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+    color: var(--ink);
+  }
+  .skill .ver {
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-3);
+    margin-left: 6px;
+  }
+  .skill .fit {
+    margin-top: 8px;
+    display: flex; align-items: baseline; gap: 4px;
+  }
+  .skill .fit .v {
+    font-family: var(--font-serif); font-size: 18px; font-weight: 600;
+    line-height: 1; letter-spacing: -0.02em;
+  }
+  .skill .fit .delta {
+    font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  }
+  .skill .fit .delta.up { color: var(--ok); }
+  .skill .fit .delta.down { color: var(--bad); }
+  .skill .stat {
+    margin-top: 6px;
+    font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--ink-3);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .skill .stat .sig { color: var(--signal); font-weight: 600; }
+
+  /* main two col */
+  .grid {
+    display: grid; grid-template-columns: 1.45fr 1fr;
+    gap: 14px;
+  }
+
+  .panel {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .panel > header {
+    padding: 12px 16px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .panel > header h3 {
+    margin: 0; font-family: var(--font-serif);
+    font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
+  }
+  .panel > header .grow { flex: 1; }
+  .panel .b { padding: 14px 16px; }
+
+  /* fitness over time chart */
+  .chart {
+    display: grid; grid-template-columns: 36px 1fr;
+    gap: 8px; margin: 4px 0 0;
+  }
+  .chart .ya {
+    display: flex; flex-direction: column; justify-content: space-between;
+    font-family: var(--font-mono); font-size: 10px; color: var(--ink-4);
+    text-align: right; padding-right: 4px;
+    line-height: 1;
+  }
+  .chart .canvas {
+    position: relative;
+    height: 160px;
+    border-left: 1px solid var(--line-soft);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .chart .grid-h {
+    position: absolute; left: 0; right: 0;
+    border-top: 1px dashed var(--line-soft);
+  }
+  .chart svg { position: absolute; inset: 0; }
+  .chart .pt { position: absolute; width: 8px; height: 8px; border-radius: 999px; background: var(--ink); transform: translate(-50%, -50%); }
+  .chart .pt.evolve { background: var(--signal); box-shadow: 0 0 0 4px var(--signal-soft); }
+  .chart .label-evolve {
+    position: absolute; font-family: var(--font-mono); font-size: 10px;
+    color: var(--signal-deep); transform: translateX(-50%);
+    background: var(--bg-elev); padding: 1px 5px; border-radius: 3px;
+    border: 1px solid var(--signal-soft);
+    white-space: nowrap;
+  }
+  .chart .xa {
+    margin-top: 6px;
+    display: flex; justify-content: space-between;
+    padding-left: 0;
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--ink-4);
+  }
+  .chart .legend {
+    margin-top: 8px;
+    display: flex; gap: 14px; flex-wrap: wrap;
+    font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--ink-3);
+  }
+  .chart .legend .it { display: inline-flex; gap: 5px; align-items: center; }
+  .chart .legend .it::before {
+    content: ""; width: 10px; height: 2px; background: var(--ink);
+  }
+  .chart .legend .it.shadow::before { background: var(--signal); border-top: 1px dashed transparent; }
+  .chart .legend .it.live::before { background: var(--ink); }
+  .chart .legend .it.canary::before { background: var(--warn); }
+
+  /* prompt diff */
+  .diff-panel { flex: 1; overflow: hidden; }
+  .diff-meta {
+    padding: 10px 16px;
+    background: var(--bg-subtle);
+    border-bottom: 1px solid var(--line-soft);
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+    font-family: var(--font-mono);
+  }
+  .diff-meta .stat .l { font-size: 9.5px; color: var(--ink-4); letter-spacing: 0.1em; }
+  .diff-meta .stat .v { font-size: 14px; color: var(--ink); margin-top: 3px; }
+  .diff-meta .stat .v.up { color: var(--ok); }
+  .diff-doc {
+    padding: 14px 18px;
+    font-family: var(--font-mono); font-size: 11.5px;
+    line-height: 1.7;
+    color: var(--ink-2);
+    overflow: hidden;
+  }
+  .diff-doc .ln {
+    display: grid; grid-template-columns: 28px 12px 1fr;
+    gap: 8px;
+    font-family: var(--font-mono);
+    padding: 0 0;
+  }
+  .diff-doc .ln .n { color: var(--ink-4); font-size: 10px; text-align: right; }
+  .diff-doc .ln .m { color: var(--ink-4); }
+  .diff-doc .ln.add { background: var(--ok-soft); border-left: 2px solid var(--ok); padding-left: 6px; margin-left: -8px; }
+  .diff-doc .ln.add .m { color: var(--ok); }
+  .diff-doc .ln.add .t { color: #1a3a25; }
+  .diff-doc .ln.del { background: var(--bad-soft); border-left: 2px solid var(--bad); padding-left: 6px; margin-left: -8px; opacity: 0.8; }
+  .diff-doc .ln.del .m { color: var(--bad); }
+  .diff-doc .ln.del .t { color: #4a1a1a; text-decoration: line-through; }
+  .diff-doc .ln .t b { color: var(--signal-deep); font-weight: 700; }
+  .diff-doc .ln .t .cjk { font-family: var(--font-sans); font-size: 12px; }
+
+  /* release rail */
+  .release { padding: 14px 16px; }
+  .release .stage {
+    display: grid; grid-template-columns: 12px 1fr auto;
+    gap: 10px; padding: 8px 0;
+    align-items: center;
+  }
+  .release .stage .dot {
+    width: 8px; height: 8px; border-radius: 999px;
+    background: var(--line-strong);
+  }
+  .release .stage.live .dot { background: var(--ok); }
+  .release .stage.canary .dot { background: var(--warn); }
+  .release .stage.shadow .dot { background: var(--signal); }
+  .release .stage .nm {
+    font-family: var(--font-mono); font-size: 11px;
+    color: var(--ink-2); letter-spacing: 0.04em;
+  }
+  .release .stage .nm b { color: var(--ink); font-weight: 600; }
+  .release .stage .v { font-family: var(--font-mono); font-size: 12px; color: var(--ink); }
+  .release .traffic-bar {
+    height: 24px; background: var(--bg-subtle);
+    border-radius: 4px; overflow: hidden;
+    display: flex; margin-top: 8px;
+  }
+  .release .traffic-bar > .seg {
+    height: 100%;
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 10.5px;
+    color: #fff;
+    font-weight: 500;
+  }
+  .release .traffic-bar > .seg.live { background: var(--ok); width: 80%; }
+  .release .traffic-bar > .seg.canary { background: var(--warn); width: 20%; }
+  .release .signals {
+    margin-top: 14px;
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .release .signals .s {
+    padding: 8px 10px; background: var(--bg-subtle);
+    border-radius: 4px;
+    font-family: var(--font-mono); font-size: 11px;
+  }
+  .release .signals .s .v { font-size: 16px; color: var(--ink); margin-top: 2px; }
+  .release .signals .s .l { font-size: 9.5px; color: var(--ink-4); letter-spacing: 0.08em; }
+  .release .signals .s .v .up { color: var(--ok); font-size: 11px; margin-left: 4px; }
+  .release .signals .s .v .down { color: var(--bad); font-size: 11px; margin-left: 4px; }
+
+  /* dogfood metrics */
+  .metrics-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+  }
+  .mm {
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--line-soft);
+    border-radius: 4px;
+  }
+  .mm .l {
+    font-family: var(--font-mono); font-size: 9.5px;
+    color: var(--ink-4); letter-spacing: 0.1em;
+  }
+  .mm .v {
+    font-family: var(--font-serif); font-size: 22px; font-weight: 600;
+    color: var(--ink); margin-top: 4px; letter-spacing: -0.02em; line-height: 1;
+  }
+  .mm .v .baseline {
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-3);
+    font-weight: 400; margin-left: 6px;
+  }
+  .mm .v .up { color: var(--ok); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <aside class="rail">
+    <div class="logo">O</div>
+    <div class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"></path></svg></div>
+    <div class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="5" height="16" rx="1"></rect><rect x="10" y="4" width="5" height="10" rx="1"></rect><rect x="17" y="4" width="4" height="6" rx="1"></rect></svg></div>
+    <div class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 4h12l4 4v12H4z"></path><path d="M8 8h6M8 12h8M8 16h5"></path></svg></div>
+    <div class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 5h16v10H8l-4 4z"></path></svg></div>
+    <div class="item active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 3v6L4 19a2 2 0 0 0 1.7 3h12.6A2 2 0 0 0 20 19L15 9V3"></path><path d="M8 3h8"></path></svg></div>
+    <div class="spacer"></div>
+  </aside>
+
+  <section class="main">
+    <div class="topbar">
+      <nav class="breadcrumb">
+        <span class="crumb">OfferGuide</span>
+        <span class="sep">/</span>
+        <span class="crumb active">Lab</span>
+      </nav>
+      <span class="bracket-tag signal"><span>self-evolving</span></span>
+      <div class="grow"></div>
+      <div class="uptime">
+        <span class="seg"><span>signals</span> <span class="v">147 累计</span></span>
+        <span class="sep">·</span>
+        <span class="seg"><span>evolutions</span> <span class="v">3 次</span></span>
+        <span class="sep">·</span>
+        <span class="live">canary live</span>
+      </div>
+    </div>
+
+    <div class="scroll">
+      <!-- HERO -->
+      <div class="hero">
+        <div>
+          <h1>SKILL 自进化 <span class="acc">· 闭环</span></h1>
+          <div class="sub">3 个真信号通道（👍 / app_outcome / follow_through）驱动 SKILL prompt 演化，
+            灰度 → canary → live。<b style="color:rgba(246,244,238,0.92)">不靠 LLM self-critique（已退役）</b>。</div>
+        </div>
+        <div class="kpi"><div class="v sig">+22%</div><div class="l">FITNESS LIFT</div></div>
+        <div class="kpi"><div class="v">147</div><div class="l">REAL SIGNALS</div></div>
+        <div class="kpi"><div class="v up">3</div><div class="l">EVOLUTIONS</div></div>
+        <div class="kpi"><div class="v">$5.40</div><div class="l">TOTAL COST</div></div>
+      </div>
+
+      <!-- SKILLS -->
+      <div class="skills">
+        <div class="skill active">
+          <div><span class="nm">score_match</span> <span class="ver">v0.2.1 sh</span></div>
+          <div class="fit"><span class="v">0.724</span> <span class="delta up">↑ +0.221</span></div>
+          <div class="stat">52 信号 · <span class="sig">canary 20%</span></div>
+        </div>
+        <div class="skill">
+          <div><span class="nm">analyze_gaps</span> <span class="ver">v0.3.0</span></div>
+          <div class="fit"><span class="v">0.681</span> <span class="delta up">↑ +0.092</span></div>
+          <div class="stat">31 信号 · live</div>
+        </div>
+        <div class="skill">
+          <div><span class="nm">tailor_resume</span> <span class="ver">v0.4.0</span></div>
+          <div class="fit"><span class="v">0.778</span> <span class="delta up">↑ +0.054</span></div>
+          <div class="stat">28 信号 · live</div>
+        </div>
+        <div class="skill">
+          <div><span class="nm">prepare_interview</span> <span class="ver">v0.2.0</span></div>
+          <div class="fit"><span class="v">0.612</span> <span class="delta down">↓ -0.018</span></div>
+          <div class="stat">22 信号 · live · 候选 +1</div>
+        </div>
+        <div class="skill">
+          <div><span class="nm">deep_project_prep</span> <span class="ver">v0.1.0</span></div>
+          <div class="fit"><span class="v">0.534</span> <span class="delta">— init</span></div>
+          <div class="stat">14 信号 · live</div>
+        </div>
+      </div>
+
+      <!-- MAIN -->
+      <div class="grid">
+
+        <!-- LEFT: chart + diff -->
+        <div style="display:flex; flex-direction:column; gap:14px;">
+
+          <div class="panel">
+            <header>
+              <h3>score_match · fitness 演化</h3>
+              <span class="bracket-tag dim"><span>14d</span></span>
+              <div class="grow"></div>
+              <span class="bracket-tag ok"><span>+0.221 总提升</span></span>
+            </header>
+            <div class="b">
+              <div class="chart">
+                <div class="ya">
+                  <span>1.0</span>
+                  <span>0.75</span>
+                  <span>0.5</span>
+                  <span>0.25</span>
+                  <span>0</span>
+                </div>
+                <div>
+                  <div class="canvas">
+                    <div class="grid-h" style="top: 25%"></div>
+                    <div class="grid-h" style="top: 50%"></div>
+                    <div class="grid-h" style="top: 75%"></div>
+
+                    <svg viewBox="0 0 400 160" preserveAspectRatio="none" style="width:100%; height:100%;">
+                      <!-- live (v0.2.0) line — stays around 0.5 then ends -->
+                      <polyline fill="none" stroke="#3A352E" stroke-width="1.5"
+                        points="0,84 40,82 80,80 120,78 160,76 200,73 240,72 280,70 320,68 360,66 400,64" />
+                      <!-- canary (v0.2.1) line — joins later, lifts to 0.72+ -->
+                      <polyline fill="none" stroke="#16365C" stroke-width="2" stroke-dasharray="2 0"
+                        points="240,72 280,56 320,46 360,42 400,38" />
+                    </svg>
+
+                    <!-- evolution markers -->
+                    <div class="pt" style="left:10%; top:55%"></div>
+                    <div class="pt" style="left:30%; top:50%"></div>
+                    <div class="pt evolve" style="left:60%; top:46%"></div>
+                    <div class="label-evolve" style="left:60%; top:30%">evolve · v0.2.1</div>
+                    <div class="pt" style="left:80%; top:28%"></div>
+                    <div class="pt" style="left:100%; top:24%"></div>
+                  </div>
+                  <div class="xa">
+                    <span>05-01</span>
+                    <span>05-05</span>
+                    <span>05-09</span>
+                    <span>05-13</span>
+                    <span>now</span>
+                  </div>
+                </div>
+              </div>
+              <div class="legend" style="margin-top:14px;">
+                <span class="it live">live · v0.2.0 (80%)</span>
+                <span class="it canary">canary · v0.2.1 (20%) · 3 天观察期</span>
+                <span class="it">● 真信号节点</span>
+                <span class="it" style="margin-left:auto"><b style="color:var(--signal-deep)">●</b> 进化点</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel diff-panel">
+            <header>
+              <h3>prompt diff · v0.2.0 → v0.2.1</h3>
+              <span class="bracket-tag signal"><span>pending canary</span></span>
+              <div class="grow"></div>
+              <button class="btn sm">放 50%</button>
+              <button class="btn sm">回滚</button>
+            </header>
+            <div class="diff-meta">
+              <div class="stat"><div class="l">PROB_IN_BAND</div><div class="v up">+0.216</div></div>
+              <div class="stat"><div class="l">RECALL</div><div class="v up">+0.321</div></div>
+              <div class="stat"><div class="l">ANTI_FP</div><div class="v up">+0.112</div></div>
+              <div class="stat"><div class="l">TOTAL</div><div class="v up">+0.221</div></div>
+            </div>
+            <div class="diff-doc">
+              <div class="ln"><span class="n">L4</span><span class="m"> </span><span class="t cjk">你是一名严谨的中文校招求职顾问，背景是统计学。</span></div>
+              <div class="ln del"><span class="n">L5</span><span class="m">−</span><span class="t cjk">分析候选人简历与 JD 的匹配度。</span></div>
+              <div class="ln add"><span class="n">L5</span><span class="m">+</span><span class="t cjk">分析候选人简历与 JD 的匹配度。<b>当用户简历明确缺少 JD 列出的硬性技能时，你必须把这些缺失列入</b> <code style="color:var(--signal)">deal_breakers</code> <b>而不是仅在 reasoning 里提到。</b></span></div>
+              <div class="ln"><span class="n">L6</span><span class="m"> </span><span class="t cjk">输出 calibrated probability 0-100。</span></div>
+              <div class="ln del"><span class="n">L7</span><span class="m">−</span><span class="t cjk">列出关键 reasoning。</span></div>
+              <div class="ln add"><span class="n">L7</span><span class="m">+</span><span class="t cjk">列出关键 reasoning，<b>每条配 evidence 字段</b>（指向 memory / profile 的具体位置）。</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT: release + dogfood -->
+        <div style="display:flex; flex-direction:column; gap:14px;">
+
+          <div class="panel">
+            <header>
+              <h3>灰度发布</h3>
+              <span class="bracket-tag warn"><span>canary day 2/3</span></span>
+              <div class="grow"></div>
+              <button class="btn signal sm">放全量</button>
+            </header>
+            <div class="release">
+              <div class="stage live">
+                <span class="dot"></span>
+                <span class="nm">live · <b>v0.2.0</b> · 自 04-12</span>
+                <span class="v">80%</span>
+              </div>
+              <div class="stage canary">
+                <span class="dot"></span>
+                <span class="nm">canary · <b>v0.2.1</b> · 自 05-13</span>
+                <span class="v">20%</span>
+              </div>
+              <div class="stage shadow">
+                <span class="dot"></span>
+                <span class="nm">shadow · <b>v0.2.2</b> · agent 刚检测</span>
+                <span class="v">0%</span>
+              </div>
+              <div class="traffic-bar">
+                <div class="seg live">80%</div>
+                <div class="seg canary">20%</div>
+              </div>
+              <div class="signals">
+                <div class="s">
+                  <div class="l">USER 👍/👎</div>
+                  <div class="v">28 / 5 <span class="up">+82%</span></div>
+                </div>
+                <div class="s">
+                  <div class="l">APP_OUTCOME</div>
+                  <div class="v">11 ack <span class="up">+27%</span></div>
+                </div>
+                <div class="s">
+                  <div class="l">FOLLOW_THRU</div>
+                  <div class="v">8 / 12</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <header>
+              <h3>Dogfood 数据 · 自 05-09</h3>
+              <span class="bracket-tag dim"><span>own use · 7d</span></span>
+            </header>
+            <div class="b">
+              <div class="metrics-grid">
+                <div class="mm">
+                  <div class="l">JD 评估</div>
+                  <div class="v">128</div>
+                </div>
+                <div class="mm">
+                  <div class="l">已投递</div>
+                  <div class="v">14</div>
+                </div>
+                <div class="mm">
+                  <div class="l">REPLY 率</div>
+                  <div class="v">36%<span class="baseline">基线 10-15</span></div>
+                </div>
+                <div class="mm">
+                  <div class="l">面试 / offer</div>
+                  <div class="v">2 / 0</div>
+                </div>
+                <div class="mm">
+                  <div class="l">LLM 累计</div>
+                  <div class="v">$8.40</div>
+                </div>
+                <div class="mm">
+                  <div class="l">avg /JD</div>
+                  <div class="v">$0.066</div>
+                </div>
+                <div class="mm">
+                  <div class="l">假阳性</div>
+                  <div class="v">3</div>
+                </div>
+                <div class="mm">
+                  <div class="l">用户 👎 率</div>
+                  <div class="v">6.8%</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <div class="kbar">
+      <span class="item"><span class="k">E</span> 进化所选</span>
+      <span class="item"><span class="k">R</span> 回滚</span>
+      <span class="item"><span class="k">G</span> 放全量</span>
+      <span class="item"><span class="k">D</span> diff 详情</span>
+      <span class="item"><span class="k">/</span> 命令面板</span>
+      <div class="grow"></div>
+      <div class="right">下次自动 detect 候选 · <b>明天 09:00</b> · 算法 <b>GEPA-inspired closed loop</b></div>
+    </div>
+
+  </section>
+</div>
+</body>
+</html>

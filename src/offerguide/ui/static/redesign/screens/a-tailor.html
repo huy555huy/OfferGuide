@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>A · Tailor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../tokens/a.css">
+<style>
+  body { overflow: hidden; }
+  .app { width: 1440px; height: 900px; display: grid; grid-template-columns: 56px 1fr; }
+
+  .rail {
+    background: var(--bg-elev); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; align-items: center;
+    padding: 14px 0; gap: 2px;
+  }
+  .rail .logo { width: 32px; height: 32px; border-radius: 8px; background: var(--ink); color: var(--ink-on-dark); display: grid; place-items: center; font-family: var(--font-serif); font-weight: 700; font-size: 17px; margin-bottom: 14px; }
+  .rail .item { width: 36px; height: 36px; border-radius: 8px; display: grid; place-items: center; color: var(--ink-3); cursor: pointer; position: relative; }
+  .rail .item.active { background: var(--bg-subtle); color: var(--ink); }
+  .rail .item.active::before { content: ""; position: absolute; left: -10px; top: 8px; bottom: 8px; width: 2px; background: var(--ink); border-radius: 2px; }
+  .rail .item svg { width: 18px; height: 18px; }
+  .rail .spacer { flex: 1; }
+
+  .main { display: flex; flex-direction: column; overflow: hidden; }
+
+  .topbar {
+    height: 52px; padding: 0 28px;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 14px;
+  }
+  .breadcrumb { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .breadcrumb .crumb { color: var(--ink-3); }
+  .breadcrumb .crumb.active { color: var(--ink); font-weight: 500; }
+  .breadcrumb .sep { color: var(--ink-4); }
+  .topbar .grow { flex: 1; }
+
+  /* job context strip */
+  .ctx {
+    margin: 16px 28px 0;
+    padding: 14px 18px;
+    background: var(--bg-ink); color: var(--ink-on-dark);
+    border-radius: var(--r);
+    display: flex; align-items: center; gap: 16px;
+  }
+  .ctx .src {
+    width: 36px; height: 36px; border-radius: 8px;
+    background: rgba(255,255,255,0.08); color: var(--ink-on-dark);
+    display: grid; place-items: center;
+    font-family: var(--font-serif); font-weight: 700; font-size: 15px;
+  }
+  .ctx .meta { flex: 1; }
+  .ctx .meta .ttl { font-family: var(--font-serif); font-size: 15px; font-weight: 600; }
+  .ctx .meta .sub { font-size: 12px; color: rgba(246,244,238,0.65); margin-top: 2px; }
+  .ctx .meta .sub .mono { color: rgba(246,244,238,0.85); }
+  .ctx .match {
+    text-align: right; padding-right: 10px;
+    border-right: 1px solid rgba(255,255,255,0.12);
+  }
+  .ctx .match .v { font-family: var(--font-serif); font-size: 26px; font-weight: 600; line-height: 1; color: var(--signal); }
+  .ctx .match .l { font-size: 10px; letter-spacing: 0.12em; color: rgba(246,244,238,0.55); margin-top: 4px; font-family: var(--font-mono); }
+  .ctx .actions { display: flex; gap: 8px; }
+  .ctx .actions .btn { background: rgba(255,255,255,0.1); color: var(--ink-on-dark); border-color: transparent; }
+  .ctx .actions .btn:hover { background: rgba(255,255,255,0.16); }
+  .ctx .actions .btn.signal { background: var(--signal); border-color: var(--signal); }
+
+  /* page head */
+  .ph {
+    padding: 22px 28px 14px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .ph h1 {
+    margin: 0; font-family: var(--font-serif);
+    font-size: 22px; font-weight: 500; letter-spacing: -0.01em;
+  }
+  .ph .sub { color: var(--ink-3); font-size: 12.5px; }
+
+  /* main workspace */
+  .work {
+    flex: 1; overflow: hidden;
+    padding: 0 28px 16px;
+    display: grid; grid-template-columns: 1fr 1fr 320px; gap: 14px;
+  }
+
+  .panel {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .panel > header {
+    padding: 11px 16px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .panel > header h3 {
+    margin: 0; font-family: var(--font-serif);
+    font-size: 13px; font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .panel > header .grow { flex: 1; }
+  .panel > header .file {
+    font-family: var(--font-mono); font-size: 11px; color: var(--ink-3);
+  }
+  .panel .body { padding: 14px 18px; overflow: hidden; flex: 1; }
+
+  /* resume preview (paper) */
+  .resume-paper {
+    background: #fff; padding: 18px 22px;
+    font-family: "Times New Roman", "STSong", "SongTi SC", serif;
+    line-height: 1.6;
+    font-size: 11.5px;
+    color: #111;
+    overflow: hidden;
+  }
+  .resume-paper h2 {
+    font-family: "Times New Roman", "STSong", serif;
+    font-size: 16px; font-weight: 700;
+    margin: 0 0 4px;
+    border-bottom: 1.5px solid #111;
+    padding-bottom: 4px;
+    text-align: center; letter-spacing: 0.05em;
+  }
+  .resume-paper .sec-h {
+    font-weight: 700; font-size: 12.5px;
+    border-bottom: 1px solid #555;
+    margin: 14px 0 6px;
+    padding-bottom: 1px;
+  }
+  .resume-paper .item-h {
+    font-weight: 700; display: flex; justify-content: space-between;
+  }
+  .resume-paper ul { margin: 4px 0 0 18px; padding: 0; }
+  .resume-paper li { margin: 2px 0; }
+
+  /* diff highlight */
+  .del { background: rgba(142, 47, 47, 0.12); text-decoration: line-through; color: #8E2F2F; padding: 0 2px; }
+  .ins { background: rgba(31, 107, 74, 0.12); color: #1F6B4A; padding: 0 2px; font-weight: 600; }
+  .add { background: rgba(31, 107, 74, 0.12); color: #1F6B4A; padding: 1px 3px; font-weight: 600; border-left: 2px solid var(--ok); padding-left: 5px; display: block; margin: 3px 0; }
+
+  /* edits list */
+  .edits .head {
+    padding: 14px 16px 10px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .edits .summary {
+    padding: 12px 16px;
+    background: var(--bg-subtle);
+    border-bottom: 1px solid var(--line-soft);
+    display: flex; gap: 14px;
+  }
+  .edits .summary .stat {
+    flex: 1;
+  }
+  .edits .summary .stat .v {
+    font-family: var(--font-serif); font-size: 20px; font-weight: 600;
+    line-height: 1;
+  }
+  .edits .summary .stat .v.up { color: var(--ok); }
+  .edits .summary .stat .l {
+    font-size: 11px; color: var(--ink-3); margin-top: 4px;
+  }
+  .edits .list { overflow: hidden; flex: 1; }
+
+  .edit {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line-soft);
+    cursor: pointer;
+  }
+  .edit:hover { background: var(--bg); }
+  .edit.active {
+    background: var(--bg-subtle);
+    border-left: 3px solid var(--signal);
+    padding-left: 13px;
+  }
+  .edit .e-top {
+    display: flex; align-items: center; gap: 6px;
+    margin-bottom: 6px; font-size: 11.5px;
+  }
+  .edit .e-top .where {
+    font-family: var(--font-mono); color: var(--ink-3);
+  }
+  .edit .e-top .grow { flex: 1; }
+  .edit .why {
+    font-size: 12px; color: var(--ink-2); margin-bottom: 5px;
+    line-height: 1.5;
+  }
+  .edit .diff-pair {
+    background: var(--bg); border-radius: var(--r-sm);
+    padding: 6px 9px; font-size: 11.5px;
+    font-family: "Times New Roman", "STSong", serif;
+    line-height: 1.55;
+  }
+  .edit .diff-pair .from { color: #8E2F2F; }
+  .edit .diff-pair .to { color: #1F6B4A; font-weight: 600; margin-top: 4px; }
+
+  .edit .e-actions {
+    margin-top: 7px;
+    display: flex; gap: 6px;
+  }
+
+  /* coach rail */
+  .coach { display: flex; flex-direction: column; }
+  .coach .head {
+    padding: 11px 16px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .coach .head h3 { margin: 0; font-family: var(--font-serif); font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
+  .coach .head .grow { flex: 1; }
+
+  .anti {
+    margin: 14px 16px;
+    padding: 12px 14px;
+    background: var(--signal-soft);
+    border-radius: var(--r-sm);
+    border-left: 3px solid var(--signal);
+  }
+  .anti .l { font-family: var(--font-mono); font-size: 10px; color: var(--signal-deep); letter-spacing: 0.1em; margin-bottom: 4px; }
+  .anti .t { font-size: 12.5px; color: var(--ink); line-height: 1.55; }
+  .anti b { font-weight: 600; }
+
+  .gap-section {
+    margin: 0 16px 14px;
+  }
+  .gap-section .l {
+    font-family: var(--font-mono); font-size: 10px; color: var(--ink-3); letter-spacing: 0.1em;
+    margin-bottom: 8px; padding-bottom: 6px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .gap {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 8px 0;
+    border-bottom: 1px dashed var(--line-soft);
+  }
+  .gap:last-child { border-bottom: none; }
+  .gap .ic {
+    width: 18px; height: 18px; border-radius: 4px;
+    flex-shrink: 0; margin-top: 1px;
+    background: var(--warn-soft); color: var(--warn);
+    display: grid; place-items: center;
+    font-size: 11px; font-weight: 700; font-family: var(--font-mono);
+  }
+  .gap.high .ic { background: var(--signal-soft); color: var(--signal-deep); }
+  .gap .b .t { font-size: 12.5px; font-weight: 500; }
+  .gap .b .d { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; line-height: 1.5; }
+  .gap .b .plan {
+    margin-top: 5px; padding: 5px 8px;
+    background: var(--bg-subtle); border-radius: 4px;
+    font-size: 11px; color: var(--ink-2);
+    font-family: var(--font-mono);
+  }
+
+  .coach-foot {
+    margin-top: auto;
+    padding: 12px 16px;
+    border-top: 1px solid var(--line);
+    background: var(--bg);
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+  .coach-foot .row {
+    display: flex; justify-content: space-between; padding: 3px 0;
+  }
+  .coach-foot .row .v { color: var(--ink); font-family: var(--font-mono); }
+
+  /* bottom narrate */
+  .narrate {
+    margin: 0 28px 18px;
+    padding: 11px 14px;
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    display: flex; align-items: center; gap: 10px;
+    font-size: 12.5px; color: var(--ink-2);
+  }
+  .narrate .av {
+    width: 22px; height: 22px; border-radius: 6px;
+    background: var(--ink); color: var(--ink-on-dark);
+    display: grid; place-items: center;
+    font-family: var(--font-serif); font-weight: 700; font-size: 11px;
+    flex-shrink: 0;
+  }
+  .narrate em { font-family: var(--font-mono); font-style: normal; font-size: 11.5px; padding: 0 4px; background: var(--bg-subtle); border-radius: 3px; }
+  .narrate .grow { flex: 1; }
+  .narrate .right { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <aside class="rail">
+    <div class="logo">O</div>
+    <div class="item" title="Mission Control">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"></path></svg>
+    </div>
+    <div class="item" title="Pipeline">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="5" height="16" rx="1"></rect><rect x="10" y="4" width="5" height="10" rx="1"></rect><rect x="17" y="4" width="4" height="6" rx="1"></rect></svg>
+    </div>
+    <div class="item active" title="Tailor">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 4h12l4 4v12H4z"></path><path d="M8 8h6M8 12h8M8 16h5"></path></svg>
+    </div>
+    <div class="item" title="Interview">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 5h16v10H8l-4 4z"></path></svg>
+    </div>
+    <div class="item" title="Lab">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 3v6L4 19a2 2 0 0 0 1.7 3h12.6A2 2 0 0 0 20 19L15 9V3"></path><path d="M8 3h8"></path></svg>
+    </div>
+    <div class="spacer"></div>
+  </aside>
+
+  <section class="main">
+    <div class="topbar">
+      <nav class="breadcrumb">
+        <span class="crumb">OfferGuide</span>
+        <span class="sep">/</span>
+        <span class="crumb">Tailor</span>
+        <span class="sep">/</span>
+        <span class="crumb active">字节 · 大模型推理框架</span>
+      </nav>
+      <span class="bracket-tag ok"><span>保 .docx style</span></span>
+      <span class="bracket-tag signal"><span>0 fabrications</span></span>
+      <div class="grow"></div>
+      <div class="uptime">
+        <span class="seg"><span>tailor_resume</span> <span class="v">v0.4.0 live</span></span>
+        <span class="sep">·</span>
+        <span class="seg"><span>cost</span> <span class="v">$0.04</span></span>
+        <span class="sep">·</span>
+        <span class="live">ready</span>
+      </div>
+      <button class="btn">下一岗 →</button>
+    </div>
+
+    <!-- job context strip -->
+    <div class="ctx">
+      <div class="src">字</div>
+      <div class="meta">
+        <div class="ttl">大模型推理框架研发实习生</div>
+        <div class="sub">字节跳动 · 北京 · 暑期 · 校招 · <span class="mono">discovered_via</span> verified_official · 30 分钟前发现</div>
+      </div>
+      <div class="match">
+        <div class="v">82</div>
+        <div class="l">MATCH SCORE</div>
+      </div>
+      <div class="actions">
+        <button class="btn">下载 .docx</button>
+        <button class="btn signal">采纳全部 + 投递</button>
+      </div>
+    </div>
+
+    <!-- page head -->
+    <div class="ph">
+      <h1>简历微调</h1>
+      <span class="sub">8 处建议 · 7 个 wording / 1 个 emphasis · <b style="color:var(--ok)">不写未发生</b>，只 reword 已有事实</span>
+    </div>
+
+    <!-- workspace -->
+    <div class="work">
+
+      <!-- left: resume paper -->
+      <div class="panel">
+        <header>
+          <h3>简历 · 实时预览</h3>
+          <div class="grow"></div>
+          <span class="file mono">offer-guide-resume.docx · 3 / 7 已采纳</span>
+        </header>
+        <div class="body" style="background: var(--bg-subtle); padding: 14px 14px 0;">
+          <div class="resume-paper">
+            <h2>简历 · 张某某</h2>
+            <div style="font-size: 10.5px; text-align: center; color:#555;">某某大学 · 计算机硕士 在读 · 13800001234 · zhang@example.com</div>
+
+            <div class="sec-h">项目经历</div>
+
+            <div class="item-h">
+              <span>实时检索系统 · 学校实验室</span>
+              <span style="font-weight:400; color:#555">2025.03 — 至今</span>
+            </div>
+            <ul>
+              <li>使用 <span class="del">Faiss</span><span class="ins">分布式 Faiss + Triton 推理服务</span>构建 1B 向量检索系统，<span class="del">支持高 QPS 查询</span><span class="ins">单机 QPS 8.2k，p99 延迟 12ms</span></li>
+              <li>设计 query rewriting 模块，召回率从 <span class="ins">73% 提升至 89%</span></li>
+              <li>负责服务部署、监控与压测，<span class="add">+ 写自动扩容脚本（Kubernetes HPA），峰值流量自动从 2 个 pod 扩展到 12 个</span></li>
+            </ul>
+
+            <div class="item-h" style="margin-top:10px">
+              <span>开源贡献 · HuggingFace transformers</span>
+              <span style="font-weight:400; color:#555">2024.09</span>
+            </div>
+            <ul>
+              <li>修复 tokenizer 边界条件 bug 一个 (PR #28xxx 已 merge)</li>
+              <li><span class="del">熟悉</span><span class="ins">阅读并理解</span> attention 内核与 KV cache 实现</li>
+            </ul>
+
+            <div class="sec-h">技能</div>
+            <p style="margin:0">
+              Python / PyTorch · <span class="del">熟练使用 TensorFlow</span><span class="ins">分布式训练（DeepSpeed、FSDP）</span>
+              · CUDA 基础 · Linux · Git · <span class="add">+ 模型推理优化（vLLM、TensorRT-LLM）— 5 月已读完两篇核心 paper</span>
+            </p>
+
+            <div class="sec-h">教育背景</div>
+            <p style="margin:0">某某大学 · 计算机科学 · 硕士 在读 · GPA 3.78 / 4.0 · 2024-2026</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- middle: edits -->
+      <div class="panel edits">
+        <header>
+          <h3>建议改动</h3>
+          <span class="tag ok">3 已采纳</span>
+          <div class="grow"></div>
+          <button class="btn sm">全部采纳</button>
+          <button class="btn sm">全部拒</button>
+        </header>
+
+        <div class="summary">
+          <div class="stat">
+            <div class="v tnum"><span class="up">+19</span></div>
+            <div class="l">预计 match 提升</div>
+          </div>
+          <div class="stat">
+            <div class="v tnum">7</div>
+            <div class="l">建议条数 · 0 个虚构</div>
+          </div>
+          <div class="stat">
+            <div class="v tnum mono" style="font-size:13px; line-height:1.4; margin-top:2px;">$0.04</div>
+            <div class="l">本次 LLM 成本</div>
+          </div>
+        </div>
+
+        <div class="list">
+          <div class="edit active">
+            <div class="e-top">
+              <span class="tag signal">关键</span>
+              <span class="where">项目 1 · 第 1 条 bullet</span>
+              <div class="grow"></div>
+              <span class="tag">wording</span>
+            </div>
+            <div class="why">JD 强调"分布式推理 + 性能数字"，原文只说"Faiss"和"高 QPS"，把已有的真实数字补出来。</div>
+            <div class="diff-pair">
+              <div class="from">— 使用 Faiss 构建 1B 向量检索系统，支持高 QPS 查询</div>
+              <div class="to">+ 使用 <b>分布式 Faiss + Triton 推理服务</b>构建 1B 向量检索系统，单机 <b>QPS 8.2k，p99 延迟 12ms</b></div>
+            </div>
+            <div class="e-actions">
+              <button class="btn signal sm">采纳</button>
+              <button class="btn sm">改一下</button>
+              <button class="btn ghost sm">拒</button>
+            </div>
+          </div>
+
+          <div class="edit">
+            <div class="e-top">
+              <span class="tag">补充</span>
+              <span class="where">项目 1 · 新增 bullet</span>
+              <div class="grow"></div>
+              <span class="tag">emphasis</span>
+            </div>
+            <div class="why">你 GitHub 提交里有"hpa-scale.yaml"和"loadtest.py"，这件事简历里没写。补一条已发生事实，不是编造。</div>
+            <div class="diff-pair">
+              <div class="to">+ 写自动扩容脚本（Kubernetes HPA），峰值流量自动从 2 个 pod 扩展到 12 个</div>
+            </div>
+            <div class="e-actions">
+              <button class="btn signal sm">采纳</button>
+              <button class="btn sm">改一下</button>
+              <button class="btn ghost sm">拒</button>
+            </div>
+          </div>
+
+          <div class="edit">
+            <div class="e-top">
+              <span class="tag">替换</span>
+              <span class="where">技能 · 第 2 项</span>
+              <div class="grow"></div>
+              <span class="tag">relevance</span>
+            </div>
+            <div class="why">JD 完全不用 TensorFlow，但反复出现 DeepSpeed / FSDP。你 2024 在实验室用过 DeepSpeed 跑 7B 训练，写上。</div>
+            <div class="diff-pair">
+              <div class="from">— 熟练使用 TensorFlow</div>
+              <div class="to">+ <b>分布式训练（DeepSpeed、FSDP）</b></div>
+            </div>
+            <div class="e-actions">
+              <button class="btn signal sm">采纳</button>
+              <button class="btn sm">改一下</button>
+              <button class="btn ghost sm">拒</button>
+            </div>
+          </div>
+
+          <div class="edit">
+            <div class="e-top">
+              <span class="tag warn">含 prep_plan</span>
+              <span class="where">技能 · 新增项</span>
+              <div class="grow"></div>
+              <span class="tag">InsertedClaim</span>
+            </div>
+            <div class="why">JD 高频"vLLM / TensorRT-LLM"，你之前没接触。Agent 标记为 InsertedClaim — 已配 <b>5 天 prep_plan</b>，面试被问到时你能真答上。</div>
+            <div class="diff-pair">
+              <div class="to">+ 模型推理优化（vLLM、TensorRT-LLM）— 5 月已读完两篇核心 paper</div>
+            </div>
+            <div class="e-actions">
+              <button class="btn signal sm">采纳 + 5 天 prep</button>
+              <button class="btn sm">看 prep_plan</button>
+              <button class="btn ghost sm">拒</button>
+            </div>
+          </div>
+
+          <div class="edit">
+            <div class="e-top">
+              <span class="tag">数字</span>
+              <span class="where">项目 1 · 第 2 条</span>
+              <div class="grow"></div>
+              <span class="tag">number</span>
+            </div>
+            <div class="why">原文"召回率显著提升"是 vague claim，会被 ATS 和面试官同时扣分。把真实数字 73→89 加上。</div>
+            <div class="diff-pair">
+              <div class="from">— 召回率显著提升</div>
+              <div class="to">+ 召回率从 <b>73% 提升至 89%</b></div>
+            </div>
+            <div class="e-actions">
+              <button class="btn signal sm">采纳</button>
+              <button class="btn sm">改一下</button>
+              <button class="btn ghost sm">拒</button>
+            </div>
+          </div>
+
+          <div class="edit" style="opacity:0.5">
+            <div class="e-top">
+              <span class="tag">+ 2 条剩余</span>
+              <span class="where">展开查看</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- right: coach -->
+      <aside class="panel coach">
+        <div class="head">
+          <h3>反编造护栏</h3>
+          <div class="grow"></div>
+          <span class="tag ok">0 fabrications</span>
+        </div>
+
+        <div class="anti">
+          <div class="l">ANTI-FABRICATION</div>
+          <div class="t">所有改动只 reword / reorder / emphasize <b>你简历或档案里已有的事实</b>。涉及新技能（vLLM）会被标 <b>InsertedClaim</b> + 配 5-7 天学习清单。<br><br>面试被问到时你<b>真的会答</b>，因为你真的学了。</div>
+        </div>
+
+        <div class="gap-section">
+          <div class="l">GAPS · JD 要求 vs 你</div>
+
+          <div class="gap high">
+            <div class="ic">!</div>
+            <div class="b">
+              <div class="t">分布式推理优化</div>
+              <div class="d">JD 反复提，你简历里"Faiss 检索"沾边但没有数字。</div>
+              <div class="plan">→ 改 bullet · +0 天</div>
+            </div>
+          </div>
+
+          <div class="gap high">
+            <div class="ic">!</div>
+            <div class="b">
+              <div class="t">vLLM / TensorRT-LLM</div>
+              <div class="d">完全空白，但你有 CUDA 和 transformers 基础。</div>
+              <div class="plan">→ 5 天 prep_plan · 2 篇 paper + demo</div>
+            </div>
+          </div>
+
+          <div class="gap">
+            <div class="ic">~</div>
+            <div class="b">
+              <div class="t">DeepSpeed / FSDP</div>
+              <div class="d">实验室项目里用过，简历没写。直接 surface 即可。</div>
+              <div class="plan">→ 加技能项 · +0 天</div>
+            </div>
+          </div>
+
+          <div class="gap">
+            <div class="ic">~</div>
+            <div class="b">
+              <div class="t">英语技术沟通</div>
+              <div class="d">team 跨国，CET-6 但没 surface。</div>
+              <div class="plan">→ 教育背景下加一行</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="coach-foot">
+          <div class="row"><span>采纳全部预计 match</span> <span class="v">82 → 91</span></div>
+          <div class="row"><span>写入磁盘 docx</span> <span class="v">保留段落 style</span></div>
+          <div class="row"><span>Agent 评估</span> <span class="v">DeepSeek V4 · 28s</span></div>
+        </div>
+      </aside>
+    </div>
+
+    <div class="narrate">
+      <div class="av">O</div>
+      <div>
+        <span class="dim">下一步 ·</span>
+        你已采纳 3/7。剩 4 项里有 1 个 InsertedClaim（vLLM）。点
+        <em>采纳全部 + 投递</em> 后我会:
+        ① 写 .docx ② 排 5 天 prep_plan ③ 后台同步开始 <em>prepare_interview</em>。
+      </div>
+      <div class="grow"></div>
+      <div class="right">字节剩 1 / 2 名额 · 投递后倒计时启动</div>
+    </div>
+
+  </section>
+</div>
+</body>
+</html>

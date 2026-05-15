@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>A · Mission Control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../tokens/a.css">
+<style>
+  body { overflow: hidden; }
+  .app {
+    width: 1440px; height: 900px;
+    display: grid; grid-template-columns: 56px 1fr 360px;
+    background: var(--bg);
+  }
+
+  /* ── left rail ── */
+  .rail {
+    background: var(--bg-elev);
+    border-right: 1px solid var(--line);
+    display: flex; flex-direction: column;
+    align-items: center; padding: 14px 0; gap: 2px;
+  }
+  .rail .logo {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: var(--ink); color: var(--ink-on-dark);
+    display: grid; place-items: center;
+    font-family: var(--font-serif); font-weight: 700; font-size: 17px;
+    margin-bottom: 14px;
+  }
+  .rail .item {
+    width: 36px; height: 36px; border-radius: 8px;
+    display: grid; place-items: center;
+    color: var(--ink-3); cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+    position: relative;
+  }
+  .rail .item:hover { background: var(--bg-subtle); color: var(--ink); }
+  .rail .item.active { background: var(--bg-subtle); color: var(--ink); }
+  .rail .item.active::before {
+    content: ""; position: absolute; left: -10px; top: 8px; bottom: 8px;
+    width: 2px; background: var(--ink); border-radius: 2px;
+  }
+  .rail .item svg { width: 18px; height: 18px; }
+  .rail .item .dot-badge {
+    position: absolute; top: 6px; right: 6px;
+    width: 6px; height: 6px; border-radius: 999px;
+    background: var(--signal);
+  }
+  .rail .spacer { flex: 1; }
+
+  /* ── main center ── */
+  .main {
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .topbar {
+    height: 52px; padding: 0 28px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg);
+    display: flex; align-items: center; gap: 16px;
+  }
+  .breadcrumb { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .breadcrumb .crumb { color: var(--ink-3); }
+  .breadcrumb .crumb.active { color: var(--ink); font-weight: 500; }
+  .breadcrumb .sep { color: var(--ink-4); }
+  .topbar .grow { flex: 1; }
+  .search {
+    width: 320px; height: 32px;
+    background: var(--bg-elev); border: 1px solid var(--line);
+    border-radius: var(--r-sm); padding: 0 10px;
+    display: flex; align-items: center; gap: 8px;
+    color: var(--ink-3); font-size: 12.5px;
+  }
+  .search .kbd { margin-left: auto; }
+
+  .scroll { flex: 1; overflow: hidden; padding: 24px 28px 0; }
+
+  /* ── hero greeting ── */
+  .hero {
+    display: grid; grid-template-columns: 1fr auto; gap: 24px;
+    margin-bottom: 22px;
+  }
+  .hero h1 {
+    margin: 0; font-family: var(--font-serif);
+    font-size: 26px; font-weight: 500;
+    letter-spacing: -0.01em; line-height: 1.25;
+  }
+  .hero h1 .accent { color: var(--signal); }
+  .hero .sub {
+    margin-top: 4px; color: var(--ink-3); font-size: 13px;
+  }
+  .hero .quick {
+    display: flex; gap: 8px; align-items: flex-start;
+  }
+
+  /* ── decision strip (the headline of this page) ── */
+  .decisions {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    overflow: hidden;
+    margin-bottom: 22px;
+  }
+  .decisions header {
+    padding: 14px 18px;
+    display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .decisions header h2 {
+    margin: 0; font-family: var(--font-serif);
+    font-size: 15px; font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+  .decisions header .count {
+    background: var(--signal); color: #fff;
+    font-size: 11px; font-weight: 600;
+    padding: 1px 6px; border-radius: 999px;
+    font-family: var(--font-mono);
+  }
+  .decisions header .grow { flex: 1; }
+
+  .d-row {
+    display: grid;
+    grid-template-columns: 44px 1fr auto;
+    gap: 14px; align-items: center;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--line-soft);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .d-row:last-child { border-bottom: none; }
+  .d-row:hover { background: var(--bg); }
+  .d-row .score {
+    font-family: var(--font-serif);
+    font-size: 22px; font-weight: 600;
+    color: var(--ink); text-align: center;
+    line-height: 1; letter-spacing: -0.02em;
+  }
+  .d-row .score small { display: block; font-family: var(--font-mono); font-size: 9px; color: var(--ink-4); font-weight: 500; margin-top: 3px; letter-spacing: 0.05em; }
+  .d-row .body .title {
+    font-size: 14px; font-weight: 500; color: var(--ink);
+    margin-bottom: 3px;
+  }
+  .d-row .body .meta {
+    font-size: 12px; color: var(--ink-3);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .d-row .body .meta .sep { color: var(--ink-4); }
+  .d-row .body .ask {
+    margin-top: 6px; font-size: 12.5px; color: var(--ink-2);
+    display: flex; align-items: flex-start; gap: 6px;
+  }
+  .d-row .body .ask::before {
+    content: "›"; color: var(--signal); font-weight: 700; flex: 0 0 auto;
+  }
+  .d-row .act { display: flex; gap: 6px; flex-direction: column; align-items: stretch; }
+  .d-row .act .btn { justify-content: center; }
+
+  /* ── three-column work area ── */
+  .work {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 18px;
+    margin-bottom: 22px;
+  }
+  .panel {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    overflow: hidden;
+  }
+  .panel > header {
+    padding: 12px 16px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .panel > header h3 {
+    margin: 0; font-family: var(--font-serif);
+    font-size: 13px; font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .panel > header .grow { flex: 1; }
+  .panel > header .more {
+    font-size: 11.5px; color: var(--ink-3); cursor: pointer;
+  }
+  .panel > header .more:hover { color: var(--ink); }
+
+  /* paste JD card */
+  .paste-jd {
+    padding: 16px;
+  }
+  .paste-jd .ta {
+    background: var(--bg);
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--r-sm);
+    padding: 14px;
+    min-height: 110px;
+    color: var(--ink-3);
+    font-size: 12.5px;
+    line-height: 1.6;
+    cursor: text;
+  }
+  .paste-jd .ta .hint {
+    color: var(--ink-4); font-size: 12px;
+  }
+  .paste-jd .ta .typed {
+    color: var(--ink); display: block; margin-top: 4px;
+  }
+  .paste-jd .footer {
+    margin-top: 10px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .paste-jd .footer .grow { flex: 1; }
+  .paste-jd .footer .hint {
+    font-size: 11.5px; color: var(--ink-4);
+  }
+
+  /* recent pool */
+  .pool .row {
+    display: grid;
+    grid-template-columns: 28px 1fr auto auto;
+    gap: 10px; align-items: center;
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .pool .row:last-child { border-bottom: none; }
+  .pool .row .src {
+    width: 24px; height: 24px; border-radius: 6px;
+    background: var(--bg-subtle); color: var(--ink-3);
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .pool .row .src.nc { background: #2a2a2a; color: #fff; }
+  .pool .row .src.bd { background: #2e58c0; color: #fff; }
+  .pool .row .src.tc { background: #0067e6; color: #fff; }
+  .pool .row .src.ali { background: #ff6a00; color: #fff; }
+  .pool .row .src.bs { background: #00bfa5; color: #fff; }
+  .pool .row .ttl { font-size: 13px; }
+  .pool .row .ttl small { color: var(--ink-3); font-size: 11.5px; }
+  .pool .row .sc {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+    color: var(--ink-2);
+  }
+  .pool .row .sc.hi { color: var(--ok); }
+  .pool .row .sc.lo { color: var(--bad); }
+
+  /* ── right rail: agent live ── */
+  .agent {
+    background: var(--bg-elev);
+    border-left: 1px solid var(--line);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .agent-head {
+    padding: 16px 18px 14px;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .agent-head .av {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: var(--ink); color: var(--ink-on-dark);
+    display: grid; place-items: center;
+    font-family: var(--font-serif); font-size: 14px; font-weight: 700;
+    position: relative;
+  }
+  .agent-head .av::after {
+    content: ""; position: absolute; bottom: -2px; right: -2px;
+    width: 10px; height: 10px; border-radius: 999px;
+    background: var(--signal); border: 2px solid var(--bg-elev);
+  }
+  .agent-head .who { flex: 1; }
+  .agent-head .who .name { font-family: var(--font-serif); font-size: 13.5px; font-weight: 600; }
+  .agent-head .who .state { font-size: 11.5px; color: var(--ink-3); display: flex; align-items: center; gap: 5px; }
+  .agent-head .menu { color: var(--ink-3); cursor: pointer; padding: 4px; }
+
+  .agent-now {
+    padding: 14px 18px;
+    background: var(--bg-subtle);
+    border-bottom: 1px solid var(--line);
+  }
+  .agent-now .label {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--ink-3); letter-spacing: 0.12em;
+    margin-bottom: 6px;
+  }
+  .agent-now .task {
+    font-size: 13px; line-height: 1.5; color: var(--ink);
+  }
+  .agent-now .task em { font-style: normal; font-family: var(--font-mono); font-size: 12px; padding: 0 4px; background: var(--bg-elev); border-radius: 3px; border: 1px solid var(--line); }
+  .agent-now .progress {
+    margin-top: 10px; height: 3px;
+    background: var(--line-soft); border-radius: 999px;
+    overflow: hidden; position: relative;
+  }
+  .agent-now .progress::after {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 64%;
+    background: var(--signal); border-radius: 999px;
+  }
+  .agent-now .progress-meta {
+    margin-top: 6px; font-size: 11px; color: var(--ink-3);
+    display: flex; justify-content: space-between;
+    font-family: var(--font-mono);
+  }
+
+  .agent-log {
+    flex: 1; overflow: hidden;
+    padding: 14px 18px;
+  }
+  .agent-log .section-label {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--ink-3); letter-spacing: 0.12em;
+    margin-bottom: 12px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--line-soft);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .agent-log .section-label .grow { flex: 1; }
+
+  .log-item {
+    display: grid; grid-template-columns: 48px 1fr;
+    gap: 10px; padding: 9px 0;
+    align-items: flex-start;
+  }
+  .log-item .t {
+    font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--ink-4); padding-top: 1px;
+    letter-spacing: -0.01em;
+  }
+  .log-item .what {
+    font-size: 12.5px; color: var(--ink-2); line-height: 1.5;
+  }
+  .log-item .what .verb {
+    font-weight: 600; color: var(--ink);
+  }
+  .log-item .what .obj {
+    font-family: var(--font-mono); font-size: 11.5px;
+    background: var(--bg-subtle); padding: 1px 5px; border-radius: 3px;
+  }
+  .log-item .what .ask {
+    color: var(--signal-deep);
+  }
+  .log-item.evt-ask .what::before {
+    content: "需要决定 · ";
+    color: var(--signal); font-weight: 600; font-size: 11.5px;
+  }
+
+  .agent-foot {
+    border-top: 1px solid var(--line);
+    padding: 12px 18px;
+    background: var(--bg);
+    font-size: 11.5px; color: var(--ink-3);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .agent-foot .stat {
+    display: inline-flex; gap: 4px; align-items: center;
+  }
+  .agent-foot .stat .v {
+    color: var(--ink); font-weight: 600; font-family: var(--font-mono);
+  }
+  .agent-foot .sep { color: var(--ink-4); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ╭─ rail ─╮ -->
+  <aside class="rail">
+    <div class="logo">O</div>
+    <div class="item active" title="Mission Control">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"></path></svg>
+    </div>
+    <div class="item" title="Pipeline">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="5" height="16" rx="1"></rect><rect x="10" y="4" width="5" height="10" rx="1"></rect><rect x="17" y="4" width="4" height="6" rx="1"></rect></svg>
+      <span class="dot-badge"></span>
+    </div>
+    <div class="item" title="Tailor">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 4h12l4 4v12H4z"></path><path d="M8 8h6M8 12h8M8 16h5"></path></svg>
+    </div>
+    <div class="item" title="Interview">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 5h16v10H8l-4 4z"></path><circle cx="9" cy="10" r="0.8" fill="currentColor"></circle><circle cx="12" cy="10" r="0.8" fill="currentColor"></circle><circle cx="15" cy="10" r="0.8" fill="currentColor"></circle></svg>
+    </div>
+    <div class="item" title="Lab">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 3v6L4 19a2 2 0 0 0 1.7 3h12.6A2 2 0 0 0 20 19L15 9V3"></path><path d="M8 3h8"></path></svg>
+    </div>
+    <div class="spacer"></div>
+    <div class="item" title="Settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path></svg>
+    </div>
+  </aside>
+
+  <!-- ╭─ main ─╮ -->
+  <section class="main">
+    <div class="topbar">
+      <nav class="breadcrumb">
+        <span class="crumb">OfferGuide</span>
+        <span class="sep">/</span>
+        <span class="crumb active">指挥台</span>
+      </nav>
+      <span class="bracket-tag signal"><span>3 interrupts</span></span>
+      <div class="grow"></div>
+      <div class="uptime">
+        <span class="seg"><span>uptime</span> <span class="v">14d 06h</span></span>
+        <span class="sep">·</span>
+        <span class="seg"><span>wake</span> <span class="v">#47</span></span>
+        <span class="sep">·</span>
+        <span class="seg"><span>budget</span> <span class="v">$1.24 / 5</span></span>
+        <span class="sep">·</span>
+        <span class="live">running</span>
+      </div>
+      <div class="search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
+        <span>搜索 / 命令</span>
+        <span class="kbd">⌘ K</span>
+      </div>
+    </div>
+
+    <div class="scroll">
+
+      <!-- hero -->
+      <div class="hero">
+        <div>
+          <h1>下午好，<span class="accent">该处理 3 件事</span>了</h1>
+          <div class="sub">Agent 在过去 6 小时里评估了 17 个岗位、刷了一遍腾讯校招、检测到 1 个 SKILL 进化候选。</div>
+        </div>
+        <div class="quick">
+          <button class="btn"><span class="dot ok"></span>系统正常</button>
+          <button class="btn signal">查看 3 项决定 →</button>
+        </div>
+      </div>
+
+      <!-- decisions -->
+      <div class="decisions">
+        <header>
+          <h2>需决定 · <span style="font-family:var(--font-mono); font-size:12px; color:var(--signal); letter-spacing:0.05em;">INTERRUPTS</span></h2>
+          <span class="count">3</span>
+          <div class="grow"></div>
+          <span class="dim" style="font-size:11.5px">Agent 已停在这里，等你确认后继续 · <span class="kbd" style="font-size:10px">↵</span> 处理 · <span class="kbd" style="font-size:10px">esc</span> snooze</span>
+        </header>
+
+
+        <div class="d-row">
+          <div class="score">82<small>MATCH</small></div>
+          <div class="body">
+            <div class="title">字节跳动 · 大模型推理框架研发实习生 · 北京</div>
+            <div class="meta">
+              <span class="tag ink">官方</span>
+              <span>校招 · 暑期</span>
+              <span class="sep">·</span>
+              <span>30 分钟前发现</span>
+              <span class="sep">·</span>
+              <span>字节剩余 <b style="color:var(--signal)">1 / 2</b> 次投递</span>
+            </div>
+            <div class="ask">这家剩 1 个投递名额，发现你简历里没"分布式推理"经验。要不要先做 5 天 prep 再投？</div>
+          </div>
+          <div class="act">
+            <button class="btn signal">先投 + prep</button>
+            <button class="btn sm">看细节</button>
+          </div>
+        </div>
+
+        <div class="d-row">
+          <div class="score">71<small>MATCH</small></div>
+          <div class="body">
+            <div class="title">阿里巴巴 · 数据科学家 · 杭州（淘天）</div>
+            <div class="meta">
+              <span class="tag">推荐池</span>
+              <span>校招 · 日常</span>
+              <span class="sep">·</span>
+              <span>2 小时前</span>
+              <span class="sep">·</span>
+              <span>阿里剩余 <b>2 / 3</b> 个意向</span>
+            </div>
+            <div class="ask">和 3 天前评估的"美团策略算法"在你简历上重合度 86%。建议二选一。要不要 compare？</div>
+          </div>
+          <div class="act">
+            <button class="btn">对比两份</button>
+            <button class="btn sm">跳过</button>
+          </div>
+        </div>
+
+        <div class="d-row">
+          <div class="score" style="color:var(--signal)">↑</div>
+          <div class="body">
+            <div class="title">SKILL 进化候选 · <span class="mono">score_match</span></div>
+            <div class="meta">
+              <span class="tag warn">Lab</span>
+              <span>fitness 0.503 → 0.724 (+0.221)</span>
+              <span class="sep">·</span>
+              <span>52 个真实信号</span>
+              <span class="sep">·</span>
+              <span>5 个用户 👎</span>
+            </div>
+            <div class="ask">基于 52 个真实反馈，建议把进化版本灰度到 20% 流量观察 3 天。</div>
+          </div>
+          <div class="act">
+            <button class="btn">看 prompt diff</button>
+            <button class="btn sm">放灰度</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- work area -->
+      <div class="work">
+
+        <!-- paste JD -->
+        <div class="panel">
+          <header>
+            <h3>快速评估 · 粘 JD</h3>
+            <span class="tag">10-20s</span>
+            <div class="grow"></div>
+            <span class="more">历史评估 →</span>
+          </header>
+          <div class="paste-jd">
+            <div class="ta">
+              <span class="hint">把岗位描述粘到这里 · 支持 BOSS / 牛客 / 招聘官网格式 / 不限长度</span>
+              <span class="typed">⌘ V 粘贴即开始 ·  也可以直接拖拽 .txt 文件</span>
+            </div>
+            <div class="footer">
+              <span class="kbd">⌘ V</span>
+              <span class="hint">粘贴自动触发；也可以截图 ⌘ + Shift + 4 后粘进来</span>
+              <div class="grow"></div>
+              <button class="btn signal">评估</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- recent pool -->
+        <div class="panel pool">
+          <header>
+            <h3>新进推荐池</h3>
+            <span class="tag">今日 +12</span>
+            <div class="grow"></div>
+            <span class="more">查看全部 →</span>
+          </header>
+          <div class="row">
+            <div class="src tc">腾</div>
+            <div class="ttl">CSIG 视觉算法<br><small>腾讯校招 · 上海 · 暑期</small></div>
+            <div class="sc hi">76</div>
+            <span class="tag ok">已评</span>
+          </div>
+          <div class="row">
+            <div class="src nc">牛</div>
+            <div class="ttl">字节抖音 · 推荐<br><small>牛客 sitemap · 北京 · 校招</small></div>
+            <div class="sc hi">82</div>
+            <span class="tag signal">!</span>
+          </div>
+          <div class="row">
+            <div class="src ali">阿</div>
+            <div class="ttl">淘天 · 数据科学家<br><small>阿里官方 · 杭州 · 日常</small></div>
+            <div class="sc hi">71</div>
+            <span class="tag signal">!</span>
+          </div>
+          <div class="row">
+            <div class="src bd">百</div>
+            <div class="ttl">小度 · 对话系统<br><small>百度官方 · 北京 · 校招</small></div>
+            <div class="sc">58</div>
+            <span class="tag">待评</span>
+          </div>
+          <div class="row">
+            <div class="src bs">B</div>
+            <div class="ttl">某独角兽 · 后端实习<br><small>BOSS · 杭州 · 日常</small></div>
+            <div class="sc lo">42</div>
+            <span class="tag">不符</span>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ╭─ agent rail ─╮ -->
+  <aside class="agent">
+    <div class="agent-head">
+      <div class="av">O</div>
+      <div class="who">
+        <div class="name">Offer Agent</div>
+        <div class="state"><span class="dot live"></span> 工作中 · 第 47 次唤醒</div>
+      </div>
+      <div class="menu">⋯</div>
+    </div>
+
+    <div class="agent-now">
+      <div class="label">NOW</div>
+      <div class="task">
+        正在跑 <em>discover_jobs</em> 子代理 ·
+        阶段 3/4 <span class="mono dim" style="font-size:11px">verified_official</span>
+      </div>
+      <div class="progress"></div>
+      <div class="progress-meta">
+        <span>已抓 76 个 · 入库 12</span>
+        <span>~ 38s</span>
+      </div>
+    </div>
+
+    <div class="agent-log">
+      <div class="section-label">
+        最近 6 小时
+        <div class="grow"></div>
+        <span class="dim" style="text-transform:none; letter-spacing:0">下次唤醒 14:00</span>
+      </div>
+
+      <div class="log-item evt-ask">
+        <div class="t">13:22</div>
+        <div class="what"><span class="ask">字节 1 / 2 名额冲突，需要你拍板。</span></div>
+      </div>
+
+      <div class="log-item">
+        <div class="t">13:14</div>
+        <div class="what"><span class="verb">评估</span> <span class="obj">大模型推理框架</span> · 字节 · match 82</div>
+      </div>
+
+      <div class="log-item">
+        <div class="t">13:01</div>
+        <div class="what"><span class="verb">检测进化候选</span> · <span class="obj">score_match</span> fitness +0.22</div>
+      </div>
+
+      <div class="log-item">
+        <div class="t">12:48</div>
+        <div class="what"><span class="verb">写开场白</span> · 美团 · 已复制到剪贴板</div>
+      </div>
+
+      <div class="log-item">
+        <div class="t">12:30</div>
+        <div class="what"><span class="verb">摄入面经</span> · 一亩三分地 · 8 条 · 阿里 / 字节</div>
+      </div>
+
+      <div class="log-item">
+        <div class="t">11:55</div>
+        <div class="what"><span class="verb">扫描沉默</span> · 7 个投递无回应 7d+</div>
+      </div>
+
+      <div class="log-item">
+        <div class="t">11:02</div>
+        <div class="what"><span class="verb">补全档案</span> · 项目"实时检索系统" QPS 数据 → memory</div>
+      </div>
+
+      <div class="log-item">
+        <div class="t">10:30</div>
+        <div class="what"><span class="verb">唤醒</span> · cron · 心跳正常</div>
+      </div>
+    </div>
+
+    <div class="agent-foot">
+      <span class="stat">今日 LLM <span class="v">$1.24</span></span>
+      <span class="sep">·</span>
+      <span class="stat">预算 <span class="v">$5</span></span>
+      <span class="sep">·</span>
+      <span class="stat">DeepSeek V4</span>
+    </div>
+  </aside>
+
+</div>
+</body>
+</html>
