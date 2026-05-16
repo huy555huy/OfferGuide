@@ -2,6 +2,12 @@
 
 OfferGuide 是一个面向中文求职场景的本地优先 agent。它围绕用户的目标、简历、岗位、投递状态和反馈持续维护自己的状态，并在每次 wake 时决定下一步是行动、追问、通知还是等待。
 
+## Web 预览
+
+<img src="docs/screenshots/web-preview.png" alt="OfferGuide Web Preview" width="100%">
+
+_截图来自临时本地 demo 数据库，只展示示例岗位与 agent 状态。_
+
 项目当前的重点是让 agent 拥有可恢复的世界状态:
 
 - `worldview`: 用户画像、策略、开放回路、复盘和长期记忆
