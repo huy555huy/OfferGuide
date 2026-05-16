@@ -1,5 +1,10 @@
 {% extends "base.html" %}
-{% block title %}OfferGuide · 待点列表{% endblock %}
+{% block title %}OfferGuide · Pipeline 候选视图{% endblock %}
+{% block crumb %}Pipeline{% endblock %}
+{% block topbar_tags %}
+<span class="bracket-tag dim"><span>{{ total_pool }} candidates</span></span>
+<span class="bracket-tag signal"><span>{{ green_count }} high-fit</span></span>
+{% endblock %}
 {% block content %}
 
 <style>
@@ -190,16 +195,15 @@
 </style>
 
 <div class="card">
-    <h1 style="font-family: var(--font-serif); margin: 0 0 0.375rem;">🎯 待点列表</h1>
+    <h1 style="font-family: var(--font-serif); margin: 0 0 0.375rem;">Pipeline · 推荐池</h1>
     <div class="muted small">
-        Agent 已经评分排好序的岗位 — 按真实渠道打开 BOSS / 牛客 / 官网网申, 先看投递包, 再由你审核发送.
-        BOSS JD 页浮窗会自动写开场白; 官网网申页会把常填字段和答案备好.
+        这是 Pipeline 的候选视图, 不是单独流程。Agent 先把岗位按证据排序; 你只审值得推进的投递包和风险点。
     </div>
     <div class="rec-toolbar">
         <button class="primary" onclick="runAutoDiscover(this)" {% if not runtime_ready %}disabled{% endif %}>
-            全自动找新岗位
+            让 agent 找新岗位
         </button>
-        <a href="/jobs">查看跟踪</a>
+        <a href="/pipeline">回 Pipeline</a>
         {% if not runtime_ready %}
         <span class="muted small">需要先配置 LLM key 才能联网自主找岗</span>
         {% else %}
@@ -212,7 +216,7 @@
 
 {% if cycle_keywords %}
 <div class="kw-strip">
-    <span class="kw-label">🔍 agent 用这些 keyword 找岗位 (从你简历抽的, 不只 "AI"):</span>
+    <span class="kw-label">agent 用这些 keyword 找岗位 (从你简历抽的, 不只 "AI"):</span>
     {% for kw in cycle_keywords %}<span class="kw-chip">{{ kw }}</span>{% endfor %}
 </div>
 {% endif %}
@@ -220,7 +224,7 @@
 <div class="card" style="margin: 0.875rem 0;">
     <details>
         <summary style="cursor: pointer; font-weight: 600;">
-            ⚙ 自定义 keyword (你说了算)
+            自定义 keyword (你说了算)
             <span class="muted small" style="margin-left: 0.5rem;">
                 想找的会优先送到 agent; 想屏蔽的会在列表里隐藏
             </span>
@@ -228,7 +232,7 @@
         <div style="margin-top: 0.75rem; display: grid; gap: 0.75rem;">
             <div>
                 <div style="font-size: 0.82rem; font-weight: 600; margin-bottom: 0.375rem;">
-                    ➕ 想找 (include)
+                    想找 (include)
                 </div>
                 <div id="kw-includes" style="display: flex; flex-wrap: wrap; gap: 0.375rem; margin-bottom: 0.375rem;">
                     {% for k in user_keyword_includes %}
@@ -247,7 +251,7 @@
             </div>
             <div>
                 <div style="font-size: 0.82rem; font-weight: 600; margin-bottom: 0.375rem;">
-                    🚫 不要找 (exclude)
+                    不要找 (exclude)
                 </div>
                 <div id="kw-excludes" style="display: flex; flex-wrap: wrap; gap: 0.375rem; margin-bottom: 0.375rem;">
                     {% for k in user_keyword_excludes %}
@@ -265,7 +269,7 @@
                 </form>
             </div>
             <div class="muted small">
-                ℹ <strong>include</strong> 下次 agent 找岗时优先用这些 keyword;
+                <strong>include</strong> 下次 agent 找岗时优先用这些 keyword;
                 <strong>exclude</strong> 立即生效, 含这词的岗位直接从列表里隐藏.
             </div>
         </div>
@@ -292,11 +296,11 @@
 
 <div class="rt-filter-row">
     {% set filter_items = [
-        ('intern',   '🌟 实习总览', recruit_counts['summer_intern'] + recruit_counts['daily_intern']),
-        ('summer',   '☀ 暑期实习', recruit_counts['summer_intern']),
-        ('daily',    '📅 日常实习', recruit_counts['daily_intern']),
-        ('fulltime', '🎓 校招正式', recruit_counts['campus_fulltime']),
-        ('social',   '💼 社招', recruit_counts['social']),
+        ('intern',   '实习总览', recruit_counts['summer_intern'] + recruit_counts['daily_intern']),
+        ('summer',   '暑期实习', recruit_counts['summer_intern']),
+        ('daily',    '日常实习', recruit_counts['daily_intern']),
+        ('fulltime', '校招正式', recruit_counts['campus_fulltime']),
+        ('social',   '社招', recruit_counts['social']),
         ('all',      '全部', total_pool),
     ] %}
     {% for code, label, n in filter_items %}
@@ -306,7 +310,7 @@
     {% endfor %}
     {% if recruit_counts['unknown'] > 0 %}
     <a href="/recommended?type=unknown" class="{% if active_filter == 'unknown' %}active{% endif %}">
-        ❓ 未分类<span class="n">{{ recruit_counts['unknown'] }}</span>
+        未分类<span class="n">{{ recruit_counts['unknown'] }}</span>
     </a>
     {% endif %}
 </div>
@@ -314,7 +318,7 @@
 {% if active_filter in ('intern', 'summer') and recruit_counts['summer_intern'] == 0 %}
 <div class="muted small" style="margin-bottom: 0.75rem; padding: 0.5rem 0.75rem; background: var(--bg-subtle); border-radius: 4px; line-height: 1.5;">
     暂无暑期实习. 5 月节奏: 大厂应届实习/暑期实习项目正在开放, agent 下次巡检会拉.
-    可以点上面的"全自动找新岗位"立即触发, 或先看看 📅 日常实习填空闲.
+    可以点上面的"让 agent 找新岗位"立即触发, 或先看看日常实习填空闲.
 </div>
 {% endif %}
 
@@ -358,9 +362,9 @@
 
 {% if not candidates %}
 <div class="card empty" style="padding: 2rem; text-align: center;">
-        <div class="empty-title" style="margin-bottom: 0.5rem;">📭 还没评估过任何岗位</div>
+        <div class="empty-title" style="margin-bottom: 0.5rem;">还没评估过任何岗位</div>
         <div class="empty-hint" style="line-height: 1.7;">
-        先点上面的“全自动找新岗位”。BOSS 登录态岗位也可以用 Chrome 扩展同步整页；单个官网/JD 链接可在 <a href="/">首页</a> 粘贴评估。
+        先让 agent 找新岗位。BOSS 登录态岗位也可以用 Chrome 扩展同步整页；单个官网/JD 链接可在 <a href="/">首页</a> 粘贴评估。
     </div>
 </div>
 {% else %}
@@ -406,14 +410,14 @@
         </div>
         <div class="actions">
             <a href="/jobs/{{ c.job_id }}/apply-pack" class="primary"
-               onclick="onApplyPackClick(this)">📋 准备投递</a>
+               onclick="onApplyPackClick(this)">准备投递</a>
             {% if c.url %}
             <a href="{{ c.url }}" target="_blank" rel="noopener">{{ c.application_plan.action_label }} →</a>
             {% endif %}
             <span class="muted small">{{ c.application_plan.platform_label }}</span>
             <button type="button" class="btn ghost" style="margin-left: auto; font-size: 0.78rem; padding: 0.25rem 0.5rem;"
                     title="点开链接发现 404 / 已下架? 标记此岗失效, 之后不再出现"
-                    onclick="reportDead({{ c.job_id }}, this)">⚠ 失效</button>
+                    onclick="reportDead({{ c.job_id }}, this)">失效</button>
         </div>
     </div>
 {% endfor %}
@@ -449,7 +453,7 @@ async function runAutoDiscover(btn) {
     }
 }
 
-// 点 "📋 准备投递" 后立刻给视觉反馈 — apply-pack 第一次会跑 ~20s LLM,
+// 点 "准备投递" 后立刻给视觉反馈 — apply-pack 第一次会跑 ~20s LLM,
 // 没 feedback 用户会觉得点了没反应. 缓存命中时 endpoint 几乎瞬间返回,
 // 这个 loading state 也几乎不可见, 不会干扰熟手节奏.
 function onApplyPackClick(link) {
@@ -457,7 +461,7 @@ function onApplyPackClick(link) {
     link.dataset.busy = '1';
     link.style.opacity = '0.7';
     link.style.pointerEvents = 'none';
-    link.innerHTML = '⏳ 生成投递包...';
+    link.innerHTML = '生成投递包...';
     // 不阻止 navigate. 用户回来时 page reload, busy 标记自然消失.
     return true;
 }

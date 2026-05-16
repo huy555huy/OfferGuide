@@ -1,5 +1,10 @@
 {% extends "base.html" %}
 {% block title %}OfferGuide — Portfolio{% endblock %}
+{% block crumb %}Lab{% endblock %}
+{% block topbar_tags %}
+<span class="bracket-tag dim"><span>portfolio</span></span>
+<span class="bracket-tag ok"><span>real signals</span></span>
+{% endblock %}
 {% block content %}
 
 <style>
@@ -57,7 +62,7 @@
 
 <div class="page-title">
     <div>
-        <h1>OfferGuide · Build Portfolio</h1>
+        <h1>Lab · Build Portfolio</h1>
         <p>
             这是 OfferGuide 这个项目的<strong>构建 metrics</strong>。所有数字
             都是 agent / SKILL / evolution 框架自身的可观测信息——
@@ -70,14 +75,13 @@
 
 {% if n_agent_runs == 0 %}
 <div class="empty" style="margin-bottom: 1rem;">
-    <div class="empty-icon">📦</div>
     <div class="empty-title">数据还很少, 这页主要展示骨架</div>
     <div class="empty-hint">
         agent run 一次, 调过几个 SKILL, 各类指标就会真出现在这里。<br>
         <strong>2-4 周日常使用后</strong>, 这页是最适合放在简历上的 OfferGuide 演示链接。
     </div>
     <div class="empty-action">
-        <a href="/agent" class="btn">▶ 跑一次 agent 让数据动起来</a>
+        <a href="/agent" class="btn">跑一次 agent 让数据动起来</a>
     </div>
 </div>
 {% endif %}
@@ -94,9 +98,9 @@
         <div class="desc">11 SKILLs 的实际被调用次数</div>
     </div>
     <div class="hero-stat">
-        <div class="lbl">avg critic</div>
+        <div class="lbl">real feedback</div>
         <div class="num">{{ "%.2f"|format(avg_critic) if avg_critic is not none else "—" }}</div>
-        <div class="desc">agent 自我评估均值 (constitutional critic)</div>
+        <div class="desc">用户 thumbs / outcome / follow-through 的聚合信号</div>
     </div>
     <div class="hero-stat">
         <div class="lbl">total cost</div>
@@ -145,17 +149,17 @@
         <div class="hero-stat">
             <div class="lbl">总反馈信号</div>
             <div class="num">{{ n_signals }}</div>
-            <div class="desc">critic + thumbs + outcome 总累积</div>
+            <div class="desc">真实反馈信号总累积，不含 LLM 自评</div>
         </div>
     </div>
 </div>
 
-{# ─────────── Per-SKILL critic averages ─────────── #}
+{# ─────────── Per-SKILL real-feedback averages ─────────── #}
 
 {% if skill_metrics %}
 <div class="card">
     <div class="card-header">
-        <h2>SKILL critic 评分</h2>
+        <h2>SKILL 真实反馈</h2>
         <span class="meta">≥ 3 个信号才上榜</span>
     </div>
     {% for sm in skill_metrics %}
@@ -180,7 +184,7 @@
         Ambient Job-Hunt Copilot for Chinese campus recruitment.
         Single-user local-first agent that wakes on cron, reads system state,
         decides which SKILLs to invoke against a north-star goal, and
-        evolves its own prompts via critic + user-thumbs + app-outcome
+        evolves its own prompts via user-thumbs + app-outcome + follow-through
         signal aggregation (W13.1 GEPA-style closed loop).
     </p>
     <div style="margin-top: 0.75rem;">

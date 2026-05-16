@@ -1,5 +1,10 @@
 {% extends "base.html" %}
 {% block title %}投递 — {{ job.company }} {{ job.title }}{% endblock %}
+{% block crumb %}Tailor{% endblock %}
+{% block topbar_tags %}
+<span class="bracket-tag dim"><span>job#{{ job.id }}</span></span>
+<span class="bracket-tag signal"><span>apply pack</span></span>
+{% endblock %}
 {% block content %}
 
 <style>
@@ -114,7 +119,7 @@
     <div>
         {% if not package %}
         <button class="btn" onclick="generatePackage()" {% if not runtime_ready or not profile_loaded %}disabled{% endif %}>
-            🤖 生成投递包
+            生成投递包
         </button>
         {% else %}
         <button class="btn secondary" onclick="generatePackage()">↻ 重新生成</button>
@@ -141,10 +146,9 @@
         {% include "_apply_package.html" %}
     {% elif runtime_ready and profile_loaded %}
     <div class="empty">
-        <div class="empty-icon">📦</div>
         <div class="empty-title">还没生成 {{ job.company }} 投递包</div>
         <div class="empty-hint">
-            点上面 <strong>🤖 生成投递包</strong> 按钮, agent 会读 JD + 你的简历,
+            点上面 <strong>生成投递包</strong> 按钮, agent 会读 JD + 你的简历,
             产出: Boss直聊第一句话 / 6 个 Q&A 模板 / 投递时间策略 / pre-submit checklist。<br>
             10-30 秒 LLM 调用, 成本几分钱。
         </div>
@@ -169,25 +173,25 @@
     {% else %}
     <div class="empty" style="margin-bottom: 1rem; padding: 1rem;">
         <div class="empty-title">还没标过状态</div>
-        <div class="empty-hint">投完之后, 点下面 <strong>📤 已提交</strong> 开始追踪</div>
+        <div class="empty-hint">投完之后, 点下面 <strong>已提交</strong> 开始追踪</div>
     </div>
     {% endif %}
 
     <div class="lifecycle-group">
         <div class="group-title">第一阶 — 投递动作</div>
-        <button class="lifecycle-btn" onclick="markStatus('submitted', this)" data-loading-text="标记中...">📤 已提交</button>
-        <button class="lifecycle-btn" onclick="markStatus('hr_viewed', this)" data-loading-text="标记中...">👀 HR 已看</button>
+        <button class="lifecycle-btn" onclick="markStatus('submitted', this)" data-loading-text="标记中...">已提交</button>
+        <button class="lifecycle-btn" onclick="markStatus('hr_viewed', this)" data-loading-text="标记中...">HR 已看</button>
     </div>
     <div class="lifecycle-group">
         <div class="group-title">第二阶 — 推进信号</div>
-        <button class="lifecycle-btn" style="background:var(--warning); border-color:var(--warning);" onclick="markStatus('replied', this)" data-loading-text="标记中...">💬 HR 回复</button>
-        <button class="lifecycle-btn success" onclick="markStatus('interview', this)" data-loading-text="标记中...">🎤 进入面试</button>
+        <button class="lifecycle-btn" style="background:var(--warning); border-color:var(--warning);" onclick="markStatus('replied', this)" data-loading-text="标记中...">HR 回复</button>
+        <button class="lifecycle-btn success" onclick="markStatus('interview', this)" data-loading-text="标记中...">进入面试</button>
     </div>
     <div class="lifecycle-group">
         <div class="group-title">终结 — 已定结果</div>
-        <button class="lifecycle-btn success" onclick="markStatus('offer', this)" data-loading-text="标记中...">🎉 拿 offer</button>
-        <button class="lifecycle-btn danger" onclick="markStatus('rejected', this)" data-loading-text="标记中...">✗ 被拒</button>
-        <button class="lifecycle-btn ghost" onclick="markStatus('withdrawn', this)" data-loading-text="标记中...">⊘ 撤回</button>
+        <button class="lifecycle-btn success" onclick="markStatus('offer', this)" data-loading-text="标记中...">拿 offer</button>
+        <button class="lifecycle-btn danger" onclick="markStatus('rejected', this)" data-loading-text="标记中...">被拒</button>
+        <button class="lifecycle-btn ghost" onclick="markStatus('withdrawn', this)" data-loading-text="标记中...">撤回</button>
     </div>
 </div>
 

@@ -1,5 +1,10 @@
 {% extends "base.html" %}
 {% block title %}OfferGuide — 面经{% endblock %}
+{% block crumb %}Interview{% endblock %}
+{% block topbar_tags %}
+<span class="bracket-tag dim"><span>{{ experiences|length }} notes</span></span>
+{% if companies %}<span class="bracket-tag signal"><span>{{ companies|length }} companies</span></span>{% endif %}
+{% endblock %}
 {% block content %}
 
 <div class="page-title">

@@ -117,10 +117,11 @@ def deps(tmp_store, tmp_worldview):
 
 
 class TestMemoryTool:
-    def test_bootstrap_creates_six_starter_files(self, tmp_worldview):
+    def test_bootstrap_creates_starter_files(self, tmp_worldview):
         m = MemoryStore(root=tmp_worldview)
         files = set(m.list_files())
         assert "MEMORY.md" in files
+        assert "agenda.md" in files
         assert "candidate.md" in files
         assert "tracked-jobs.md" in files
         assert "upcoming-events.md" in files
@@ -263,14 +264,101 @@ class TestMemoryTool:
 
 class TestContextManager:
     def test_build_initial_system_includes_instructions_and_memory(self, deps):
-        cm = ContextManager(llm=deps.llm, memory=deps.memory_store)
+        cm = ContextManager(
+            llm=deps.llm,
+            memory=deps.memory_store,
+            store=deps.store,
+        )
         sys_msg = cm.build_initial_system()
         # instructions.md content
         assert "求职 agent" in sys_msg
         # System facts
         assert "今天" in sys_msg
+        assert "活跃目标与进度快照" in sys_msg
+        assert "Agent Agenda" in sys_msg
+        assert "act / ask / notify / sleep" in sys_msg
         # Worldview MEMORY.md auto-loaded (bootstrap'd)
         assert "你的主页" in sys_msg or "你脑子里的当前状态" in sys_msg
+
+    def test_build_initial_system_includes_persistent_agenda(self, deps):
+        deps.memory_store.execute({
+            "command": "create",
+            "path": "agenda.md",
+            "file_text": (
+                "# Agent Agenda\n\n"
+                "## 开放回路\n"
+                "- Open loop: follow up ByteDance by 2026-05-23\n\n"
+                "## 安静等待\n"
+                "- Do not notify about low-confidence roles.\n"
+            ),
+        })
+        cm = ContextManager(
+            llm=deps.llm,
+            memory=deps.memory_store,
+            store=deps.store,
+        )
+        sys_msg = cm.build_initial_system()
+
+        assert "Agent Agenda (开放回路与责任账本)" in sys_msg
+        assert "Open loop: follow up ByteDance" in sys_msg
+        assert "Do not notify about low-confidence roles" in sys_msg
+        assert "收束前更新关闭/新增的开放回路" in sys_msg
+
+    def test_build_initial_system_includes_active_goal_progress(self, deps):
+        from offerguide import goals as _goals
+
+        _goals.add_goal(
+            deps.store,
+            title="拿到 1 个 AI Agent 暑期实习 offer",
+            target_date=_dt.date(2026, 7, 15),
+            target_metric="1 offer",
+            description="优先 AI Agent / LLM 应用方向",
+        )
+        cm = ContextManager(
+            llm=deps.llm,
+            memory=deps.memory_store,
+            store=deps.store,
+        )
+        sys_msg = cm.build_initial_system(
+            system_facts=SystemFacts(today=_dt.date(2026, 5, 16))
+        )
+
+        assert "拿到 1 个 AI Agent 暑期实习 offer" in sys_msg
+        assert "target_metric: 1 offer" in sys_msg
+        assert "active_apps=" in sys_msg
+        assert "这是启发式判断, 不是事实" in sys_msg
+
+    def test_build_initial_system_excludes_completed_work_items(self, deps):
+        open_id = harness_schema.ensure_work_item(
+            deps.store,
+            title="继续处理开放工作",
+            source_kind="agent",
+            source_ref="ctx-open",
+        )
+        done_id = harness_schema.ensure_work_item(
+            deps.store,
+            title="已经完成的工作",
+            source_kind="agent",
+            source_ref="ctx-done",
+        )
+        harness_schema.update_work_item(
+            deps.store,
+            work_item_id=done_id,
+            status="done",
+            summary="已完成",
+        )
+
+        cm = ContextManager(
+            llm=deps.llm,
+            memory=deps.memory_store,
+            store=deps.store,
+        )
+        sys_msg = cm.build_initial_system()
+
+        assert f"WorkItem #{open_id}" in sys_msg
+        assert "继续处理开放工作" in sys_msg
+        assert f"WorkItem #{done_id}" not in sys_msg
+        assert "已经完成的工作" not in sys_msg
 
     def test_build_initial_system_with_empty_worldview(self, tmp_path, tmp_store):
         empty_dir = tmp_path / "empty_worldview"
@@ -390,6 +478,72 @@ class TestToolDispatch:
         assert row[0] == "applied"
         assert row[1] == 42
 
+    def test_update_work_item_marks_done_and_removes_from_active(self, deps):
+        item_id = harness_schema.ensure_work_item(
+            deps.store,
+            title="评估用户粘贴的 JD",
+            source_kind="user_input",
+            source_ref="wi-done-test",
+            summary="用户想知道 JD 值不值得投",
+            priority=90,
+        )
+
+        r = dispatch("update_work_item", {
+            "work_item_id": item_id,
+            "status": "done",
+            "summary": "已完成 JD 判断并生成可读结论",
+            "evidence": {"job_id": 7, "skill_run_id": 11, "view": "/tailor"},
+        }, deps)
+
+        assert r.startswith(f"OK work_item#{item_id} done")
+        active_ids = [item.id for item in harness_schema.list_active_work_items(deps.store)]
+        assert item_id not in active_ids
+        with deps.store.connect() as conn:
+            row = conn.execute(
+                "SELECT status, closed_at, summary, evidence_json "
+                "FROM agent_work_items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
+        assert row[0] == "done"
+        assert row[1] is not None
+        assert "JD 判断" in row[2]
+        assert _json.loads(row[3])["skill_run_id"] == 11
+
+    def test_update_work_item_waiting_requires_next_action(self, deps):
+        item_id = harness_schema.ensure_work_item(
+            deps.store,
+            title="等待投递反馈",
+            source_kind="event",
+            source_ref="wi-wait-test",
+        )
+
+        missing = dispatch("update_work_item", {
+            "work_item_id": item_id,
+            "status": "waiting",
+            "summary": "已安排后续检查",
+        }, deps)
+        assert "ERROR" in missing and "requires next_action" in missing
+
+        ok = dispatch("update_work_item", {
+            "work_item_id": item_id,
+            "status": "waiting",
+            "summary": "已投递, 当前未记录新回复",
+            "next_action": "7 天后检查是否有面试或拒信记录",
+            "due_seconds": 3600,
+            "evidence": {"application_id": 3},
+        }, deps)
+        assert ok.startswith(f"OK work_item#{item_id} waiting")
+        with deps.store.connect() as conn:
+            row = conn.execute(
+                "SELECT status, closed_at, due_at, next_action "
+                "FROM agent_work_items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
+        assert row[0] == "waiting"
+        assert row[1] is None
+        assert row[2] is not None
+        assert "7 天后" in row[3]
+
     def test_read_artifact_reads_latest_tailor_event(self, deps):
         with deps.store.connect() as conn:
             conn.execute(
@@ -472,6 +626,16 @@ class TestToolDispatch:
         assert ALL_TOOL_SCHEMAS[0]["function"]["name"] == "memory"
         assert ALL_TOOL_SCHEMAS[0] is MEMORY_TOOL_SCHEMA
 
+    def test_update_work_item_schema_is_available(self):
+        names = [s["function"]["name"] for s in ALL_TOOL_SCHEMAS]
+        assert "update_work_item" in names
+        schema = next(
+            s["function"] for s in ALL_TOOL_SCHEMAS
+            if s["function"]["name"] == "update_work_item"
+        )
+        assert "durable work item" in schema["description"]
+        assert "work_item_id" in schema["parameters"]["required"]
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Master loop — single-threaded orchestration
@@ -505,6 +669,7 @@ class TestHarnessLoop:
         deps.llm.push_tool_call(  # type: ignore[union-attr]
             name="schedule_next_wake",
             arguments={"delay_seconds": 600, "reason": "test"},
+            call_id="wake_1",
         )
         deps.llm.push_text("done")  # type: ignore[union-attr]
         result = agent_runtime_run(
@@ -519,7 +684,52 @@ class TestHarnessLoop:
             n = conn.execute(
                 "SELECT COUNT(*) FROM harness_scheduled_wakes"
             ).fetchone()[0]
+            work = conn.execute(
+                "SELECT title, status, last_run_id FROM agent_work_items "
+                "WHERE source_kind = 'user_input' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
         assert n == 1
+        assert work[0].startswith("User request:")
+        assert work[1] == "in_progress"
+        assert work[2] == result.run_id
+
+    def test_loop_allows_agent_to_close_trigger_work_item(self, deps):
+        message = "帮我看看这个 JD 值不值得投"
+        item_id = harness_schema.prepare_trigger_work_items(
+            deps.store,
+            kind="user_input",
+            detail={"message": message},
+        )[0]
+        deps.llm.push_tool_call(  # type: ignore[union-attr]
+            name="update_work_item",
+            arguments={
+                "work_item_id": item_id,
+                "status": "done",
+                "summary": "已判断: 当前证据不足, 已告诉用户需要完整 JD",
+                "evidence": {"user_message": message},
+            },
+            call_id="work_done_1",
+        )
+        deps.llm.push_text("需要完整 JD 才能判断。")  # type: ignore[union-attr]
+
+        result = agent_runtime_run(
+            trigger=make_user_input_trigger(message),
+            deps=deps,
+            max_iterations=5,
+        )
+
+        assert result.finish_reason == "end_turn"
+        assert "update_work_item" in result.tool_call_log[0]
+        with deps.store.connect() as conn:
+            row = conn.execute(
+                "SELECT status, closed_at, last_run_id, summary "
+                "FROM agent_work_items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
+        assert row[0] == "done"
+        assert row[1] is not None
+        assert row[2] == result.run_id
+        assert "证据不足" in row[3]
 
     def test_loop_respects_max_iterations(self, deps):
         # Push 10 tool calls; max=3 caps it
@@ -554,6 +764,7 @@ class TestHarnessLoop:
         deps.llm.push_tool_call(  # type: ignore[union-attr]
             name="notify_user",
             arguments={"title": "t", "body": "b"},
+            call_id="notify_1",
         )
         deps.llm.push_text("done")  # type: ignore[union-attr]
         result = agent_runtime_run(
@@ -580,12 +791,22 @@ class TestTriggers:
                    detail={"job_id": 5, "note": "from bo zhi"})
         with tmp_store.connect() as conn:
             row = conn.execute(
-                "SELECT kind, job_id, note, source FROM harness_events "
+                "SELECT id, kind, job_id, note, source FROM harness_events "
                 "ORDER BY id DESC LIMIT 1"
             ).fetchone()
-        assert row[0] == "user_paste_jd"
-        assert row[1] == 5
-        assert row[3] == "user"
+            work = conn.execute(
+                "SELECT title, source_kind, source_ref, job_id, status, next_action "
+                "FROM agent_work_items ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        assert row[1] == "user_paste_jd"
+        assert row[2] == 5
+        assert row[4] == "user"
+        assert work[0] == "Process pasted JD for job#5"
+        assert work[1] == "event"
+        assert work[2] == str(row[0])
+        assert work[3] == 5
+        assert work[4] == "open"
+        assert "ingest/score/tailor" in work[5]
 
     def test_poll_pending_picks_up_due_scheduled_wake(self, tmp_store):
         # Insert a scheduled wake with fire_at in the past
@@ -624,6 +845,24 @@ class TestTriggers:
         events = [p for p in pending if p.source == "event"]
         assert len(events) >= 1
         assert events[0].trigger_event.detail["event"] == "user_marked_applied"
+
+    def test_user_input_trigger_creates_work_item_for_run(self, deps):
+        deps.llm.push_text("done")  # type: ignore[union-attr]
+        result = agent_runtime_run(
+            trigger=make_user_input_trigger("帮我看看这个 JD 值不值得投"),
+            deps=deps,
+        )
+
+        with deps.store.connect() as conn:
+            row = conn.execute(
+                "SELECT title, source_kind, status, last_run_id, summary "
+                "FROM agent_work_items ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        assert row[0].startswith("User request:")
+        assert row[1] == "user_input"
+        assert row[2] == "in_progress"
+        assert row[3] == result.run_id
+        assert "JD" in row[4]
 
     def test_make_cron_heartbeat_returns_cron_kind(self):
         t = make_cron_heartbeat()
@@ -748,16 +987,21 @@ def web_client(tmp_path):
 
 
 class TestHomeWithW15:
-    def test_home_renders_worldview_section(self, web_client):
+    def test_home_renders_mission_control_shell(self, web_client):
         client, _ = web_client
         resp = client.get("/")
         assert resp.status_code == 200
-        assert "Agent Chat" in resp.text
-        assert "runAgent" in resp.text
+        assert "OfferGuide · 指挥台" in resp.text
+        assert "Mission Control" in resp.text
+        assert "需决定" in resp.text
+        assert "快速评估 · 粘 JD" in resp.text
+        assert "新进候选" in resp.text
+        assert 'href="/pipeline"' in resp.text
+        assert 'href="/tailor"' in resp.text
+        assert 'href="/interviews"' in resp.text
+        assert 'href="/evolution"' in resp.text
         assert "和 Agent 对话" in resp.text
-        assert "下一句话" in resp.text
         assert "发送给 Agent" in resp.text
-        assert "Enter 发送" in resp.text
         assert "trigger_kind=user_input" in resp.text
         assert "trigger_kind=user_button" not in resp.text
 
@@ -1490,10 +1734,11 @@ class TestReviewFixes:
     # (W21 redesign 2026-05-15: "Mission Control" 重新成了 home 的设计名,
     # 不再是 "internal jargon" 的同义词. 这个 assert 现在跟设计冲突, 删掉.)
     def test_home_no_mission_control_visible(self, web_client):
-        """Root is now the Agent Chat workbench, not the ops dashboard."""
+        """Root is now the W21 Mission Control workbench."""
         client, _ = web_client
         resp = client.get("/")
-        assert "Agent Chat" in resp.text
+        assert "OfferGuide · 指挥台" in resp.text
+        assert "Mission Control" in resp.text
 
     def test_home_has_dejargonized_button_labels(self, web_client):
         """W15.16 — '唤醒 agent' / 'trajectory' 这些 internal 术语该被替换."""
@@ -1509,21 +1754,18 @@ class TestReviewFixes:
         assert "执行记录" in resp.text or "Trajectory" not in resp.text
 
     def test_navbar_5_main_groups(self, web_client):
-        """W15.16 — navbar 19 → 5 主 + 4 dropdown 分组."""
+        """W21 — rail compresses the app into the 5 redesigned groups."""
         client, _ = web_client
         resp = client.get("/")
-        # 5 个主分组都在
-        for group_label in ("Agent", "今日", "📤 投递", "🎤 面试", "📝 简历", "⚙ 设置"):
-            assert group_label in resp.text, f"navbar 缺 {group_label}"
-        # 老的 "🎯 Goals" 移到 设置 dropdown 里, 仍然能从"目标"链接进
-        assert "🎯 目标" in resp.text or "🎯 Goals" in resp.text
+        for href in ("/", "/pipeline", "/tailor", "/interviews", "/evolution", "/debug"):
+            assert f'href="{href}"' in resp.text
 
     def test_home_has_resume_tailor_hero(self, web_client):
-        """Root should route resume tailoring through the main agent chat."""
+        """Root still routes resume tailoring as a first-class workflow."""
         client, _ = web_client
         resp = client.get("/")
-        assert "调简历" in resp.text
-        assert "模型自己看状态、选工具、产出结果" in resp.text
+        assert "Tailor" in resp.text
+        assert 'href="/tailor"' in resp.text
 
     # ── W15.17 正确修法 2: app_limit_with_attribution 返结构化 source 信息
     def test_app_limit_attribution_default_fallback(self, tmp_store):
@@ -1793,7 +2035,7 @@ class TestReviewFixes:
         client, _ = web_client
         resp = client.get("/recommended")
         assert resp.status_code == 200
-        assert "待点列表" in resp.text
+        assert "Pipeline · 推荐池" in resp.text
         assert "BOSS 沟通" in resp.text  # daily budget bar
         assert "还没评估过任何岗位" in resp.text
 
@@ -1866,7 +2108,7 @@ class TestReviewFixes:
         assert "性价比低" in text  # 低分岗 (10%)
 
     def test_recommended_excludes_already_applied(self, web_client):
-        """已 'applied' 的岗位不出现在待点列表."""
+        """已 'applied' 的岗位不出现在推荐池."""
         client, store = web_client
         with store.connect() as conn:
             conn.execute(
@@ -1940,8 +2182,8 @@ class TestReviewFixes:
         client, _ = web_client
         resp = client.get("/")
         assert resp.status_code == 200
-        assert "/recommended" in resp.text
-        assert "待点列表" in resp.text
+        assert "/pipeline" in resp.text
+        assert "Pipeline" in resp.text
 
     # ── W15.22: SKILL field-name regression net
     # Pre-W15.22 every score_match / tailor / interview_prep / reflect call

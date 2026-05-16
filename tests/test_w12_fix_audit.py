@@ -398,18 +398,18 @@ def app_setup(tmp_path: Path):
 
 
 class TestDashboardDaemonCard:
-    def test_dashboard_shows_daemon_health(self, app_setup) -> None:
+    def test_dashboard_redirects_to_mission_control(self, app_setup) -> None:
         app, _ = app_setup
-        resp = TestClient(app).get("/dashboard")
+        resp = TestClient(app).get("/dashboard", follow_redirects=False)
+        assert resp.status_code == 301
+        assert resp.headers["location"] == "/"
+
+    def test_mission_control_links_debug_for_daemon_health(self, app_setup) -> None:
+        app, _ = app_setup
+        resp = TestClient(app).get("/")
         assert resp.status_code == 200
-        assert "Daemon 健康" in resp.text
-        # All 7 job names listed
-        for name in ("extract_facts", "discover_jobs", "jd_enrich",
-                     "corpus_classify", "silence_check",
-                     "corpus_refresh", "brief_update"):
-            assert f"<code>{name}</code>" in resp.text
-        # Empty state warning visible
-        assert "所有 daemon 从未运行" in resp.text
+        assert 'href="/debug"' in resp.text
+        assert "Settings / Debug" in resp.text
 
 
 _ = json  # keep import

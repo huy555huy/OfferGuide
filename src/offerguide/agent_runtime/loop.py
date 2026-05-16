@@ -177,9 +177,16 @@ def run(
             finish_reason="budget_exceeded", error_text=str(e),
         )
 
+    work_item_ids = _schema.prepare_trigger_work_items(
+        deps.store, kind=trigger.kind, detail=trigger.detail,
+    )
+
     # Insert harness_runs row early so tools can reference deps.current_run_id
     run_id = _start_run(deps, trigger)
     deps.current_run_id = run_id
+    _schema.attach_work_items_to_run(
+        deps.store, run_id=run_id, work_item_ids=work_item_ids,
+    )
     # Reset cost sink for this run (in case deps was reused across runs)
     deps.extra_cost_usd = 0.0
 
@@ -203,7 +210,11 @@ def run(
     try:
         # Build initial messages — also wrapped in try so a corrupt
         # worldview file doesn't strand the harness_runs row in 'running'.
-        ctx_mgr = ContextManager(llm=deps.llm, memory=deps.memory_store)
+        ctx_mgr = ContextManager(
+            llm=deps.llm,
+            memory=deps.memory_store,
+            store=deps.store,
+        )
         system_msg_text = ctx_mgr.build_initial_system(system_facts=system_facts)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_msg_text},

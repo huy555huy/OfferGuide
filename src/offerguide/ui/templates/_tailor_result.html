@@ -69,7 +69,7 @@
 
     {% if tailored.cannot_fake_warnings %}
     <div class="warning-box">
-        <strong>🛡 自审拒绝（{{ tailored.cannot_fake_warnings|length }} 条）：</strong>
+        <strong>自审拒绝（{{ tailored.cannot_fake_warnings|length }} 条）：</strong>
         <ul style="margin: 0.25rem 0 0; padding-left: 1.25rem;">
             {% for w in tailored.cannot_fake_warnings %}<li>{{ w }}</li>{% endfor %}
         </ul>
@@ -85,7 +85,7 @@
             <h2>Tailored Markdown</h2>
             <button type="button" class="btn ghost"
                     onclick="navigator.clipboard.writeText(document.getElementById('tailored-md').textContent);this.textContent='已复制'">
-                📋 复制
+                复制
             </button>
         </div>
         <div class="tailored-md" id="tailored-md">{{ tailored.tailored_markdown }}</div>
@@ -149,7 +149,7 @@
         {% if tailored.inserted_claims %}
         <div class="card" style="border-left: 4px solid var(--warning);">
             <div class="card-header">
-                <h2 style="font-size: 1.05rem;">📚 你需要准备的事 ({{ tailored.inserted_claims|length }} 条)</h2>
+                <h2 style="font-size: 1.05rem;">你需要准备的事 ({{ tailored.inserted_claims|length }} 条)</h2>
                 <span class="meta">每条都是 agent 加进简历但 master 里 0 痕迹的 claim — 配 5-7 天学习清单</span>
             </div>
             <div class="muted small" style="margin-bottom: 0.875rem; line-height: 1.55;">
@@ -163,7 +163,7 @@
                      {% if ic.source_kind == 'completely_new' %}open{% endif %}>
                 <summary style="cursor: pointer; font-weight: 600;">
                     {% if ic.source_kind == 'completely_new' %}
-                    <span class="pill high" style="font-size: 0.7rem;">⚠ 全新</span>
+                    <span class="pill high" style="font-size: 0.7rem;">全新</span>
                     {% elif ic.source_kind == 'supported_by_project' %}
                     <span class="pill medium" style="font-size: 0.7rem;">○ 项目蕴含</span>
                     {% else %}
@@ -173,17 +173,17 @@
                 </summary>
                 <div style="padding: 0.625rem 0; line-height: 1.6;">
                     <div style="margin-bottom: 0.5rem;">
-                        <strong style="font-size: 0.85rem;">📍 在简历哪儿:</strong>
+                        <strong style="font-size: 0.85rem;">在简历哪儿:</strong>
                         <span class="small">{{ ic.section }}</span>
                     </div>
                     <div style="margin-bottom: 0.5rem;">
-                        <strong style="font-size: 0.85rem;">💡 为什么加:</strong>
+                        <strong style="font-size: 0.85rem;">为什么加:</strong>
                         <span class="small">{{ ic.why_inserted }}</span>
                     </div>
                     {% if ic.prep_plan %}
                     <div style="border-top: 1px solid var(--border-soft); padding-top: 0.625rem;
                                  margin-top: 0.625rem;">
-                        <strong style="font-size: 0.9rem;">📅 学习清单
+                        <strong style="font-size: 0.9rem;">学习清单
                             ({{ ic.prep_plan.days_needed }} 天)</strong>
 
                         {% if ic.prep_plan.actions %}

@@ -14,9 +14,9 @@ which doesn't — so we implement the same **idea** at the harness layer.
    it ran the tool; *output* is dropped (re-fetch if needed).
 3. **Memory tool** for cross-session knowledge — implemented in memory.py.
 
-Plus: every wake auto-injects ``MEMORY.md`` first 200 lines into the
-system context, so the agent always sees its 'home page' without having
-to call ``view`` explicitly.
+Plus: every wake auto-injects ``MEMORY.md`` first 200 lines and
+``agenda.md`` into the system context, so the agent always sees both its
+home page and open-loop ledger without having to call ``view`` explicitly.
 """
 
 from __future__ import annotations
@@ -25,11 +25,15 @@ import datetime as _dt
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .._markdown import MarkdownBlock, render_block, render_markdown_document
 from ..llm import LLMClient, LLMError
+from . import _schema
 from .memory import MemoryStore
+
+if TYPE_CHECKING:
+    from ..memory import Store
 
 log = logging.getLogger(__name__)
 
@@ -152,6 +156,7 @@ class ContextManager:
 
     llm: LLMClient
     memory: MemoryStore
+    store: "Store | None" = None
     policy: ContextPolicy = field(default_factory=ContextPolicy)
     last_prompt_tokens: int = 0
     """Updated after each LLM response. Best estimate of next call's
@@ -167,6 +172,16 @@ class ContextManager:
         ]
         facts = system_facts or SystemFacts()
         blocks.append(facts.to_block())
+
+        goal_snapshot = self._build_goal_snapshot()
+        if goal_snapshot:
+            blocks.append(goal_snapshot)
+
+        work_snapshot = self._build_work_item_snapshot()
+        if work_snapshot:
+            blocks.append(work_snapshot)
+
+        blocks.append(self._build_agenda_block())
 
         memory_dump = self.memory.auto_load_text(max_lines=200)
         if memory_dump.strip():
@@ -192,6 +207,153 @@ class ContextManager:
                 )
             )
         return render_markdown_document(*blocks)
+
+    def _build_agenda_block(self) -> MarkdownBlock:
+        """Render the agent's persistent open-loop ledger every wake.
+
+        The runtime does not decide the next action. It only keeps the
+        responsibility ledger in view so the model can reason from its own
+        commitments instead of treating each wake as a one-shot request.
+        """
+        path = self.memory.root / "agenda.md"
+        if path.exists():
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError as e:
+                return render_block(
+                    "Agent Agenda (开放回路与责任账本)",
+                    lines=(
+                        "agenda.md 读取失败; 这不是没有开放回路。",
+                        f"ERROR: {type(e).__name__}: {e}",
+                    ),
+                )
+            kept = lines[:120]
+            if len(lines) > 120:
+                kept.append(f"... (truncated; {len(lines) - 120} more lines)")
+            body = "\n".join(kept).strip()
+            if body:
+                return render_block(
+                    "Agent Agenda (开放回路与责任账本)",
+                    body=body,
+                    lines=(
+                        "---",
+                        "每次 wake 先用它判断 act / ask / notify / sleep; "
+                        "收束前更新关闭/新增的开放回路。",
+                    ),
+                )
+
+        return render_block(
+            "Agent Agenda (开放回路与责任账本)",
+            body=(
+                "agenda.md 不存在。先创建它, 记录开放回路、阻塞、机会和安静等待项; "
+                "不要把这次 wake 当成一次性请求。"
+            ),
+        )
+
+    def _build_work_item_snapshot(self) -> MarkdownBlock | None:
+        """Render durable agent-owned work items into every wake."""
+        if self.store is None:
+            return None
+        try:
+            items = _schema.list_active_work_items(self.store, limit=8)
+        except Exception as e:
+            log.warning("context: failed to build work item snapshot: %s", e)
+            return render_block(
+                "Agent Work Items (真实开放工作)",
+                lines=(
+                    "工作项读取失败; 这不是没有工作。",
+                    f"ERROR: {type(e).__name__}: {e}",
+                ),
+            )
+        if not items:
+            return render_block(
+                "Agent Work Items (真实开放工作)",
+                lines=(
+                    "- 当前没有 open/in_progress/blocked/waiting 工作项。",
+                    "- 如果这次 trigger 是用户输入或事件, runtime 会先创建对应工作项。",
+                ),
+            )
+
+        lines: list[str] = []
+        for item in items:
+            due = f"; due_at={item.due_at}" if item.due_at is not None else ""
+            job = f"; job_id={item.job_id}" if item.job_id is not None else ""
+            lines.append(
+                f"- WorkItem #{item.id} [{item.status}; p={item.priority}{job}{due}] "
+                f"{item.title}"
+            )
+            if item.summary:
+                lines.append(f"  summary: {item.summary[:220]}")
+            if item.next_action:
+                lines.append(f"  next_action: {item.next_action[:220]}")
+            if item.source_ref:
+                lines.append(f"  source: {item.source_kind}:{item.source_ref}")
+        return render_block(
+            "Agent Work Items (真实开放工作)",
+            lines=tuple(lines),
+        )
+
+    def _build_goal_snapshot(self) -> MarkdownBlock | None:
+        """Render active goals + factual progress for every wake.
+
+        The runtime should not decide what the agent does with the goal; it
+        only supplies fresh state so the model can reason against the user's
+        north star instead of re-deriving priorities from MEMORY.md alone.
+        """
+        if self.store is None:
+            return None
+
+        try:
+            from .. import goals as _goals
+
+            active = _goals.list_active_goals(self.store)
+            lines: list[str] = []
+            if active:
+                for goal in active[:5]:
+                    progress = _goals.compute_progress(self.store, goal)
+                    assessment = progress.assess()
+                    target = goal.target_date.isoformat() if goal.target_date else "未设置"
+                    lines.extend((
+                        f"- Goal #{goal.id}: {goal.title}",
+                        f"  target_date: {target}; target_metric: {goal.target_metric or '未设置'}",
+                        (
+                            "  funnel: "
+                            f"active_apps={progress.apps_active}, "
+                            f"interviews_scheduled={progress.interviews_scheduled}, "
+                            f"offers={progress.offers}, rejects={progress.rejects}"
+                        ),
+                        (
+                            "  heuristic: "
+                            f"{assessment.state} / {assessment.summary} "
+                            f"(confidence={assessment.confidence:.2f}; 这是启发式判断, 不是事实)"
+                        ),
+                    ))
+                if len(active) > 5:
+                    lines.append(f"- 还有 {len(active) - 5} 个 active goals 未展开; 需要时查数据库/页面。")
+            else:
+                lines.append("- 当前没有 active goals。若 worldview/用户输入也没有明确目标, 先问用户确认。")
+
+            observations = _goals.list_active_self_observations(self.store, limit=5)
+            if observations:
+                lines.append("- Agent 自我观察:")
+                for obs in observations:
+                    lines.append(
+                        f"  - [{obs.pattern_kind}] {obs.observation}"
+                    )
+
+            return render_block(
+                "活跃目标与进度快照 (事实 + 明示启发式)",
+                lines=tuple(lines),
+            )
+        except Exception as e:
+            log.warning("context: failed to build goal snapshot: %s", e)
+            return render_block(
+                "活跃目标与进度快照",
+                lines=(
+                    "目标快照读取失败; 这不是没有目标。",
+                    f"ERROR: {type(e).__name__}: {e}",
+                ),
+            )
 
     def estimate_input_tokens(
         self, messages: list[dict[str, Any]],

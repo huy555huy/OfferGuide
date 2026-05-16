@@ -356,7 +356,7 @@ class TestBriefUpdateJob:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Dashboard surfaces briefs
+# Briefs remain data-backed; /dashboard itself is merged into Mission Control.
 # ═══════════════════════════════════════════════════════════════════
 
 
@@ -373,7 +373,7 @@ def app_setup(tmp_path: Path):
 
 
 class TestDashboardBriefs:
-    def test_dashboard_renders_briefs_section(self, app_setup) -> None:
+    def test_briefs_list_still_returns_seeded_brief(self, app_setup) -> None:
         app, store = app_setup
         # Seed a brief
         brief = CompanyBrief(
@@ -386,17 +386,16 @@ class TestDashboardBriefs:
         )
         briefs._upsert(store, "字节跳动", brief)
 
-        resp = TestClient(app).get("/dashboard")
-        assert resp.status_code == 200
-        assert "Agent 公司 brief" in resp.text
-        assert "字节跳动" in resp.text
-        assert "Seed 扩招" in resp.text
-        assert "GRPO 必问" in resp.text
+        rows = briefs.list_briefs(store, limit=10)
+        assert rows[0].company == "字节跳动"
+        assert "Seed 扩招" in rows[0].brief.summary
+        assert any("GRPO 必问" in signal for signal in rows[0].brief.recent_signals)
 
-    def test_dashboard_empty_state_when_no_briefs(self, app_setup) -> None:
+    def test_dashboard_redirects_to_mission_control(self, app_setup) -> None:
         app, _ = app_setup
-        resp = TestClient(app).get("/dashboard")
-        assert "还没有 agent 生成的 brief" in resp.text
+        resp = TestClient(app).get("/dashboard", follow_redirects=False)
+        assert resp.status_code == 301
+        assert resp.headers["location"] == "/"
 
 
 # ═══════════════════════════════════════════════════════════════════

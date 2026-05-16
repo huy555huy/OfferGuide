@@ -40,7 +40,7 @@
             status=<strong>{{ status }}</strong> ·
             {{ iterations }} 次迭代 ·
             {{ latency_ms or 0 }}ms ·
-            critic={{ "%.2f"|format(critic_score) if critic_score is not none else "—" }}
+            quality={{ "%.2f"|format(critic_score) if critic_score is not none else "—" }}
             {% if cost_usd is defined and cost_usd %}
             · 成本 ${{ "%.4f"|format(cost_usd) }}
             {% endif %}
@@ -94,7 +94,7 @@
 <div class="card">
     <div class="card-header">
         <h2>这次 run 注入 evolution 的信号 ({{ signals|length }})</h2>
-        <span class="meta">critic + thumbs + outcome 都会汇总到这里</span>
+        <span class="meta">quality + thumbs + outcome 都会汇总到这里</span>
     </div>
     {% for s in signals %}
     <div style="padding: 0.5rem 0; border-bottom: 1px solid var(--border-soft); font-size: 0.875rem;">
@@ -130,7 +130,7 @@
 
 {% if critic_notes %}
 <div class="card">
-    <div class="card-header"><h2>Critic 评价</h2></div>
+    <div class="card-header"><h2>质量评估</h2></div>
     <div>{{ critic_notes }}</div>
 </div>
 {% endif %}
@@ -173,7 +173,7 @@
                 <div style="font-size:0.72rem;color:var(--text-muted);">{{ ev.payload.result_full_len or preview|length }} 字</div>
                 {% endif %}
             {% elif ev.kind == 'critique' %}
-                <strong>score:</strong>
+                <strong>quality:</strong>
                 <span style="color: {% if ev.payload.score and ev.payload.score >= 0.7 %}var(--success){% elif ev.payload.score and ev.payload.score >= 0.4 %}var(--warning){% else %}var(--danger){% endif %};">{{ "%.2f"|format(ev.payload.score) if ev.payload.score is not none else "—" }}</span><br>
                 {{ ev.payload.notes or '' }}
             {% elif ev.kind == 'final' %}

@@ -10,10 +10,13 @@
 <style>
   body { overflow: hidden; }
   .app {
-    width: 1440px; height: 900px;
+    width: 100vw; height: 100vh;
+    min-width: 1100px;
     display: grid; grid-template-columns: 56px 1fr 360px;
     background: var(--bg);
   }
+  a { color: inherit; text-decoration: none; }
+  .btn { white-space: nowrap; }
 
   /* ── left rail ── */
   .rail {
@@ -37,6 +40,10 @@
     position: relative;
   }
   .rail .item:hover { background: var(--bg-subtle); color: var(--ink); }
+  .rail .item:focus-visible {
+    outline: 2px solid var(--signal);
+    outline-offset: 2px;
+  }
   .rail .item.active { background: var(--bg-subtle); color: var(--ink); }
   .rail .item.active::before {
     content: ""; position: absolute; left: -10px; top: 8px; bottom: 8px;
@@ -61,21 +68,25 @@
     background: var(--bg);
     display: flex; align-items: center; gap: 16px;
   }
-  .breadcrumb { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .breadcrumb {
+    display: flex; align-items: center; gap: 10px; font-size: 13px;
+    flex: 0 0 auto; white-space: nowrap;
+  }
   .breadcrumb .crumb { color: var(--ink-3); }
   .breadcrumb .crumb.active { color: var(--ink); font-weight: 500; }
   .breadcrumb .sep { color: var(--ink-4); }
   .topbar .grow { flex: 1; }
   .search {
-    width: 320px; height: 32px;
+    width: clamp(200px, 22vw, 320px); height: 32px;
     background: var(--bg-elev); border: 1px solid var(--line);
     border-radius: var(--r-sm); padding: 0 10px;
     display: flex; align-items: center; gap: 8px;
     color: var(--ink-3); font-size: 12.5px;
   }
   .search .kbd { margin-left: auto; }
+  .bracket-tag, .uptime, .uptime .seg { flex: 0 0 auto; white-space: nowrap; }
 
-  .scroll { flex: 1; overflow: hidden; padding: 24px 28px 0; }
+  .scroll { flex: 1; overflow: auto; padding: 24px 28px 0; }
 
   /* ── hero greeting ── */
   .hero {
@@ -157,6 +168,8 @@
   }
   .d-row .act { display: flex; gap: 6px; flex-direction: column; align-items: stretch; }
   .d-row .act .btn { justify-content: center; }
+  .d-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .d-actions form { display: inline-flex; gap: 6px; flex-wrap: wrap; }
 
   /* ── three-column work area ── */
   .work {
@@ -192,6 +205,7 @@
     padding: 16px;
   }
   .paste-jd .ta {
+    width: 100%;
     background: var(--bg);
     border: 1px dashed var(--line-strong);
     border-radius: var(--r-sm);
@@ -201,6 +215,12 @@
     font-size: 12.5px;
     line-height: 1.6;
     cursor: text;
+    font-family: inherit;
+    resize: vertical;
+  }
+  .paste-jd .ta:focus {
+    outline: 2px solid rgba(22, 54, 92, 0.22);
+    border-color: var(--signal);
   }
   .paste-jd .ta .hint {
     color: var(--ink-4); font-size: 12px;
@@ -246,6 +266,28 @@
   }
   .pool .row .sc.hi { color: var(--ok); }
   .pool .row .sc.lo { color: var(--bad); }
+  .result-box {
+    margin: 12px 16px 16px;
+    padding: 12px;
+    border: 1px solid var(--line-soft);
+    border-radius: var(--r-sm);
+    background: var(--bg);
+    font-size: 12.5px;
+    color: var(--ink-2);
+    display: none;
+  }
+  .result-box.visible { display: block; }
+  .result-box strong { color: var(--ink); }
+  .result-box .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+  .artifact {
+    display: block;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .artifact:last-child { border-bottom: none; }
+  .artifact .title { font-size: 12.5px; color: var(--ink); }
+  .artifact .meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-4); margin-top: 2px; }
 
   /* ── right rail: agent live ── */
   .agent {
@@ -306,7 +348,7 @@
   }
 
   .agent-log {
-    flex: 1; overflow: hidden;
+    flex: 1; overflow: auto;
     padding: 14px 18px;
   }
   .agent-log .section-label {
@@ -360,6 +402,43 @@
     color: var(--ink); font-weight: 600; font-family: var(--font-mono);
   }
   .agent-foot .sep { color: var(--ink-4); }
+  @media (max-width: 1180px) {
+    .app { min-width: 0; grid-template-columns: 52px minmax(0, 1fr); }
+    .agent { display: none; }
+    .work { grid-template-columns: 1fr; }
+    .search { display: none; }
+    .uptime { display: none; }
+  }
+  @media (max-width: 640px) {
+    .topbar { padding: 0 18px; gap: 10px; }
+    .bracket-tag { font-size: 10px; }
+    .scroll { padding: 24px 20px 0; }
+    .hero {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .hero h1 { font-size: 22px; max-width: 240px; }
+    .hero .quick { flex-wrap: wrap; }
+    .decisions header {
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+    .d-row {
+      grid-template-columns: 32px minmax(0, 1fr);
+      gap: 10px;
+      align-items: flex-start;
+    }
+    .d-row .act {
+      grid-column: 2;
+      flex-direction: row;
+      align-items: flex-start;
+    }
+    .pool .row {
+      grid-template-columns: 28px minmax(0, 1fr) auto;
+    }
+    .pool .row .tag { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -367,27 +446,27 @@
 
   <!-- ╭─ rail ─╮ -->
   <aside class="rail">
-    <div class="logo">O</div>
-    <div class="item active" title="Mission Control">
+    <a class="logo" href="/" title="OfferGuide">O</a>
+    <a class="item active" href="/" title="Mission Control" aria-label="Mission Control">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"></path></svg>
-    </div>
-    <div class="item" title="Pipeline">
+    </a>
+    <a class="item" href="/pipeline" title="Pipeline / 投递" aria-label="Pipeline">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="5" height="16" rx="1"></rect><rect x="10" y="4" width="5" height="10" rx="1"></rect><rect x="17" y="4" width="4" height="6" rx="1"></rect></svg>
       <span class="dot-badge"></span>
-    </div>
-    <div class="item" title="Tailor">
+    </a>
+    <a class="item" href="/tailor" title="Tailor / 简历" aria-label="Tailor">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 4h12l4 4v12H4z"></path><path d="M8 8h6M8 12h8M8 16h5"></path></svg>
-    </div>
-    <div class="item" title="Interview">
+    </a>
+    <a class="item" href="/interviews" title="Interview / 面经" aria-label="Interview">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 5h16v10H8l-4 4z"></path><circle cx="9" cy="10" r="0.8" fill="currentColor"></circle><circle cx="12" cy="10" r="0.8" fill="currentColor"></circle><circle cx="15" cy="10" r="0.8" fill="currentColor"></circle></svg>
-    </div>
-    <div class="item" title="Lab">
+    </a>
+    <a class="item" href="/evolution" title="Lab / SKILL 进化" aria-label="Lab">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 3v6L4 19a2 2 0 0 0 1.7 3h12.6A2 2 0 0 0 20 19L15 9V3"></path><path d="M8 3h8"></path></svg>
-    </div>
+    </a>
     <div class="spacer"></div>
-    <div class="item" title="Settings">
+    <a class="item" href="/debug" title="Settings / Debug" aria-label="Settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path></svg>
-    </div>
+    </a>
   </aside>
 
   <!-- ╭─ main ─╮ -->
@@ -425,13 +504,13 @@
           <div class="sub">{{ hero_subtitle }}</div>
         </div>
         <div class="quick">
-          <button class="btn"><span class="dot ok"></span>系统正常</button>
-          <button class="btn signal">查看 3 项决定 →</button>
+          <button class="btn" type="button"><span class="dot ok"></span>系统正常</button>
+          <a class="btn signal" href="#interrupts">查看 {{ interrupts_count }} 项决定 →</a>
         </div>
       </div>
 
       <!-- decisions -->
-      <div class="decisions">
+      <div class="decisions" id="interrupts">
         <header>
           <h2>需决定 · <span style="font-family:var(--font-mono); font-size:12px; color:var(--signal); letter-spacing:0.05em;">INTERRUPTS</span></h2>
           <span class="count">{{ interrupts_count }}</span>
@@ -439,7 +518,7 @@
           <span class="dim" style="font-size:11.5px">Agent 已停在这里，等你确认后继续 · <span class="kbd" style="font-size:10px">↵</span> 处理 · <span class="kbd" style="font-size:10px">esc</span> snooze</span>
         </header>
         {% for d in interrupts %}
-        <a class="d-row" href="{{ d.href }}" style="text-decoration:none;color:inherit;">
+        <div class="d-row" id="inbox-row-{{ d.id }}">
           <div class="score"{% if d.score is none %} style="color:var(--signal)"{% endif %}>{{ d.score if d.score is not none else "↑" }}{% if d.score is not none %}<small>MATCH</small>{% endif %}</div>
           <div class="body">
             <div class="title">{{ d.title }}</div>
@@ -447,11 +526,26 @@
               {% for m in d.meta %}<span{% if m.cls %} class="{{ m.cls }}"{% endif %}>{{ m.text }}</span>{% if not loop.last %}<span class="sep">·</span>{% endif %}{% endfor %}
             </div>
             {% if d.ask %}<div class="ask">{{ d.ask }}</div>{% endif %}
+            <div class="d-actions">
+              {% if d.kind == "question" and d.question_options %}
+              <form method="post" action="/inbox/{{ d.id }}/answer">
+                {% for opt in d.question_options %}
+                <button class="btn signal" name="option_id" value="{{ opt.id }}">{{ opt.label }}</button>
+                {% endfor %}
+              </form>
+              {% else %}
+              <form method="post" action="/inbox/{{ d.id }}/decide">
+                <button class="btn signal" name="decision" value="approved">批准</button>
+                <button class="btn" name="decision" value="rejected">拒绝</button>
+                <button class="btn ghost" name="decision" value="dismissed">稍后</button>
+              </form>
+              {% endif %}
+            </div>
           </div>
           <div class="act">
-            {% for a in d.actions %}<button class="btn{% if a.kind %} {{ a.kind }}{% endif %}">{{ a.label }}</button>{% endfor %}
+            <span class="tag signal">inbox #{{ d.id }}</span>
           </div>
-        </a>
+        </div>
         {% endfor %}
         {% if not interrupts %}
         <div style="padding:32px 18px; text-align:center; color:var(--ink-3); font-size:13px;">
@@ -471,27 +565,26 @@
             <div class="grow"></div>
             <span class="more">历史评估 →</span>
           </header>
-          <div class="paste-jd">
-            <div class="ta">
-              <span class="hint">把岗位描述粘到这里 · 支持 BOSS / 牛客 / 招聘官网格式 / 不限长度</span>
-              <span class="typed">⌘ V 粘贴即开始 ·  也可以直接拖拽 .txt 文件</span>
-            </div>
+          <form class="paste-jd" id="evaluate-form">
+            <textarea class="ta" id="evaluate-input" required minlength="200" {% if not runtime_ready %}disabled{% endif %}
+              placeholder="把岗位描述粘到这里 · 支持 BOSS / 牛客 / 招聘官网格式 · 至少 200 字"></textarea>
             <div class="footer">
               <span class="kbd">⌘ V</span>
-              <span class="hint">粘贴自动触发；也可以截图 ⌘ + Shift + 4 后粘进来</span>
+              <span class="hint">{% if runtime_ready %}粘贴后点评估；会写入候选池和事件日志{% else %}未配置 LLM key，暂时不能在线评估{% endif %}</span>
               <div class="grow"></div>
-              <button class="btn signal">评估</button>
+              <button class="btn signal" id="evaluate-submit" type="submit" {% if not runtime_ready %}disabled{% endif %}>评估</button>
             </div>
-          </div>
+          </form>
+          <div class="result-box" id="evaluate-result"></div>
         </div>
 
         <!-- recent pool -->
         <div class="panel pool">
           <header>
-            <h3>新进推荐池</h3>
+            <h3>新进候选</h3>
             <span class="tag">今日 +{{ jobs_today_count }}</span>
             <div class="grow"></div>
-            <a class="more" href="/pipeline">查看全部 →</a>
+            <a class="more" href="/pipeline">Pipeline →</a>
           </header>
           {% for j in recent_jobs %}
           <a class="row" href="/jobs/{{ j.id }}/apply-pack" style="text-decoration:none;color:inherit;">
@@ -508,6 +601,26 @@
           {% endif %}
         </div>
 
+      </div>
+
+      <div class="panel" style="margin-bottom:22px;">
+        <header>
+          <h3>最近产物</h3>
+          <span class="tag">artifacts</span>
+          <div class="grow"></div>
+          <a class="more" href="/project-vault">项目事实档案 →</a>
+        </header>
+        <div style="padding: 0 16px;">
+        {% for a in recent_artifacts %}
+          <a class="artifact" href="{{ a.href }}">
+            <div class="title">{{ a.title }}</div>
+            <div class="meta">{{ a.time }} · {{ a.kind }}</div>
+          </a>
+        {% endfor %}
+        {% if not recent_artifacts %}
+          <div style="padding:16px 0; color:var(--ink-3); font-size:12.5px;">暂无新产物。agent 保存项目档案、投递包或面试准备后会出现在这里。</div>
+        {% endif %}
+        </div>
       </div>
 
     </div>
@@ -527,6 +640,18 @@
     <div class="agent-now">
       <div class="label">NOW</div>
       <div class="task">{{ agent_now_task }}</div>
+      <form id="agent-chat-form" style="margin-top:12px;">
+        <textarea id="agent-chat-input" rows="3" {% if not runtime_ready %}disabled{% endif %}
+          placeholder="和 Agent 对话：帮我找岗位 / 明天面试准备 / 调简历"
+          style="width:100%;resize:vertical;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--bg-elev);padding:8px;font-family:inherit;font-size:12.5px;"></textarea>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+          <span class="kbd">Enter</span>
+          <span class="dim" style="font-size:11.5px;">发送给 Agent · trigger_kind=user_input</span>
+          <div style="flex:1"></div>
+          <button class="btn signal sm" id="agent-chat-submit" type="submit" {% if not runtime_ready %}disabled{% endif %}>发送</button>
+        </div>
+        <div id="agent-chat-result" class="result-box" style="margin:10px 0 0;"></div>
+      </form>
       {% if agent_now_progress is not none %}
       <div class="progress" style="--progress: {{ agent_now_progress }}%"></div>
       <div class="progress-meta">
@@ -568,5 +693,80 @@
   </aside>
 
 </div>
+<script>
+const evaluateForm = document.getElementById("evaluate-form");
+const evaluateInput = document.getElementById("evaluate-input");
+const evaluateResult = document.getElementById("evaluate-result");
+if (evaluateForm) {
+  evaluateForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = evaluateInput.value.trim();
+    if (text.length < 200) {
+      evaluateResult.className = "result-box visible";
+      evaluateResult.textContent = "JD 文本太短，至少粘完整 200 字。";
+      return;
+    }
+    const button = document.getElementById("evaluate-submit");
+    button.disabled = true;
+    evaluateResult.className = "result-box visible";
+    evaluateResult.textContent = "评估中...";
+    try {
+      const response = await fetch("/api/evaluate-job", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({url_or_text: text}),
+      });
+      const data = await response.json();
+      if (!response.ok || data.user_facing_error) {
+        throw new Error(data.user_facing_error || data.detail || "评估失败");
+      }
+      const score = data.score == null ? "未评分" : Math.round(data.score) + " 分";
+      evaluateResult.innerHTML = `
+        <strong>${data.company || "未指定公司"} · ${data.title || "粘贴的 JD"}</strong><br>
+        匹配度：${score} · job#${data.job_id}<br>
+        <span class="dim">${data.score_reasoning || "已入库，可继续生成投递包或微调简历。"}</span>
+        <div class="actions">
+          <a class="btn signal" href="/jobs/${data.job_id}/apply-pack">准备投递</a>
+          <a class="btn" href="/tailor?job_id=${data.job_id}">调简历</a>
+          <a class="btn ghost" href="/pipeline">看 Pipeline</a>
+        </div>`;
+    } catch (error) {
+      evaluateResult.textContent = error.message || String(error);
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+const chatForm = document.getElementById("agent-chat-form");
+const chatInput = document.getElementById("agent-chat-input");
+const chatResult = document.getElementById("agent-chat-result");
+if (chatForm) {
+  chatForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const message = chatInput.value.trim();
+    if (!message) return;
+    const button = document.getElementById("agent-chat-submit");
+    button.disabled = true;
+    chatResult.className = "result-box visible";
+    chatResult.textContent = "Agent 处理中...";
+    try {
+      const response = await fetch("/api/home/chat", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({message}),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Agent 处理失败");
+      chatResult.innerHTML = `<strong>执行记录 #${data.run_id}</strong><br>${data.final_text || "完成。"}`;
+      chatInput.value = "";
+    } catch (error) {
+      chatResult.textContent = error.message || String(error);
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+</script>
 </body>
 </html>

@@ -24,6 +24,7 @@ from ..config import Settings
 from ..llm import LLMClient
 from ..memory import Store
 from ..tools.registry import registry as _registry
+from . import _schema
 from .memory import MEMORY_TOOL_SCHEMA, MemoryStore
 
 if TYPE_CHECKING:
@@ -92,6 +93,71 @@ class AgentRuntimeDeps:
 
 
 # ── Tool schemas (OpenAI function-calling format) ──────────────────
+
+
+_TOOL_UPDATE_WORK_ITEM: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "update_work_item",
+        "description": (
+            "Update the durable work item you actually advanced in this run. "
+            "Use it after real work, not as a planning ritual. Mark done when "
+            "the item is genuinely resolved; waiting when you are waiting on "
+            "user/external time; blocked when a missing fact prevents progress; "
+            "dismissed when the item is no longer worth doing. For waiting or "
+            "blocked, include the next concrete action."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "work_item_id": {
+                    "type": "integer",
+                    "description": "ID from the Agent Work Items context block.",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "in_progress",
+                        "waiting",
+                        "blocked",
+                        "done",
+                        "dismissed",
+                    ],
+                },
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "What changed because of your work. For done, state "
+                        "the result; for blocked/waiting, state the current state."
+                    ),
+                },
+                "next_action": {
+                    "type": "string",
+                    "description": (
+                        "Required for waiting/blocked/in_progress: what must "
+                        "happen next, by whom, and what evidence will unblock it."
+                    ),
+                },
+                "evidence": {
+                    "type": "object",
+                    "description": (
+                        "Concrete pointers: job_id, skill_run_id, event_id, "
+                        "inbox_id, page path, wake id, source URL, or reason."
+                    ),
+                    "additionalProperties": True,
+                },
+                "due_seconds": {
+                    "type": "integer",
+                    "description": (
+                        "Optional delay from now for ordering this item. "
+                        "If a real wake is needed, also call schedule_next_wake."
+                    ),
+                },
+            },
+            "required": ["work_item_id", "status", "summary"],
+        },
+    },
+}
 
 
 _TOOL_DISCOVER_JOBS: dict[str, Any] = {
@@ -635,6 +701,8 @@ _TOOL_RUN_RELEASE_CYCLE: dict[str, Any] = {
 _MAIN_TOOL_ENTRIES: list[tuple[dict[str, Any], str]] = [
     # Memory comes first — it's the agent's brain
     (MEMORY_TOOL_SCHEMA, "_exec_memory"),
+    # Durable ownership — close/defer/block real work, not formal decisions
+    (_TOOL_UPDATE_WORK_ITEM, "_exec_update_work_item"),
     # Active (agent should proactively call)
     (_TOOL_SEARCH_OFFICIAL_JOBS, "_exec_search_official_jobs"),
     (_TOOL_DISCOVER_JOBS, "_exec_discover_jobs"),
@@ -695,6 +763,68 @@ def dispatch(name: str, args: dict[str, Any], deps: AgentRuntimeDeps) -> str:
 
 def _exec_memory(args: dict[str, Any], deps: AgentRuntimeDeps) -> str:
     return deps.memory_store.execute(args)
+
+
+def _exec_update_work_item(args: dict[str, Any], deps: AgentRuntimeDeps) -> str:
+    item_id = args.get("work_item_id")
+    if not isinstance(item_id, int):
+        return "ERROR: update_work_item requires integer work_item_id"
+    status = (args.get("status") or "").strip()
+    allowed = {"in_progress", "waiting", "blocked", "done", "dismissed"}
+    if status not in allowed:
+        return (
+            "ERROR: update_work_item status must be one of "
+            "in_progress, waiting, blocked, done, dismissed"
+        )
+    summary = (args.get("summary") or "").strip()
+    if not summary:
+        return "ERROR: update_work_item requires summary"
+    next_action = (args.get("next_action") or "").strip()
+    if status in {"in_progress", "waiting", "blocked"} and not next_action:
+        return f"ERROR: update_work_item status={status} requires next_action"
+    evidence = args.get("evidence")
+    if evidence is None:
+        evidence = {}
+    if not isinstance(evidence, dict):
+        return "ERROR: update_work_item evidence must be an object"
+
+    due_at = None
+    due_seconds = args.get("due_seconds")
+    if due_seconds is not None:
+        if not isinstance(due_seconds, int):
+            return "ERROR: update_work_item due_seconds must be an integer"
+        if due_seconds < 60:
+            return "ERROR: update_work_item due_seconds must be ≥ 60"
+        if due_seconds > 30 * 86400:
+            return "ERROR: update_work_item due_seconds must be ≤ 30 days (2592000)"
+        due_at = _seconds_from_now_julianday(due_seconds)
+
+    try:
+        item = _schema.update_work_item(
+            deps.store,
+            work_item_id=item_id,
+            status=status,
+            summary=summary,
+            evidence=evidence,
+            next_action=next_action,
+            last_run_id=deps.current_run_id,
+            due_at=due_at,
+        )
+    except KeyError:
+        return f"ERROR: work item {item_id} not found"
+    except ValueError as e:
+        return f"ERROR: {e}"
+
+    if item.status in {"done", "dismissed"}:
+        return (
+            f"OK work_item#{item.id} {item.status}: closed. "
+            f"summary={item.summary[:220]!r}"
+        )
+    due = f", due_at={item.due_at}" if item.due_at is not None else ""
+    return (
+        f"OK work_item#{item.id} {item.status}{due}: "
+        f"next_action={item.next_action[:220]!r}"
+    )
 
 
 def _exec_discover_jobs(args: dict[str, Any], deps: AgentRuntimeDeps) -> str:

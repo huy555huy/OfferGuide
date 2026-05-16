@@ -1,5 +1,10 @@
 {% extends "base.html" %}
-{% block title %}OfferGuide — 转化漏斗{% endblock %}
+{% block title %}OfferGuide — Pipeline 转化概览{% endblock %}
+{% block crumb %}Pipeline{% endblock %}
+{% block topbar_tags %}
+<span class="bracket-tag dim"><span>funnel</span></span>
+{% if stages %}<span class="bracket-tag signal"><span>{{ stages[0].count }} applications</span></span>{% endif %}
+{% endblock %}
 {% block content %}
 
 <style>
@@ -37,27 +42,23 @@
 
 <div class="page-title">
     <div>
-        <h1>转化漏斗</h1>
+        <h1>Pipeline · 转化概览</h1>
         <p>
             投递 → 提交 → HR 看 → HR 回复 → 进面试 → offer.
-            状态来自 application_events 表 (你在 /apply/&lt;id&gt; 标记的)。
-            数据少看 funnel 没意义, 至少 10+ 投递再看转化才稳定。
+            状态来自 application_events 表。数据少时只当健康检查, 至少 10+ 投递再看转化才稳定。
         </p>
     </div>
 </div>
 
 {% if stages[0].count == 0 %}
 <div class="empty">
-    <div class="empty-icon">📊</div>
     <div class="empty-title">还没投递记录</div>
     <div class="empty-hint">
-        投递 0 个时漏斗看不出啥。流程是:<br>
-        <strong>/agent</strong> 让 agent 找/评 jobs → <strong>/apply/&lt;id&gt;</strong> 跑投递包 → 用浏览器扩展辅助投 → 回 <strong>/apply/&lt;id&gt;</strong> 标 <em>已提交</em><br>
-        漏斗会随你标 7 个 lifecycle 状态自动累积。
+        投递 0 个时这里看不出啥。先让 agent 找/评岗位, 再从 Pipeline 进入投递包并标记状态。
     </div>
     <div class="empty-action">
         <a href="/" class="btn">回首页</a>
-        <a href="/agent" class="btn secondary">去找几个 jobs</a>
+        <a href="/pipeline" class="btn secondary">去 Pipeline</a>
     </div>
 </div>
 {% else %}

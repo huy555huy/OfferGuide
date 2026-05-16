@@ -1,211 +1,358 @@
 {% extends "base.html" %}
 {% block title %}OfferGuide — Pipeline{% endblock %}
+{% block crumb %}Pipeline{% endblock %}
+{% block topbar_tags %}
+<span class="bracket-tag dim"><span>{{ pipeline.total_active }} active</span></span>
+<span class="bracket-tag signal"><span>{{ pipeline.counts.applied }} applied</span></span>
+{% endblock %}
 {% block content %}
 
 <style>
-    /* Kanban board layout */
-    .kanban {
+    .pipeline-page {
+        height: calc(100vh - 106px);
+        min-height: 620px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+    .pipeline-head {
         display: grid;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
-        gap: 0.625rem;
-        margin-top: 0.75rem;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: end;
+        gap: 20px;
+        margin-bottom: 14px;
+    }
+    .pipeline-head h1 {
+        margin: 0;
+        font-family: var(--font-serif);
+        font-size: 24px;
+        font-weight: 500;
+    }
+    .pipeline-head .sub {
+        margin-top: 6px;
+        color: var(--ink-3);
+        font-size: 12.5px;
+    }
+    .pipeline-head .filters {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+    }
+    .funnel {
+        background: var(--bg-elev);
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        padding: 14px 18px;
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        margin-bottom: 14px;
+    }
+    .fcol {
+        padding: 0 14px;
+        border-right: 1px solid var(--line-soft);
+    }
+    .fcol:first-child { padding-left: 0; }
+    .fcol:last-child { border-right: 0; padding-right: 0; }
+    .fcol .label {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--ink-3);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+    }
+    .fcol .val {
+        margin-top: 6px;
+        font-family: var(--font-serif);
+        font-size: 26px;
+        font-weight: 600;
+        line-height: 1.1;
+    }
+    .fcol.signal .val { color: var(--signal); }
+    .fcol .delta {
+        margin-top: 4px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--ink-3);
+    }
+    .manual-jd {
+        margin-bottom: 14px;
+        padding: 0;
+    }
+    .manual-jd > summary {
+        padding: 12px 16px;
+        color: var(--ink-2);
+        font-size: 12.5px;
+        border-bottom: 1px solid transparent;
+    }
+    .manual-jd[open] > summary { border-bottom-color: var(--line-soft); }
+    .manual-jd form { padding: 14px 16px 16px; }
+    .manual-jd .form-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 8px;
+    }
+    .board-wrap {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+    }
+    .board {
+        height: 100%;
+        display: grid;
+        grid-template-columns: repeat(5, minmax(190px, 1fr));
+        gap: 14px;
     }
     .kanban-col {
-        background: var(--bg-subtle);
-        border: 1px solid var(--border-soft);
-        border-radius: var(--radius);
-        padding: 0.625rem;
-        min-height: 320px;
-        display: flex; flex-direction: column;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        background: rgba(232, 227, 213, 0.4);
+        border: 1px solid var(--line-soft);
+        border-radius: var(--r);
+        overflow: hidden;
     }
     .kanban-col-head {
-        display: flex; align-items: baseline; gap: 0.5rem;
-        padding: 0 0.25rem 0.5rem;
-        border-bottom: 1px solid var(--border-soft);
-        margin-bottom: 0.5rem;
+        padding: 12px 14px 10px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border-bottom: 1px solid var(--line-soft);
+        background: rgba(255,255,255,0.5);
     }
     .kanban-col-head .name {
         font-family: var(--font-serif);
-        font-size: 0.95rem; font-weight: 600;
-        letter-spacing: -0.01em;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
     }
     .kanban-col-head .count {
         font-family: var(--font-mono);
-        font-size: 0.75rem; color: var(--text-muted);
-        background: var(--bg-elev); padding: 0.05rem 0.45rem;
-        border-radius: 999px; border: 1px solid var(--border-soft);
+        font-size: 11px;
+        color: var(--ink-3);
+        background: var(--bg-elev);
+        padding: 1px 6px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
     }
-    .kanban-col[data-stage="contacted"] { border-top: 3px solid var(--warning); }
-    .kanban-col[data-stage="interview"] { border-top: 3px solid var(--primary); }
-    .kanban-col[data-stage="terminal"]  { opacity: 0.85; }
-
     .kanban-cards {
-        display: flex; flex-direction: column; gap: 0.5rem;
-        flex: 1; min-height: 60px;
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        padding: 10px 10px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
     }
     .kanban-empty {
-        font-size: 0.78rem; color: var(--text-dim);
-        text-align: center; padding: 1rem 0.25rem;
-        font-style: italic;
-        border: 1px dashed var(--border);
-        border-radius: var(--radius-sm);
+        font-size: 12px;
+        color: var(--ink-4);
+        text-align: center;
+        padding: 18px 8px;
+        border: 1px dashed var(--line);
+        border-radius: var(--r-sm);
+        background: rgba(255,255,255,0.35);
     }
-
-    /* Card body — defined here, used both inline + by HTMX swap */
     .kcard {
         background: var(--bg-elev);
-        border: 1px solid var(--border);
-        border-radius: var(--radius-sm);
-        padding: 0.625rem 0.75rem;
-        font-size: 0.8rem;
-        position: relative;
+        border: 1px solid var(--line);
+        border-radius: var(--r-sm);
+        padding: 11px 12px;
+        box-shadow: var(--shadow-1);
         transition: border-color 0.12s, transform 0.06s;
     }
     .kcard:hover {
-        border-color: var(--primary);
+        border-color: rgba(22, 54, 92, 0.45);
         transform: translateY(-1px);
     }
     .kcard .company {
-        font-family: var(--font-serif); font-weight: 600;
-        font-size: 0.92rem; color: var(--text);
-        margin-bottom: 0.125rem;
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 1.35;
+        color: var(--ink);
     }
     .kcard .title {
-        color: var(--text-muted); font-size: 0.78rem;
-        line-height: 1.35; overflow: hidden;
-        display: -webkit-box; -webkit-line-clamp: 2;
+        margin-top: 3px;
+        color: var(--ink-3);
+        font-size: 11.5px;
+        line-height: 1.35;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
     }
     .kcard .badges {
-        display: flex; gap: 0.25rem; align-items: center;
-        margin-top: 0.5rem; flex-wrap: wrap;
+        display: flex;
+        gap: 4px;
+        flex-wrap: wrap;
+        margin-top: 7px;
     }
     .kcard .age {
-        font-family: var(--font-mono); font-size: 0.7rem;
-        color: var(--text-muted);
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--ink-3);
     }
-    .kcard .age.urgent { color: var(--danger); font-weight: 600; }
-
-    /* Inline transition menu — show on hover for desktop, always for touch */
+    .kcard .age.urgent { color: var(--bad); font-weight: 600; }
     .kcard .menu {
-        margin-top: 0.5rem;
-        display: flex; gap: 0.25rem; flex-wrap: wrap;
-        opacity: 0; transition: opacity 0.15s;
+        margin-top: 8px;
+        padding-top: 7px;
+        border-top: 1px dashed var(--line);
+        display: flex;
+        gap: 5px;
+        flex-wrap: wrap;
+        opacity: 0;
+        transition: opacity 0.15s;
     }
     .kcard:hover .menu, .kcard:focus-within .menu { opacity: 1; }
-    .kcard .menu form { display: inline; }
-    .kcard .menu button {
-        background: var(--bg-subtle); color: var(--text-muted);
-        border: 1px solid var(--border-soft);
-        padding: 0.18rem 0.45rem; font-size: 0.7rem;
-        border-radius: var(--radius-sm); cursor: pointer;
-        font-weight: 500;
+    .kcard .menu form { display: inline-flex; }
+    .kcard .menu button,
+    .kcard .menu .btn {
+        padding: 4px 8px;
+        font-size: 11px;
     }
-    .kcard .menu button:hover {
-        background: var(--primary-soft); color: var(--primary);
-        border-color: var(--primary-soft);
-    }
-    .kcard .menu button.danger:hover {
-        background: var(--danger-soft); color: var(--danger);
-        border-color: var(--danger-soft);
-    }
-
     .kcard.no-events { border-style: dashed; }
-
-    @media (max-width: 920px) {
-        .kanban {
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            overflow-x: auto;
-        }
+    .narrate {
+        margin-top: 14px;
+        padding: 11px 14px;
+        background: var(--bg-elev);
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 12.5px;
+        color: var(--ink-2);
     }
-    @media (max-width: 600px) {
-        .kanban {
-            grid-template-columns: repeat(5, 220px);
-            overflow-x: auto;
-        }
+    .narrate .av {
+        width: 22px;
+        height: 22px;
+        border-radius: 6px;
+        background: var(--ink);
+        color: var(--ink-on-dark);
+        display: grid;
+        place-items: center;
+        font-family: var(--font-serif);
+        font-weight: 700;
+        font-size: 11px;
+        flex-shrink: 0;
+    }
+    .narrate em {
+        font-family: var(--font-mono);
+        font-style: normal;
+        font-size: 11.5px;
+        padding: 0 4px;
+        background: var(--bg-subtle);
+        border-radius: 3px;
+    }
+    .narrate .grow { flex: 1; }
+    .narrate .right {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--ink-3);
+    }
+    @media (max-width: 1180px) {
+        .pipeline-page { height: auto; overflow: visible; }
+        .board-wrap { overflow-x: auto; }
+        .board { min-height: 520px; width: 1100px; }
+        .manual-jd .form-grid { grid-template-columns: 1fr; }
     }
 </style>
 
-<div class="page-title">
-    <div>
-        <h1>Pipeline · 投递战况</h1>
-        <p>{{ pipeline.total_active }} 个 active · {{ pipeline.counts.terminal }} 个已结束。每张卡片悬停可见操作按钮 — 一键推进状态，状态自动同步到 application_events。</p>
-    </div>
-    <span class="muted small">JD 由 agent 调官方已验证源、搜索和浏览器扩展收集；手动粘贴只是 fallback</span>
-</div>
-
-{# W14.12 — manual paste demoted from "primary path" to "occasional fallback".
-   Per user feedback: "agent should auto-find jobs; manual paste is for the
-   one-off case where I just saw a great JD and want to skip the search round
-   trip." Closed by default (was auto-open in W14.11) so it doesn't grab focus
-   away from the kanban. #}
-<details class="card" style="margin-bottom: 1rem;">
-    <summary style="cursor: pointer; font-weight: 600; font-size: 0.92rem; color: var(--text-muted);">+ 偶尔手动粘一条 JD (agent 没找到的, 你自己看到了直接粘省得再查)</summary>
-    <form method="post" action="/api/pipeline/jobs/manual" style="margin-top: 0.75rem;">
-        <label class="field">
-            <span class="label-text">JD 原文 (≥ 50 字, 必填) — 整段复制过来即可, 不用整理</span>
-            <textarea name="raw_text" required minlength="50" rows="8"
-                      placeholder="工作内容: 1. 设计并开发 ...&#10;岗位要求: 1. 计算机/软件相关专业 ..."></textarea>
-        </label>
-        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0.5rem; margin-top:0.5rem;">
-            <label class="field">
-                <span class="label-text">公司 (可选, 强烈建议填)</span>
-                <input type="text" name="company" placeholder="字节跳动">
-            </label>
-            <label class="field">
-                <span class="label-text">岗位 title (可选)</span>
-                <input type="text" name="title" placeholder="AI Agent 暑期实习">
-            </label>
-            <label class="field">
-                <span class="label-text">地点 (可选)</span>
-                <input type="text" name="location" placeholder="北京 / 上海">
-            </label>
+<div class="pipeline-page">
+    <div class="pipeline-head">
+        <div>
+            <h1>Pipeline · 投递战况</h1>
+            <div class="sub">{{ pipeline.total_active }} 个 active · {{ pipeline.counts.terminal }} 个已结束。状态推进会写入 application_events。</div>
         </div>
-        <label class="field" style="margin-top: 0.5rem;">
-            <span class="label-text">原 URL (可选, 后面方便点回去)</span>
-            <input type="text" name="url" placeholder="https://www.zhipin.com/...">
-        </label>
-        <div class="actions" style="margin-top: 0.75rem;">
-            <button type="submit">→ 添加并直接生成投递包</button>
-            <span class="muted small">添加后跳到 /apply 页, agent 立刻能基于这条 JD 工作 (生成投递包 / 微调简历 / 评估匹配)</span>
-        </div>
-    </form>
-</details>
-
-{# Always render the 5-column kanban. Empty DB → all columns empty,
-   each shows "空" placeholder. The empty hint above the kanban explains
-   the three paths to get JDs in. #}
-{% if pipeline.total_active == 0 and pipeline.counts.terminal == 0 %}
-<div class="empty" style="margin-bottom: 1rem;">
-    <div class="empty-icon">📋</div>
-    <div class="empty-title">Pipeline 空, agent 第一轮搜索还没跑 (默认 30 分钟内)</div>
-    <div class="empty-hint">
-        scheduler 后台会唤醒 agent，让它用已验证官方源、搜索和扩展入口找符合 north star 的 JD；能抓就入库，遇到登录墙就如实记录限制。<br>
-        等不及? <a href="/agent">手动唤醒 agent</a> 立刻跑一次, 或上面粘个 JD 自己开干。
-    </div>
-</div>
-{% endif %}
-
-<div class="kanban">
-    {% for stage_key, stage_label in pipeline_stages %}
-    <div class="kanban-col" data-stage="{{ stage_key }}" id="col-{{ stage_key }}">
-        <div class="kanban-col-head">
-            <span class="name">{{ stage_label }}</span>
-            <span class="count">{{ pipeline.counts[stage_key] }}</span>
-        </div>
-        <div class="kanban-cards">
-            {% if pipeline.columns[stage_key] %}
-                {% for card in pipeline.columns[stage_key] %}
-                {% with stage_key=stage_key, card=card %}
-                {% include "_kanban_card.html" %}
-                {% endwith %}
-                {% endfor %}
-            {% else %}
-            <div class="kanban-empty">空</div>
-            {% endif %}
+        <div class="filters">
+            <span class="bracket-tag dim"><span>official + extension</span></span>
+            <a href="/recommended" class="btn">候选视图</a>
+            <a href="/applications" class="btn signal">应用时间线</a>
         </div>
     </div>
-    {% endfor %}
+
+    <div class="funnel">
+        {% for stage_key, stage_label in pipeline_stages %}
+        <div class="fcol {% if stage_key == 'applied' %}signal{% endif %}">
+            <div class="label">{{ stage_label }}</div>
+            <div class="val">{{ pipeline.counts[stage_key] }}</div>
+            <div class="delta">{{ stage_key }}</div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <details class="card manual-jd">
+        <summary>+ 偶尔手动粘一条 JD · agent 没找到的才从这里补</summary>
+        <form method="post" action="/api/pipeline/jobs/manual">
+            <label class="field">
+                <span class="label-text">JD 原文</span>
+                <textarea name="raw_text" required minlength="50" rows="7"
+                          placeholder="工作内容: 1. 设计并开发 ...&#10;岗位要求: 1. 计算机/软件相关专业 ..."></textarea>
+            </label>
+            <div class="form-grid">
+                <label class="field">
+                    <span class="label-text">公司</span>
+                    <input type="text" name="company" placeholder="字节跳动">
+                </label>
+                <label class="field">
+                    <span class="label-text">岗位 title</span>
+                    <input type="text" name="title" placeholder="AI Agent 暑期实习">
+                </label>
+                <label class="field">
+                    <span class="label-text">地点</span>
+                    <input type="text" name="location" placeholder="北京 / 上海">
+                </label>
+            </div>
+            <label class="field" style="margin-top: 8px;">
+                <span class="label-text">原 URL</span>
+                <input type="text" name="url" placeholder="https://www.zhipin.com/...">
+            </label>
+            <div class="actions" style="margin-top: 12px;">
+                <button class="signal" type="submit">添加并生成投递包</button>
+                <span class="muted small">添加后跳到 /apply，agent 立刻能基于这条 JD 工作。</span>
+            </div>
+        </form>
+    </details>
+
+    {% if pipeline.total_active == 0 and pipeline.counts.terminal == 0 %}
+    <div class="empty" style="margin-bottom: 14px;">
+        <div class="empty-title">Pipeline 空，agent 第一轮搜索还没跑</div>
+        <div class="empty-hint">
+            scheduler 会用已验证官方源、搜索和扩展入口找符合 north star 的 JD；遇到登录墙会如实记录限制。
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="board-wrap">
+        <div class="board">
+            {% for stage_key, stage_label in pipeline_stages %}
+            <div class="kanban-col" data-stage="{{ stage_key }}" id="col-{{ stage_key }}">
+                <div class="kanban-col-head">
+                    <span class="name">{{ stage_label }}</span>
+                    <span class="count">{{ pipeline.counts[stage_key] }}</span>
+                </div>
+                <div class="kanban-cards">
+                    {% if pipeline.columns[stage_key] %}
+                        {% for card in pipeline.columns[stage_key] %}
+                        {% with stage_key=stage_key, card=card %}
+                        {% include "_kanban_card.html" %}
+                        {% endwith %}
+                        {% endfor %}
+                    {% else %}
+                    <div class="kanban-empty">空</div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="narrate">
+        <div class="av">O</div>
+        <span>Agent 会把 <em>scanned</em> 里的岗位继续评分；你只需要推进真正投了的卡片。</span>
+        <div class="grow"></div>
+        <span class="right">source of truth · application_events</span>
+    </div>
 </div>
 
 {% endblock %}

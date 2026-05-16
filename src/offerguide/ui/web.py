@@ -191,11 +191,13 @@ def create_app(
                 meta = []
                 meta.append({"text": it.kind, "cls": "tag"})
                 interrupts.append({
+                    "id": it.id,
+                    "kind": it.kind,
                     "score": None,
                     "title": it.title or "(无标题)",
                     "meta": meta,
                     "ask": (it.body or "")[:160] if it.body else None,
-                    "href": "/decision/" + str(it.id),
+                    "question_options": it.question_options or [],
                     "actions": [{"label": "处理", "kind": "signal"}],
                 })
         except Exception:
@@ -266,6 +268,7 @@ def create_app(
 
         # Recent agent events (last 6h) — harness_events
         recent_events: list[dict] = []
+        recent_artifacts: list[dict] = []
         try:
             with store.connect() as conn:
                 erows = conn.execute(
@@ -282,10 +285,25 @@ def create_app(
                     "tailor_resume_generated": "微调简历", "apply_pack_generated": "生成投递包",
                     "project_record_saved": "存项目档案", "dead_url_reported": "标失效",
                 }
+                note_obj = {}
+                with contextlib.suppress(Exception):
+                    note_obj = _json.loads(en or "{}")
+                title = ""
+                view = ""
+                if isinstance(note_obj, dict):
+                    title = str(note_obj.get("title") or "")
+                    view = str(note_obj.get("view") or "")
+                if ek == "project_record_saved" and title:
+                    recent_artifacts.append({
+                        "time": ts,
+                        "title": title,
+                        "kind": str(note_obj.get("direction") or "project"),
+                        "href": view or "/project-vault",
+                    })
                 recent_events.append({
                     "time": ts, "kind": "log",
                     "verb": verb_map.get(ek, ek),
-                    "obj": f"job#{ej}" if ej else "",
+                    "obj": title or (f"job#{ej}" if ej else ""),
                     "tail": "",
                 })
         except Exception:
@@ -333,7 +351,9 @@ def create_app(
             recent_window_label="最近 6 小时",
             next_wake_label="cron 巡检 ~6h 一次",
             recent_events=recent_events,
+            recent_artifacts=recent_artifacts,
             hero_subtitle=hero_subtitle,
+            runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
         )
         return templates.TemplateResponse(request, "mission_control.html", ctx)
 
@@ -2939,7 +2959,7 @@ def create_app(
 
         return templates.TemplateResponse(
             request, "funnel.html",
-            _ctx(request, stages=stage_counts, companies=companies, active_tab=None),
+            _ctx(request, stages=stage_counts, companies=companies, active_tab="funnel"),
         )
 
     @app.get("/portfolio", response_class=HTMLResponse)
@@ -3014,7 +3034,7 @@ def create_app(
                 n_signals=n_signals,
                 skill_metrics=skill_metrics,
                 daily_counts=daily_counts,
-                active_tab=None,
+                active_tab="portfolio",
             ),
         )
 
@@ -3302,7 +3322,7 @@ def create_app(
                 applications=applications,
                 profile_loaded=profile is not None,
                 runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
-                active_tab=None,
+                active_tab="apply",
             ),
         )
 
@@ -4567,9 +4587,11 @@ def create_app(
             # Feedback recording must never fail the user-facing response.
             log.warning("inbox feedback recording failed (non-fatal): %s", _e)
 
-        return templates.TemplateResponse(
-            request, "_inbox_list.html", _ctx(request, items=[item])
-        )
+        if request.headers.get("hx-request"):
+            return templates.TemplateResponse(
+                request, "_inbox_list.html", _ctx(request, items=[item])
+            )
+        return RedirectResponse("/", status_code=303)
 
     @app.post("/inbox/{item_id}/answer", response_class=RedirectResponse)
     def answer_question(

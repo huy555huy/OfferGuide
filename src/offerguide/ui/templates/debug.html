@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}OfferGuide · Debug{% endblock %}
+{% block crumb %}Settings{% endblock %}
 {% block content %}
 
 <style>
@@ -35,7 +36,7 @@
 </style>
 
 <div class="card">
-    <h1 style="font-family: var(--font-serif); margin: 0 0 0.5rem;">⚙ Debug</h1>
+    <h1 style="font-family: var(--font-serif); margin: 0 0 0.5rem;">Settings · Debug</h1>
     <div class="muted small">
         Mission Control + harness telemetry. 用户日常用 home (/), 这里给 dev / 排查用.
     </div>
@@ -44,7 +45,7 @@
 {# ─────────── 1. Harness runs (W15) ─────────── #}
 
 <div class="card dbg-section">
-    <h2>🤖 Harness Runs (最近 30)</h2>
+    <h2>Harness Runs (最近 30)</h2>
     {% if not harness_runs %}
     <div class="empty">还没跑过 harness — 等 cron tick 或在 home chat 发条消息.</div>
     {% else %}
@@ -85,7 +86,7 @@
 {# ─────────── 2. Scheduled wakes (agent's own self-scheduling) ─────────── #}
 
 <div class="card dbg-section">
-    <h2>⏰ Agent 自定的 Scheduled Wakes</h2>
+    <h2>Agent 自定的 Scheduled Wakes</h2>
     {% if not scheduled_wakes %}
     <div class="empty">Agent 还没 schedule 过任何 future wake.</div>
     {% else %}
@@ -114,7 +115,7 @@
 {# ─────────── 3. Harness events (lifecycle) ─────────── #}
 
 <div class="card dbg-section">
-    <h2>📌 Harness Events (最近 30)</h2>
+    <h2>Harness Events (最近 30)</h2>
     {% if not harness_events %}
     <div class="empty">还没事件. 用户标"投了"/"收到面试" 等会出现在这里.</div>
     {% else %}
@@ -140,7 +141,7 @@
 {# ─────────── 4. Daemon runs (W14 cron telemetry) ─────────── #}
 
 <div class="card dbg-section">
-    <h2>🛰 W14 Daemon Runs (最近 30) — Mission Control source-of-truth</h2>
+    <h2>W14 Daemon Runs (最近 30) — Mission Control source-of-truth</h2>
     {% if not daemons %}
     <div class="empty">还没 daemon 跑过. cron 可能没启动.</div>
     {% else %}

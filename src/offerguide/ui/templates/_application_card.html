@@ -5,7 +5,7 @@
                 <span class="pill {{ app.status_class }}">{{ app.status }}</span>
                 {% if app.silence_days %}
                 {% if app.silence_days >= 14 %}
-                <span class="pill medium">😴 沉默 {{ app.silence_days|int }}d</span>
+                <span class="pill medium">沉默 {{ app.silence_days|int }}d</span>
                 {% elif app.silence_days >= 7 %}
                 <span class="pill" style="background: var(--warning-soft); color: var(--warning);">沉默 {{ app.silence_days|int }}d</span>
                 {% endif %}
@@ -43,15 +43,15 @@
     </details>
     {% endif %}
 
-    <form hx-post="/api/applications/{{ app.id }}/event"
-          hx-target="#app-row-{{ app.id }}" hx-swap="outerHTML"
-          class="event-buttons">
-        <span class="muted small">日志事件:</span>
-        <button name="kind" value="viewed"     class="ghost" title="HR 看了">👀 已查看</button>
-        <button name="kind" value="replied"    class="ghost" title="HR 回复">💬 已回复</button>
-        <button name="kind" value="assessment" class="ghost" title="笔试 / OA">🧪 笔试</button>
-        <button name="kind" value="interview"  class="ghost" title="面试">🎤 面试</button>
-        <button name="kind" value="rejected"   class="ghost" title="拒信">🚫 拒了</button>
-        <button name="kind" value="offer"      class="ghost" title="Offer">🎉 Offer</button>
-    </form>
+        <form hx-post="/api/applications/{{ app.id }}/event"
+              hx-target="#app-row-{{ app.id }}" hx-swap="outerHTML"
+              class="event-buttons">
+            <span class="muted small">日志事件:</span>
+            <button name="kind" value="viewed"     class="ghost" title="HR 看了">已查看</button>
+            <button name="kind" value="replied"    class="ghost" title="HR 回复">已回复</button>
+            <button name="kind" value="assessment" class="ghost" title="笔试 / OA">笔试</button>
+            <button name="kind" value="interview"  class="ghost" title="面试">面试</button>
+            <button name="kind" value="rejected"   class="ghost" title="拒信">拒了</button>
+            <button name="kind" value="offer"      class="ghost" title="Offer">Offer</button>
+        </form>
 </div>

@@ -222,11 +222,11 @@ class TestRecommendedFilter:
         assert resp.status_code == 200
         text = resp.text
         # Filter buttons render
-        assert "🌟 实习总览" in text
-        assert "☀ 暑期实习" in text
-        assert "📅 日常实习" in text
-        assert "🎓 校招正式" in text
-        assert "💼 社招" in text
+        assert "实习总览" in text
+        assert "暑期实习" in text
+        assert "日常实习" in text
+        assert "校招正式" in text
+        assert "社招" in text
         # Pills on cards
         assert "rt-pill summer_intern" in text
         assert "rt-pill daily_intern" in text

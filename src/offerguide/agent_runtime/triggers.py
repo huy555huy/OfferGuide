@@ -92,11 +92,22 @@ def fire_event(
     job_id = detail.get("job_id") if isinstance(detail.get("job_id"), int) else None
     note_text = detail.get("note", "") or ""
     with store.connect() as conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO harness_events(kind, job_id, note, source) "
-            "VALUES (?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?) RETURNING id",
             (event_kind, job_id, note_text[:1000], "user"),
         )
+        event_id = int(cur.fetchone()[0])
+    _schema.prepare_trigger_work_items(
+        store,
+        kind="event",
+        detail={
+            "event_id": event_id,
+            "event": event_kind,
+            "job_id": job_id,
+            "note": note_text,
+        },
+    )
     log.info("fired event: %s (job_id=%s)", event_kind, job_id)
 
 

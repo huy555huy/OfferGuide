@@ -50,20 +50,25 @@ def test_harness_tool_descriptions_require_grounded_actions():
     assert "without sending the user to hunt through pages" in read_artifact
 
 
-def test_goals_template_does_not_treat_silence_as_rejection():
-    template = (ROOT / "src/offerguide/ui/templates/goals.html").read_text(
-        encoding="utf-8"
-    )
-    assert "未记录新进展" in template
-    assert "大概率挂" not in template
+def test_goal_progress_does_not_treat_silence_as_rejection():
+    goals_source = (ROOT / "src/offerguide/goals.py").read_text(encoding="utf-8")
+    assert "未记录新进展" in goals_source
+    assert "大概率挂" not in goals_source
 
 
-def test_harness_instructions_are_chat_first_and_result_oriented():
+def test_harness_instructions_use_agent_decision_contract():
     instructions = (ROOT / "src/offerguide/agent_runtime/instructions.md").read_text(
         encoding="utf-8"
     )
     assert "主入口是 Agent Chat" in instructions
-    assert "页面只是展示层" in instructions
+    assert "页面只是观察窗口" in instructions
+    assert "状态切面" in instructions
+    assert "每次 wake 的决策契约" in instructions
+    assert "Observe" in instructions
+    assert "Agenda" in instructions
+    assert "act / ask / notify / sleep" in instructions
+    assert "不是把一句用户输入映射成一条固定工具链" in instructions
+    assert "agenda.md" in instructions
     assert "capture_project" in instructions
     assert "save_project_record" in instructions
     assert "read_artifact" in instructions

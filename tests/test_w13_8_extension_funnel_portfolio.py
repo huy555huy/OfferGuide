@@ -107,7 +107,7 @@ class TestFunnelView:
         client, _ = app_client
         resp = client.get("/funnel")
         assert resp.status_code == 200
-        assert "转化漏斗" in resp.text
+        assert "Pipeline · 转化概览" in resp.text
         # All zero counts
         assert "投递" in resp.text
 
@@ -184,7 +184,8 @@ class TestPortfolioPage:
         resp = client.get("/portfolio")
         assert resp.status_code == 200
         assert "7" in resp.text
-        assert "0.85" in resp.text or "0.85" in resp.text  # avg critic
+        assert "real feedback" in resp.text
+        assert "LLM 自评" in resp.text
 
     def test_no_user_data_leaked(self, app_client):
         """Portfolio must NOT show resume / user_facts / company names from apps."""

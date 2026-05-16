@@ -193,14 +193,16 @@ class TestEventLogging:
 
 
 def test_topbar_has_applications_link(app_setup) -> None:
-    """主导航保留「投递记录」入口（中文化后）。"""
+    """Mission Control keeps application tracking reachable through Pipeline."""
     app, _ = app_setup
     resp = TestClient(app).get("/")
-    assert 'href="/applications"' in resp.text
-    assert ">投递记录<" in resp.text
+    assert 'href="/pipeline"' in resp.text
+    assert "Pipeline" in resp.text
 
 
 def test_active_tab_highlights_applications(app_setup) -> None:
     app, _ = app_setup
     resp = TestClient(app).get("/applications")
-    assert 'class="active"' in resp.text
+    assert 'aria-label="Pipeline"' in resp.text
+    assert 'href="/pipeline"' in resp.text
+    assert 'item active' in resp.text

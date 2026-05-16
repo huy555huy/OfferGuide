@@ -256,12 +256,11 @@ class TestSearchTestRoute:
         assert data["tavily"]["ok"] is None
         assert "TAVILY_API_KEY" in data["tavily"]["error_str"]
 
-    def test_dashboard_renders_search_card(self, app_setup) -> None:
+    def test_debug_is_linked_from_mission_control_for_search_health(self, app_setup) -> None:
         app, _ = app_setup
-        resp = TestClient(app).get("/dashboard")
+        resp = TestClient(app).get("/")
         assert resp.status_code == 200
-        assert "面经搜索后端 健康" in resp.text
-        assert "/api/search/test" in resp.text
+        assert 'href="/debug"' in resp.text
 
     def test_guidance_message_no_tavily(self, monkeypatch) -> None:
         monkeypatch.delenv("TAVILY_API_KEY", raising=False)

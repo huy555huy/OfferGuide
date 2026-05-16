@@ -1,9 +1,58 @@
 {% extends "base.html" %}
 {% block title %}OfferGuide — 进化{% endblock %}
+{% block crumb %}Lab{% endblock %}
+{% block topbar_tags %}
+<span class="bracket-tag dim"><span>{{ skill_views|length }} skills</span></span>
+{% if triggers %}<span class="bracket-tag signal"><span>{{ triggers|length }} evolve</span></span>{% endif %}
+{% endblock %}
 {% block content %}
 
 <style>
     .evo-grid { display: grid; gap: 1rem; }
+    .lab-hero {
+        background: var(--bg-ink);
+        color: var(--ink-on-dark);
+        border-radius: var(--r);
+        padding: 18px 22px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) repeat(3, auto);
+        gap: 26px;
+        align-items: center;
+        margin-bottom: 18px;
+    }
+    .lab-hero h1 {
+        margin: 0;
+        font-family: var(--font-serif);
+        font-size: 22px;
+        font-weight: 500;
+        line-height: 1.3;
+    }
+    .lab-hero h1 .acc { color: var(--signal); }
+    .lab-hero .sub {
+        margin-top: 6px;
+        font-size: 12px;
+        color: rgba(246,244,238,0.65);
+        max-width: 680px;
+    }
+    .lab-hero .kpi {
+        text-align: right;
+        padding-left: 22px;
+        border-left: 1px solid rgba(255,255,255,0.1);
+    }
+    .lab-hero .kpi .v {
+        font-family: var(--font-serif);
+        font-size: 24px;
+        font-weight: 600;
+        line-height: 1;
+    }
+    .lab-hero .kpi .v.sig { color: var(--signal); }
+    .lab-hero .kpi .l {
+        margin-top: 5px;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: rgba(246,244,238,0.5);
+        letter-spacing: 0.1em;
+    }
     .skill-card {
         background: var(--bg-elev);
         border: 1px solid var(--border);
@@ -75,25 +124,33 @@
     }
 </style>
 
-<div class="page-title">
+<div class="lab-hero">
     <div>
-        <h1>SKILL 进化</h1>
-        <p>
-            模型在主位 → critic 评分 → 信号闭环 → 自动生成 prompt 变种 → 灰度 A/B → 决定 promote 或 rollback。
-            进化触发条件: signals ≥ <strong>{{ min_signals }}</strong> + fitness < <strong>{{ "%.2f"|format(evolution_threshold) }}</strong> + 距上次 > <strong>{{ "%.0f"|format(cooldown_days) }} 天</strong>。
-        </p>
+        <h1>Lab · <span class="acc">SKILL 进化</span></h1>
+        <div class="sub">
+            真实反馈信号 → prompt 变种 → shadow / canary / live。触发条件:
+            signals ≥ {{ min_signals }} + fitness < {{ "%.2f"|format(evolution_threshold) }} + 距上次 > {{ "%.0f"|format(cooldown_days) }} 天。
+        </div>
     </div>
-    <button class="btn secondary" onclick="runReleaseCycle()">▶ 运行灰度发布周期</button>
+    <div class="kpi">
+        <div class="v">{{ skill_views|length }}</div>
+        <div class="l">SKILLS</div>
+    </div>
+    <div class="kpi">
+        <div class="v sig">{{ triggers|length }}</div>
+        <div class="l">READY</div>
+    </div>
+    <button class="btn signal" onclick="runReleaseCycle()">运行灰度发布周期</button>
 </div>
 
 {% if triggers %}
 <div class="trigger-card">
-    <div class="label">⚡ 待进化 ({{ triggers|length }} 个 SKILL 满足条件)</div>
+    <div class="label">待进化 ({{ triggers|length }} 个 SKILL 满足条件)</div>
     {% for t in triggers %}
     <div style="margin-top: 0.5rem;">
         <strong>{{ t.skill_name }}</strong> v{{ t.current_version }} —
         fitness {{ "%.2f"|format(t.fitness) }} / {{ t.sample_count }} 个 signals.
-        <button class="btn ghost" onclick="evolveSkill('{{ t.skill_name }}')">▶ 进化</button>
+        <button class="btn ghost" onclick="evolveSkill('{{ t.skill_name }}')">进化</button>
         <span class="muted small">{{ t.reason }}</span>
     </div>
     {% endfor %}
@@ -107,7 +164,7 @@
             <span class="name">{{ sv.name }}</span>
             <span class="ver">seed v{{ sv.seed_version }} → 当前 v{{ sv.current_version }}</span>
             <span style="margin-left: auto;">
-                <button class="btn ghost" onclick="evolveSkill('{{ sv.name }}')">🧬 进化</button>
+                <button class="btn ghost" onclick="evolveSkill('{{ sv.name }}')">进化</button>
             </span>
         </div>
         <div class="desc">{{ sv.description }}</div>

@@ -1,27 +1,30 @@
 {% extends "base.html" %}
-{% block title %}OfferGuide — Applications{% endblock %}
+{% block title %}OfferGuide — Pipeline 应用时间线{% endblock %}
+{% block crumb %}Pipeline{% endblock %}
+{% block topbar_tags %}
+<span class="bracket-tag dim"><span>{{ applications|length }} applications</span></span>
+<span class="bracket-tag signal"><span>{{ active_count }} active</span></span>
+{% endblock %}
 {% block content %}
 
 <div class="page-title">
     <div>
         <h1>应用追踪</h1>
-        <p>所有投递（牛客 / Boss / 官网 / 内推）+ 事件时间线 + 1-click 状态日志。
-        不靠平台的也能手动录入——HR 看了 / 回复了 / 笔试 / 面试 / 拒了 / Offer。</p>
+        <p>Pipeline 的应用时间线。这里只记录真实状态: HR 看了、回复、笔试、面试、拒绝、Offer; agent 基于这些事件决定是否提醒或准备。</p>
     </div>
 </div>
 
 {% if not applications %}
 <div class="card">
     <div class="empty">
-        <div class="empty-icon">📭</div>
         <div class="empty-title">还没有投递记录</div>
         <div class="empty-hint">
-            投递路径: <strong>装浏览器扩展</strong> → Boss / 牛客 抓 JD → 在 <a href="/pipeline">/pipeline</a> 看到卡片 →
+            投递路径: <strong>装浏览器扩展</strong> → Boss / 牛客 抓 JD → 在 <a href="/pipeline">Pipeline</a> 看到卡片 →
             点「标记已投递」就会在这里出现一条记录。<br>
-            投后用按钮记 HR 已看 / 已回复 / 面试 / offer / 拒, 数据会反流到 funnel + portfolio。
+            投后用按钮记 HR 已看 / 已回复 / 面试 / offer / 拒, 数据会回到 Pipeline 和 agent 议程。
         </div>
         <div class="empty-action">
-            <a href="/pipeline" class="btn">→ 去 pipeline 看现有 JD</a>
+            <a href="/pipeline" class="btn">去 Pipeline</a>
         </div>
     </div>
 </div>
@@ -41,7 +44,7 @@
                     <span class="pill {{ app.status_class }}">{{ app.status }}</span>
                     {% if app.silence_days %}
                     {% if app.silence_days >= 14 %}
-                    <span class="pill medium">😴 沉默 {{ app.silence_days|int }}d</span>
+                    <span class="pill medium">沉默 {{ app.silence_days|int }}d</span>
                     {% elif app.silence_days >= 7 %}
                     <span class="pill" style="background: var(--warning-soft); color: var(--warning);">沉默 {{ app.silence_days|int }}d</span>
                     {% endif %}
@@ -83,12 +86,12 @@
               hx-target="#app-row-{{ app.id }}" hx-swap="outerHTML"
               class="event-buttons">
             <span class="muted small">日志事件:</span>
-            <button name="kind" value="viewed"     class="ghost" title="HR 看了">👀 已查看</button>
-            <button name="kind" value="replied"    class="ghost" title="HR 回复">💬 已回复</button>
-            <button name="kind" value="assessment" class="ghost" title="笔试 / OA">🧪 笔试</button>
-            <button name="kind" value="interview"  class="ghost" title="面试">🎤 面试</button>
-            <button name="kind" value="rejected"   class="ghost" title="拒信">🚫 拒了</button>
-            <button name="kind" value="offer"      class="ghost" title="Offer">🎉 Offer</button>
+            <button name="kind" value="viewed"     class="ghost" title="HR 看了">已查看</button>
+            <button name="kind" value="replied"    class="ghost" title="HR 回复">已回复</button>
+            <button name="kind" value="assessment" class="ghost" title="笔试 / OA">笔试</button>
+            <button name="kind" value="interview"  class="ghost" title="面试">面试</button>
+            <button name="kind" value="rejected"   class="ghost" title="拒信">拒了</button>
+            <button name="kind" value="offer"      class="ghost" title="Offer">Offer</button>
         </form>
     </div>
     {% endfor %}

@@ -1,5 +1,9 @@
 {% extends "base.html" %}
 {% block title %}OfferGuide · 跟踪中的岗位{% endblock %}
+{% block crumb %}Pipeline{% endblock %}
+{% block topbar_tags %}
+<span class="bracket-tag dim"><span>{{ jobs|length }} tracked</span></span>
+{% endblock %}
 {% block content %}
 
 <style>
@@ -41,7 +45,7 @@
 </style>
 
 <div class="card">
-    <h1 style="font-family: var(--font-serif); margin: 0 0 0.375rem;">📋 跟踪中的岗位</h1>
+    <h1 style="font-family: var(--font-serif); margin: 0 0 0.375rem;">跟踪中的岗位</h1>
     <div class="muted small">
         所有评估过 / 加入跟踪 / 投递了的岗位都在这里. Agent 看这个状态 + 自己的笔记决定何时提醒你 followup.
     </div>
@@ -58,14 +62,14 @@
 
 {# Status filter tabs #}
 {% set status_groups = {
-    "considered": "🤔 评估过 / 待决",
-    "applied": "📤 投了",
-    "screening": "📞 沟通中",
-    "1st_interview": "🎤 一面",
-    "2nd_interview": "🎤 二面",
-    "final_interview": "🎤 终面",
-    "offer": "🎉 offer",
-    "rejected": "❌ 拒",
+    "considered": "评估过 / 待决",
+    "applied": "投了",
+    "screening": "沟通中",
+    "1st_interview": "一面",
+    "2nd_interview": "二面",
+    "final_interview": "终面",
+    "offer": "offer",
+    "rejected": "拒",
 } %}
 
 {% for status, label in status_groups.items() %}
