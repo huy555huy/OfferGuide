@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from .. import inbox as inbox_mod
 from ..application_plan import build_application_plan
 from ..config import Settings
+from ..job_quality import is_job_usable_for_recommendation
 from ..llm import LLMClient, LLMError
 from ..memory import Store
 from ..platforms._spec import RawJob
@@ -210,8 +211,9 @@ def create_app(
         try:
             with store.connect() as conn:
                 rows = conn.execute(
-                    "SELECT id, title, company, location, source FROM jobs "
-                    "ORDER BY fetched_at DESC LIMIT 5"
+                    "SELECT id, title, company, location, source, extras_json, url, raw_text "
+                    "FROM jobs "
+                    "ORDER BY fetched_at DESC LIMIT 20"
                 ).fetchall()
                 jobs_today_count = conn.execute(
                     "SELECT COUNT(*) FROM jobs "
@@ -238,6 +240,15 @@ def create_app(
             }
             for r in rows:
                 jid, title, company, location, source = int(r[0]), r[1] or "(无标题)", r[2] or "?", r[3] or "", r[4] or ""
+                if not is_job_usable_for_recommendation(
+                    source=source,
+                    title=title,
+                    company=company,
+                    url=r[6] or "",
+                    raw_text=r[7] or "",
+                    extras_json=r[5] or "{}",
+                ):
+                    continue
                 src_label, src_cls = _src_map.get(source, (source[:1].upper() if source else "?", ""))
                 score = score_map.get(jid)
                 tag_cls, tag_label = ("ok", "已评") if score is not None else ("", "待评")
@@ -247,6 +258,8 @@ def create_app(
                     "src_label": src_label, "src_cls": src_cls,
                     "tag_cls": tag_cls, "tag_label": tag_label,
                 })
+                if len(recent_jobs) >= 5:
+                    break
         except Exception:
             jobs_today_count = 0
 
@@ -1512,14 +1525,14 @@ def create_app(
                     job_id, title, company, location, url, source,
                     _fetched_at, extras_json, app_status,
                 ) = r
-                # Skip rows the user reported as dead via /api/jobs/{id}/report-dead
-                if extras_json:
-                    try:
-                        _extras_check = json.loads(extras_json)
-                        if isinstance(_extras_check, dict) and _extras_check.get("dead"):
-                            continue
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                if not is_job_usable_for_recommendation(
+                    source=source,
+                    title=title,
+                    company=company,
+                    url=url,
+                    extras_json=extras_json or "{}",
+                ):
+                    continue
                 # Apply user exclude keywords — match against title+company
                 # (cheap, no JD body fetch needed). The crawl already happened;
                 # this is just a view-time filter.

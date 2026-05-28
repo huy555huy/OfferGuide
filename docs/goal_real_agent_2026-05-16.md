@@ -20,6 +20,8 @@ OfferGuide 不是一个功能按钮集合，也不是替用户乱投的 auto-app
 5. 能持续: 有 worldview、harness_runs、harness_events、scheduled_wakes、PROGRESS.md 和测试结果可接续。
 6. 能学习: 用户 thumbs、application outcome、follow-through 进入 evolution signals，而不是 LLM 自评。
 7. 有自己的议程: 每次 wake 都能看到开放回路、阻塞、机会和安静等待项，并基于它决定下一步。
+8. 主动发现优先: 用户手动输入 JD 是 fallback 和监督信号, 说明 agent 没先找到或没找全;
+   处理该 JD 的同时必须反查 discovery 覆盖缺口。
 
 非目标:
 
@@ -27,6 +29,7 @@ OfferGuide 不是一个功能按钮集合，也不是替用户乱投的 auto-app
 - 不编简历经历、指标、学历、公司名或项目成果。
 - 不把“未记录新状态”解释成“失败/挂了”。
 - 不为了显得智能而频繁通知用户。
+- 不把“粘 JD”包装成主路径成功; 用户自己找到机会通常意味着 agent 应该改进搜索覆盖。
 
 ## Current Diagnosis
 
@@ -162,10 +165,11 @@ runtime 能把触发变成工作项, 也能把工作项交给 run, 但 agent 没
 - 用户一句话目标能被 agent 判断并推进: 先看 agenda 和证据，再决定是否 fetch JD、score、tailor、ask、notify 或 sleep。
 - 主 chat 能读取已有状态引用, 不要求用户自己找页面拼上下文。
 - 对信息缺口，agent 优先问最少的问题或自己查证。
+- 用户粘 JD 时, agent 先服务眼前岗位, 再把它当成 discovery miss 做覆盖复盘。
 
 验收:
 
-- 至少 3 条端到端 dogfood 记录: 评 JD、调简历、投后准备。
+- 至少 3 条端到端 dogfood 记录: 主动发现岗位、用户粘 JD 后的 discovery miss 复盘、投后准备。
 - 每条都有 job_id/skill_run_id/run_id 或页面链接。
 
 ### Phase C: Discovery Quality
@@ -261,7 +265,7 @@ runtime 能把触发变成工作项, 也能把工作项交给 run, 但 agent 没
 
 建议下一块先做真实端到端 dogfood, 再继续 IA 收敛:
 
-1. 用一个真实 JD 样例验证: user_input work item -> agent 最小工具行动 -> state/event reference -> `update_work_item(done/waiting/blocked)` -> 下一次 context 只保留仍需继续的项。
+1. 用一个真实 JD 样例验证: user_input work item -> agent 最小工具行动 -> state/event reference -> discovery miss 复盘 -> `update_work_item(done/waiting/blocked)` -> 下一次 context 只保留仍需继续的项。
 2. 继续收起剩余一等入口: `/jobs`, `/compare`, `/mock`, `/reflect`, `/stories` 从主路径降级或改为 Pipeline / Tailor / Interview 内的动作。
 3. Tailor 把 Project Vault 明确为“项目事实档案”, 只服务简历和面试上下文。
 4. Interview 把 mock / reflect 绑定到 company/application, 不再作为泛用玩具入口。

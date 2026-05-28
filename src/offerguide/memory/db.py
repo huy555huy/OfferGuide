@@ -21,6 +21,7 @@ Tables (additional vector tables in `vec.py`):
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -541,6 +542,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE jobs ADD COLUMN created_at REAL NOT NULL DEFAULT (julianday('now'))"
         )
+    _migrate_known_job_urls(conn)
 
     # inbox_items agent-suggestion columns (W13.3)
     inbox_cols = {
@@ -608,6 +610,45 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE project_records ADD COLUMN market_context TEXT")
         if "reference_sources" not in project_cols:
             conn.execute("ALTER TABLE project_records ADD COLUMN reference_sources TEXT")
+
+
+def _migrate_known_job_urls(conn: sqlite3.Connection) -> None:
+    """Repair known stale URLs in existing local stores."""
+    try:
+        from ..job_quality import normalize_known_job_url
+    except Exception:
+        return
+
+    rows = conn.execute(
+        "SELECT id, source, source_id, url, extras_json FROM jobs "
+        "WHERE source = 'tencent_campus' AND url LIKE 'https://join.qq.com/jobdesc.html?postId=%'"
+    ).fetchall()
+    for jid, source, source_id, url, extras_json in rows:
+        new_url = normalize_known_job_url(source=source, url=url, source_id=source_id)
+        if not new_url or new_url == url:
+            continue
+        extras = _loads_obj(extras_json)
+        migrations = extras.setdefault("migrations", [])
+        if isinstance(migrations, list):
+            migrations.append({
+                "kind": "repair_tencent_campus_url",
+                "from": url,
+                "to": new_url,
+            })
+        conn.execute(
+            "UPDATE jobs SET url = ?, extras_json = ? WHERE id = ?",
+            (new_url, json.dumps(extras, ensure_ascii=False), jid),
+        )
+
+
+def _loads_obj(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 class Store:

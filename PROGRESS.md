@@ -105,6 +105,10 @@ draft / track / prep，不自动替用户投递，不编造证据，并把过程
     proof-of-agent theater.
   - Verified focused runtime tests: `38 passed`.
   - Verified full suite: `866 passed, 2 skipped`.
+- 2026-05-18 product principle correction:
+  - Reframed user-pasted JD as a discovery miss signal, not a primary success
+    path. If the user has to bring a JD manually, the agent should still serve
+    it, then inspect why proactive discovery did not already surface it.
 
 ## In Progress
 
@@ -118,9 +122,9 @@ draft / track / prep，不自动替用户投递，不编造证据，并把过程
 
 - Next product/runtime slice: run real end-to-end dogfood for a JD/user-input run:
   user input/event creates a work item, agent advances it with minimal
-  fetch/score/tailor/read_artifact actions, then updates `agenda.md`,
-  run/skill/event state references, and closes or defers the work item with
-  `update_work_item`.
+  fetch/score/tailor/read_artifact actions, audits the discovery miss, then
+  updates `agenda.md`, run/skill/event state references, and closes or defers
+  the work item with `update_work_item`.
 - Then continue IA consolidation. Demote or merge remaining standalone
   surfaces (`/jobs`, `/compare`, `/mock`, `/reflect`, `/stories`) into
   Pipeline / Tailor / Interview state views or detail routes.

@@ -38,6 +38,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -137,6 +138,8 @@ _REAL_ATS_HOSTS: tuple[str, ...] = (
     "app.mokahr.com",  # 北森 SaaS, used by many companies
     "career.huawei.com",
     "campus.xiaomi.com",
+    "tencent.wd1.myworkdayjobs.com",
+    "careers.pddglobalhr.com",
 )
 
 
@@ -191,6 +194,8 @@ class FetchResult:
     parsed_total: int = 0
     inserted: int = 0
     duplicate: int = 0
+    skipped_non_ats: int = 0
+    skipped_dead: int = 0
     errors: list[str] = None  # type: ignore[assignment]
     by_company: dict[str, int] = None  # type: ignore[assignment]
 
@@ -201,7 +206,9 @@ class FetchResult:
             self.by_company = {}
 
 
-def crawl_zerovoice(store: Any, *, max_jobs: int | None = None) -> FetchResult:
+def crawl_zerovoice(
+    store: Any, *, max_jobs: int | None = None, verify_urls: bool = False,
+) -> FetchResult:
     """Walk the 0voice README, parse, ingest. Returns FetchResult counter.
 
     `max_jobs` caps how many jobs to ingest this run — useful for not
@@ -223,11 +230,17 @@ def crawl_zerovoice(store: Any, *, max_jobs: int | None = None) -> FetchResult:
 
     parsed_jobs = parse_readme(md)
     result.parsed_total = len(parsed_jobs)
+    parsed_jobs = [pj for pj in parsed_jobs if link_is_official_ats(pj.url)]
+    result.skipped_non_ats = result.parsed_total - len(parsed_jobs)
     if max_jobs is not None and len(parsed_jobs) > max_jobs:
         parsed_jobs = _round_robin_by_company(parsed_jobs, max_jobs)
 
+    live_cache: dict[str, bool] = {}
     for pj in parsed_jobs:
         try:
+            if verify_urls and not _url_looks_live(pj.url, cache=live_cache):
+                result.skipped_dead += 1
+                continue
             rj = to_raw_job(pj)
             was_new, _ = scout.ingest(store, rj)
             if was_new:
@@ -241,6 +254,43 @@ def crawl_zerovoice(store: Any, *, max_jobs: int | None = None) -> FetchResult:
             result.errors.append(f"{pj.company}/{pj.title[:30]}: {type(e).__name__}: {e}")
 
     return result
+
+
+def _url_looks_live(url: str, *, cache: dict[str, bool] | None = None) -> bool:
+    """Best-effort reachability gate for aggregator links.
+
+    It intentionally only has a hard veto for clear dead signals: HTTP 404/410
+    or a final redirected URL ending in /404.html. Timeouts/403/anti-bot are
+    treated as live enough because many ATS hosts block headless clients while
+    still working in a browser.
+    """
+    cache_key = _url_cache_key(url)
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
+    ok = True
+    try:
+        with httpx.Client(
+            timeout=8.0,
+            follow_redirects=True,
+            headers={"User-Agent": USER_AGENT},
+        ) as client:
+            resp = client.head(url)
+            if resp.status_code in (403, 405):
+                resp = client.get(url)
+            final_path = str(resp.url).lower()
+            ok = resp.status_code not in (404, 410) and not final_path.endswith("/404.html")
+    except httpx.HTTPError:
+        ok = True
+
+    if cache is not None:
+        cache[cache_key] = ok
+    return ok
+
+
+def _url_cache_key(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{parsed.query}"
 
 
 def _round_robin_by_company(

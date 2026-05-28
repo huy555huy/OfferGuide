@@ -11,6 +11,7 @@ from offerguide.agent_runtime import _schema as harness_schema
 from offerguide.platforms.zerovoice import (
     ParsedJob,
     crawl_zerovoice,
+    _url_looks_live,
     link_is_official_ats,
     parse_readme,
     to_raw_job,
@@ -159,27 +160,28 @@ class TestToRawJob:
 
 class TestCrawlZerovoice:
     def test_crawl_with_fake_readme_ingests(self, monkeypatch, store):
-        """End-to-end crawl with patched fetch — ingests the 6 fixture jobs."""
+        """End-to-end crawl with patched fetch — ingests only direct ATS jobs."""
         from offerguide.platforms import zerovoice as zv
         monkeypatch.setattr(zv, "fetch_readme", lambda timeout_s=20.0: _FIXTURE_MD)
 
         result = crawl_zerovoice(store)
         assert result.parsed_total == 6
-        assert result.inserted == 6
+        assert result.skipped_non_ats == 2
+        assert result.inserted == 4
         assert result.duplicate == 0
         assert "阿里巴巴" in result.by_company
 
         # Re-run → should all be duplicates
         result2 = crawl_zerovoice(store)
         assert result2.inserted == 0
-        assert result2.duplicate == 6
+        assert result2.duplicate == 4
 
     def test_crawl_max_jobs_caps_intake(self, monkeypatch, store):
         from offerguide.platforms import zerovoice as zv
         monkeypatch.setattr(zv, "fetch_readme", lambda timeout_s=20.0: _FIXTURE_MD)
 
         result = crawl_zerovoice(store, max_jobs=2)
-        # parsed_total = full README (6), but cap limits ingest to 2
+        # parsed_total = full README (6), non-ATS rows are skipped, then cap limits ingest to 2
         assert result.parsed_total == 6
         assert result.inserted == 2
 
@@ -263,7 +265,47 @@ class TestCrawlZerovoice:
         assert row is not None
         extras = _json.loads(row[0])
         assert extras.get("discovered_via") == "zerovoice_aggregator"
-        assert extras.get("link_type") in ("official_ats", "wechat_article")
+        assert extras.get("link_type") == "official_ats"
+
+    def test_verify_urls_skips_clear_404(self, monkeypatch, store):
+        from offerguide.platforms import zerovoice as zv
+        monkeypatch.setattr(zv, "fetch_readme", lambda timeout_s=20.0: _FIXTURE_MD)
+        monkeypatch.setattr(
+            zv,
+            "_url_looks_live",
+            lambda url, *, cache=None: "199903540003" not in url,
+        )
+
+        result = crawl_zerovoice(store, verify_urls=True)
+        assert result.skipped_dead == 1
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE url LIKE '%199903540003%'"
+            ).fetchone()
+        assert row[0] == 0
+
+    def test_url_looks_live_rejects_redirect_to_404(self, monkeypatch):
+        class _Resp:
+            status_code = 200
+            url = "https://join.qq.com/404.html"
+
+        class _Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def head(self, url):
+                return _Resp()
+
+        from offerguide.platforms import zerovoice as zv
+        monkeypatch.setattr(zv.httpx, "Client", _Client)
+
+        assert not _url_looks_live("https://join.qq.com/jobdesc.html?postId=bad")
 
 
 # ─────────────────── application_plan integration ───────────────────

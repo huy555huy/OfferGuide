@@ -134,7 +134,7 @@ class TestFetchZerovoice:
         )
         monkeypatch.setattr(
             "offerguide.platforms.zerovoice.crawl_zerovoice",
-            lambda s, *, max_jobs: fake,
+            lambda s, *, max_jobs, verify_urls=False: fake,
         )
         out = reg_with_discovery.dispatch("fetch_zerovoice", {"max_jobs": 80}, store=store)
         d = json.loads(out)

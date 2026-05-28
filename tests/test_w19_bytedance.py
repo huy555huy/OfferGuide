@@ -12,6 +12,7 @@ from offerguide.platforms.official_jobs import (
     BYTEDANCE_SEARCH_URL,
     SOURCE_LANDSCAPE,
     raw_job_from_bytedance,
+    raw_job_from_tencent_campus,
     search_bytedance_jobs,
 )
 from offerguide.recruit_type import SOCIAL, classify_recruit_type
@@ -32,6 +33,20 @@ def test_alibaba_status_updated_to_verified_via_aggregator():
     st = SOURCE_LANDSCAPE["alibaba"]
     assert st.status == "verified_via_aggregator"
     assert "0voice" in st.note or "campus-talent.alibaba.com" in st.evidence_url
+
+
+def test_tencent_campus_uses_live_post_detail_url():
+    rj = raw_job_from_tencent_campus(
+        {"postId": "1234", "projectName": "应届实习"},
+        {
+            "postId": "1234",
+            "title": "AI Agent 实习",
+            "desc": "做 agent",
+            "request": "会 Python",
+        },
+    )
+
+    assert rj.url == "https://join.qq.com/post_detail.html?postid=1234"
 
 
 # ────────────────── raw_job_from_bytedance ──────────────────

@@ -145,7 +145,9 @@ async def _run_one_cycle(
     async def _stage_zerovoice() -> tuple[str, float, Any, Exception | None]:
         t = _time.monotonic()
         try:
-            r = await asyncio.to_thread(crawl_zerovoice, store, max_jobs=80)
+            r = await asyncio.to_thread(
+                crawl_zerovoice, store, max_jobs=80, verify_urls=True,
+            )
             return ("0voice", _time.monotonic() - t, r, None)
         except Exception as e:
             return ("0voice", _time.monotonic() - t, None, e)
@@ -385,6 +387,7 @@ def _load_unscored_discovered_ids(store: Store, limit: int = 30) -> list[int]:
         _hs.init_agent_runtime_schema(store)
     except Exception:
         pass
+    from ..job_quality import is_job_usable_for_recommendation
     sources = (
         "nowcoder",
         "agent_search",
@@ -399,9 +402,11 @@ def _load_unscored_discovered_ids(store: Store, limit: int = 30) -> list[int]:
         "shixiseng",  # W20 — 实习僧 实习专用聚合 (含 niche AI 创业公司实习)
     )
     placeholders = ",".join("?" * len(sources))
+    out: list[int] = []
     with store.connect() as conn:
         rows = conn.execute(
-            "SELECT j.id FROM jobs j "
+            "SELECT j.id, j.source, j.title, j.company, j.url, j.raw_text, j.extras_json "
+            "FROM jobs j "
             f"WHERE j.source IN ({placeholders}) "
             "  AND length(j.raw_text) >= 200 "
             "  AND NOT EXISTS ("
@@ -409,9 +414,21 @@ def _load_unscored_discovered_ids(store: Store, limit: int = 30) -> list[int]:
             "      WHERE he.kind = 'scored' AND he.job_id = j.id"
             "  ) "
             "ORDER BY j.id DESC LIMIT ?",
-            (*sources, limit),
+            (*sources, limit * 5),
         ).fetchall()
-    return [int(r[0]) for r in rows]
+    for r in rows:
+        if is_job_usable_for_recommendation(
+            source=r[1],
+            title=r[2],
+            company=r[3],
+            url=r[4],
+            raw_text=r[5],
+            extras_json=r[6] or "{}",
+        ):
+            out.append(int(r[0]))
+            if len(out) >= limit:
+                break
+    return out
 
 
 def _load_unscored_nowcoder_ids(store: Store, limit: int = 30) -> list[int]:

@@ -441,7 +441,9 @@ def _work_item_title_for_event(event_kind: str, *, job_id: int | None) -> str:
 
 def _next_action_for_event(event_kind: str) -> str:
     mapping = {
-        "user_paste_jd": "ingest/score/tailor only if the JD and candidate evidence justify it",
+        "user_paste_jd": (
+            "serve the pasted JD, then audit why discovery did not already surface this opportunity"
+        ),
         "user_marked_applied": "decide whether a post-apply prep/follow-up loop is useful",
         "user_received_interview": "prepare only the missing high-value interview material",
         "user_finished_interview": "record outcome and update lessons",

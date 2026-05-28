@@ -163,6 +163,10 @@ OfferGuide 当前包含以下能力:
 - Skill evolution: 基于用户反馈、应用结果和 follow-through 信号维护 SKILL variants
 - Browser extension: 从 BOSS 页面提取 JD / 推荐列表并同步到本地服务
 
+原则上, 用户手动粘 JD 是兜底和监督信号, 不是理想主路径。OfferGuide 应主动发现
+用户目标内的岗位; 当用户自己带来 JD 时, agent 需要服务眼前岗位, 也要反查为什么
+这类机会没有先出现在候选池里。
+
 ## Chrome Extension
 
 加载方式:

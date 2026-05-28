@@ -806,7 +806,8 @@ class TestTriggers:
         assert work[2] == str(row[0])
         assert work[3] == 5
         assert work[4] == "open"
-        assert "ingest/score/tailor" in work[5]
+        assert "discovery" in work[5]
+        assert "surface this opportunity" in work[5]
 
     def test_poll_pending_picks_up_due_scheduled_wake(self, tmp_store):
         # Insert a scheduled wake with fire_at in the past
@@ -2056,6 +2057,78 @@ class TestReviewFixes:
         assert "NLP 实习" in resp.text
         # Should appear in the "未评分" group
         assert "未评分" in resp.text or "还没评分" in resp.text
+
+    def test_recommended_hides_zerovoice_article_links(self, web_client):
+        client, store = web_client
+        with store.connect() as conn:
+            conn.execute(
+                "INSERT INTO jobs (source, title, company, url, raw_text, extras_json, content_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "zerovoice_repo",
+                    "公众号汇总岗",
+                    "某公司",
+                    "https://mp.weixin.qq.com/s?__biz=test",
+                    "x" * 200,
+                    _json.dumps({"link_type": "wechat_article"}, ensure_ascii=False),
+                    "hash_zv_wechat",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO jobs (source, title, company, url, raw_text, extras_json, content_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "zerovoice_repo",
+                    "官方直链岗",
+                    "某公司",
+                    "https://campus-talent.alibaba.com/campus/position/1",
+                    "x" * 200,
+                    _json.dumps({"link_type": "official_ats"}, ensure_ascii=False),
+                    "hash_zv_ats",
+                ),
+            )
+            conn.commit()
+
+        resp = client.get("/recommended?type=all")
+        assert resp.status_code == 200
+        assert "官方直链岗" in resp.text
+        assert "公众号汇总岗" not in resp.text
+
+    def test_home_recent_jobs_hide_dead_zerovoice_article_links(self, web_client):
+        client, store = web_client
+        with store.connect() as conn:
+            conn.execute(
+                "INSERT INTO jobs (source, title, company, url, raw_text, extras_json, content_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "zerovoice_repo",
+                    "首页不该露出的公众号岗",
+                    "某公司",
+                    "https://mp.weixin.qq.com/s?__biz=test",
+                    "x" * 200,
+                    _json.dumps({"link_type": "wechat_article"}, ensure_ascii=False),
+                    "hash_home_zv_wechat",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO jobs (source, title, company, url, raw_text, extras_json, content_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "zerovoice_repo",
+                    "首页可以露出的官方岗",
+                    "某公司",
+                    "https://campus-talent.alibaba.com/campus/position/1",
+                    "x" * 200,
+                    _json.dumps({"link_type": "official_ats"}, ensure_ascii=False),
+                    "hash_home_zv_ats",
+                ),
+            )
+            conn.commit()
+
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "首页可以露出的官方岗" in resp.text
+        assert "首页不该露出的公众号岗" not in resp.text
 
     def test_recommended_orders_by_score_desc(self, web_client):
         client, store = web_client

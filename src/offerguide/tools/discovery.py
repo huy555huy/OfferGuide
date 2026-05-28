@@ -383,12 +383,14 @@ def _fetch_zerovoice_handler(args: dict[str, Any], **rt: Any) -> str:
     max_jobs = int(args.get("max_jobs") or 80)
     try:
         from ..platforms.zerovoice import crawl_zerovoice
-        result = crawl_zerovoice(store, max_jobs=max_jobs)
+        result = crawl_zerovoice(store, max_jobs=max_jobs, verify_urls=True)
         return tool_result(
             source="zerovoice_repo",
             parsed_total=result.parsed_total,
             inserted=result.inserted,
             duplicates=result.duplicate,
+            skipped_non_ats=result.skipped_non_ats,
+            skipped_dead=result.skipped_dead,
             errors=result.errors[:3],
             by_company_top10=dict(sorted(
                 result.by_company.items(), key=lambda x: -x[1])[:10]),

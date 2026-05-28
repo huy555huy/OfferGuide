@@ -13,7 +13,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlencode
 
 import httpx
 
@@ -295,7 +295,7 @@ def raw_job_from_tencent_campus(item: dict[str, Any], detail: dict[str, Any]) ->
     post_id = str(detail.get("postId") or item.get("postId") or "").strip()
     title = str(detail.get("title") or item.get("positionTitle") or "腾讯校招岗位").strip()
     location = _join_list(detail.get("workCityList")) or str(item.get("workCities") or "").strip()
-    url = f"https://join.qq.com/jobdesc.html?postId={post_id}" if post_id else "https://join.qq.com/post.html"
+    url = tencent_campus_detail_page_url(post_id) if post_id else "https://join.qq.com/post.html"
     raw_text = _join_lines(
         [
             f"职位名: {title}",
@@ -697,6 +697,16 @@ def raw_job_from_bytedance(item: dict[str, Any]) -> RawJob:
 def _extract_job_code(title: str) -> str | None:
     m = _JOB_CODE_RE.search(title)
     return m.group(1) if m else None
+
+
+def tencent_campus_detail_page_url(post_id: str) -> str:
+    """Return Tencent campus's current public detail page URL.
+
+    The JSON API remains ``getJobDetailsByPostId``, but the browser detail
+    page is ``post_detail.html?postid=...``. The old
+    ``jobdesc.html?postId=...`` shape now redirects to ``/404.html``.
+    """
+    return "https://join.qq.com/post_detail.html?" + urlencode({"postid": post_id})
 
 
 def _join_list(value: Any) -> str:

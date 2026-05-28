@@ -46,6 +46,10 @@ OfferGuide 的目标不是做一个求职工具箱, 而是做一个能持续推�
 
 不应该继续让用户在十几个入口之间像操作后台系统一样拼流程。
 
+用户手动粘 JD 应视为兜底和监督信号, 不是主路径。只要用户需要自己输入一个目标岗位,
+通常就说明 agent 没有先找到、没有找全, 或没有及时把机会推到用户面前。产品可以保留
+粘 JD 入口来服务眼前需求, 但它应反向驱动 discovery 覆盖改进, 不应被包装成核心成功路径。
+
 ## UI 页面审计
 
 ### 保留为核心入口
@@ -106,7 +110,7 @@ OfferGuide 的目标不是做一个求职工具箱, 而是做一个能持续推�
 | 工具 | 结论 | 原因 |
 | --- | --- | --- |
 | memory | 保留 | 长期偏好、事实、边界和用户反馈必须可持续。 |
-| search_official_jobs / discover_jobs / fetch_jd | 保留 | 发现机会和补全 JD 是 agent 主动性的基础。 |
+| search_official_jobs / discover_jobs / fetch_jd | 保留 | 发现机会是 agent 主动性的基础; fetch_jd 是兜底和补全, 用户粘 JD 时还应触发 discovery 覆盖复盘。 |
 | score_match | 保留 | agent 需要判断是否值得推进, 不能每个 JD 都生成一堆材料。 |
 | tailor_advice | 保留 | 高价值产物, 但应由 agent 在合适时调用。 |
 | interview_prep | 保留 | 投后/面试阶段核心能力。 |
