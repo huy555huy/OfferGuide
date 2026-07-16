@@ -13,10 +13,8 @@ two key insights:
    surprisingly competitive on Chinese 校招 text.
 
 Why we need this:
-Each SKILL invocation in OfferGuide is currently *stateless* — score_match
-re-extracts the user's project list from raw resume text every call. A user
-who's already told us "RemeDi project, AUC 0.83, BERT 双塔" should not have
-that re-derived 100 times.
+Supporting conversations may contain durable user facts that should remain
+auditable instead of being re-derived from chat history on every run.
 
 Long-term memory closes the loop:
 - Each SKILL run gets a follow-up extraction pass that mines facts out of the
@@ -45,7 +43,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Literal
 
 from .llm import LLMClient, LLMError
 from .memory import Store
@@ -414,64 +412,6 @@ def extract_and_persist(
         "inserted": inserted,
         "skipped_dup_or_invalid": skipped,
     }
-
-
-# ─────────── batch extract from skill_runs (for daemon) ─────────
-
-
-def extract_pending_runs(
-    store: Store,
-    *,
-    llm: LLMClient | None,
-    skill_names: tuple[str, ...] = (
-        "score_match", "analyze_gaps", "prepare_interview",
-        "deep_project_prep", "post_interview_reflection",
-        "successful_profile", "profile_resume_gap",
-    ),
-    limit: int = 30,
-) -> dict[str, Any]:
-    """Sweep recent skill_runs that haven't been extracted yet.
-
-    "Haven't been extracted" = no row in user_facts with this run_id.
-    Capped to ``limit`` per call (daemon safety).
-
-    Returns aggregated counters for logging.
-    """
-    with store.connect() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT id, skill_name, output_json
-            FROM skill_runs
-            WHERE skill_name IN ({",".join("?" * len(skill_names))})
-              AND id NOT IN (
-                  SELECT DISTINCT source_run_id FROM user_facts
-                  WHERE source_run_id IS NOT NULL
-              )
-            ORDER BY created_at DESC LIMIT ?
-            """,
-            (*skill_names, limit),
-        ).fetchall()
-
-    total = {
-        "runs_scanned": 0,
-        "candidates": 0,
-        "inserted": 0,
-        "skipped_dup_or_invalid": 0,
-    }
-    for r in rows:
-        run_id, skill_name, output_text = r
-        result = extract_and_persist(
-            store,
-            text=output_text or "",
-            source_skill=skill_name,
-            source_run_id=int(run_id),
-            llm=llm,
-        )
-        total["runs_scanned"] += 1
-        total["candidates"] += result["candidates"]
-        total["inserted"] += result["inserted"]
-        total["skipped_dup_or_invalid"] += result["skipped_dup_or_invalid"]
-    return total
 
 
 # ─────────── helpers ─────────────────────────────

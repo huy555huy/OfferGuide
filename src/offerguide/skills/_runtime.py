@@ -28,10 +28,11 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
-from ..llm import LLMClient
+from ..llm import LLMResponse
 from ..memory import Store
 from ._spec import SkillSpec
 
@@ -56,10 +57,45 @@ class SkillResult:
     latency_ms: int
 
 
+class SkillChatClient(Protocol):
+    """Chat surface required by ``SkillRuntime``.
+
+    The runtime deliberately accepts structural test doubles and compatible
+    provider clients; it does not depend on ``LLMClient`` transport internals.
+    """
+
+    def chat(
+        self,
+        messages: list[Mapping[str, Any]],
+        *,
+        model: str | None = None,
+        temperature: float = 0.3,
+        json_mode: bool = False,
+    ) -> LLMResponse: ...
+
+
+class SkillInvoker(Protocol):
+    """Invocation surface consumed by application and agent orchestration."""
+
+    def invoke(
+        self,
+        spec: SkillSpec,
+        inputs: dict[str, Any],
+        *,
+        json_mode: bool = True,
+        temperature: float = 0.3,
+        model: str | None = None,
+        strict_inputs: bool = True,
+        inject_long_term_memory: bool = True,
+        consult_variant_registry: bool = True,
+        use_cache: bool = False,
+    ) -> Any: ...
+
+
 class SkillRuntime:
     """Stateless dispatcher — `LLMClient` and `Store` are injected so tests can swap stubs."""
 
-    def __init__(self, llm: LLMClient, store: Store) -> None:
+    def __init__(self, llm: SkillChatClient, store: Store) -> None:
         self._llm = llm
         self._store = store
 
@@ -151,10 +187,8 @@ class SkillRuntime:
         # ── Cache lookup ────────────────────────────────────────────
         # ``use_cache=True`` skips the LLM call when the same
         # (skill_name, effective_version, input_hash) already produced an
-        # output. Important UX fix: pre-cache, /jobs/{id}/apply-pack ran
-        # apply_assistant for 30+s on every refresh and felt unresponsive
-        # ("点了准备投递没反应"). View endpoints opt in; agent / evolution
-        # paths keep cache OFF so they always get fresh runs.
+        # output. Callers opt in only when replaying the exact prior invocation
+        # is appropriate; execution paths that require a fresh result leave it off.
         if use_cache:
             with self._store.connect() as conn:
                 cached = conn.execute(

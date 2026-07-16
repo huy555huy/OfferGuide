@@ -25,23 +25,12 @@ SAMPLE_RESUME = Path(
 # ---- skills ---------------------------------------------------------------
 
 
-def test_score_match_skill_loads() -> None:
-    """Locks down on-disk shape only; version-specific assertions live in the per-week tests."""
-    spec = load_skill(SKILLS_ROOT / "score_match")
-    assert spec.name == "score_match"
-    assert spec.version  # any non-empty version
-    assert "calibrated" in spec.description.lower()
-    assert spec.inputs == ("job_text", "user_profile")
-    assert "评估这个岗位" in spec.triggers
-    assert "matching" in spec.tags
-    assert spec.body.strip()
-    assert spec.helper_scripts and spec.helper_scripts[0].name == "helpers.py"
-
-
 def test_discover_skills_finds_all() -> None:
     skills = discover_skills(SKILLS_ROOT)
     names = {s.name for s in skills}
-    assert "score_match" in names
+    assert skills
+    assert len(names) == len(skills)
+    assert all(spec.body.strip() for spec in skills)
 
 
 def test_skill_loader_rejects_missing_frontmatter(tmp_path: Path) -> None:
@@ -89,20 +78,30 @@ def test_store_init_schema_is_idempotent(tmp_path: Path) -> None:
     assert db.exists()
     counts = store.health_check()
     assert counts == {
-        "profile": 0,
+        "master_resume": 0,
         "jobs": 0,
         "applications": 0,
         "application_events": 0,
+        "resume_workspaces": 0,
         "skill_runs": 0,
         "feedback": 0,
         "interviews": 0,
         "evolution_log": 0,
         "inbox_items": 0,
-        "interview_experiences": 0,
-        "company_briefs": 0,
         "behavioral_stories": 0,
         "project_records": 0,
     }
+
+    with store.connect() as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    assert {"master_resume", "resume_workspaces"} <= tables
+    assert "profile" not in tables
+    assert "application_snapshots" not in tables
 
 
 def test_store_pragmas_applied(tmp_path: Path) -> None:
@@ -147,13 +146,21 @@ def test_load_resume_pdf_missing_file_raises(tmp_path: Path) -> None:
         offerguide.load_resume_pdf(missing)
 
 
+def test_master_resume_rejects_non_pdf_input(tmp_path: Path) -> None:
+    docx = tmp_path / "resume.docx"
+    docx.write_text("not a PDF", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a PDF"):
+        offerguide.load_resume_pdf(docx)
+
+
 @pytest.mark.skipif(not SAMPLE_RESUME.exists(), reason="sample resume PDF not on this machine")
 def test_load_real_resume_extracts_text() -> None:
-    profile = offerguide.load_resume_pdf(SAMPLE_RESUME)
-    assert len(profile.raw_resume_text) > 500
-    assert profile.source_pdf is not None
+    source = offerguide.load_resume_pdf(SAMPLE_RESUME)
+    assert len(source.extracted_text) > 500
+    assert source.source_path == str(SAMPLE_RESUME.resolve())
+    assert len(source.sha256) == 64
     # The resume is in Chinese — sanity-check that some Chinese characters survived
-    assert any("一" <= ch <= "鿿" for ch in profile.raw_resume_text)
+    assert any("一" <= ch <= "鿿" for ch in source.extracted_text)
 
 
 # ---- agent ----------------------------------------------------------------
@@ -165,10 +172,14 @@ def test_load_real_resume_extracts_text() -> None:
 def test_public_api_surface() -> None:
     """Lock down what offerguide exports at the top level — refactors must update __all__."""
     expected = {
+        "MasterResumeDocument",
+        "MasterResumeSource",
+        "ResumeContext",
+        "ResumeDocument",
         "SkillSpec",
         "Store",
-        "UserProfile",
         "__version__",
+        "build_resume_context",
         "discover_skills",
         "load_resume_pdf",
         "load_skill",
@@ -189,7 +200,16 @@ def test_can_insert_and_query_jobs(tmp_path: Path) -> None:
         conn.execute(
             "INSERT INTO jobs(source, source_id, url, title, company, location, raw_text, content_hash) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            ("nowcoder", "abc123", "https://x", "Backend SE Intern", "ByteDance", "Shanghai", "JD text", "hash1"),
+            (
+                "nowcoder",
+                "abc123",
+                "https://x",
+                "Backend SE Intern",
+                "ByteDance",
+                "Shanghai",
+                "JD text",
+                "hash1",
+            ),
         )
     with store.connect() as conn:
         row = conn.execute("SELECT title, company FROM jobs").fetchone()

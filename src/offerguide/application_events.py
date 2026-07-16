@@ -3,12 +3,11 @@
 Why an event log instead of a single mutable status field:
 
 - An application's history matters as much as its current state. "投递 → HR 看了
-  → 沉默 7 天 → 笔试 → 一面挂了" is a *sequence* — flattening it to one status
+  → 笔试 → 一面" is a *sequence* — flattening it to one status
   loses the timing information needed for any reply-rate or response-latency
   analysis.
-- Silence is queryable: "applications whose latest event is older than 14 days
-  with no `replied|assessment|interview` event" — a single status field can't
-  express this without sentinel values that pollute the schema.
+- Time since the latest real event remains queryable without adding synthetic
+  reminder events or sentinel statuses.
 - It's append-only, so the log can be replayed to derive any view we want
   later (status snapshots, survival curves, conversion funnels).
 
@@ -22,7 +21,7 @@ Sources of events (W5' surface; richer integrations come later):
 - ``email``     — parsed from a future email integration
 - ``platform``  — pulled from a platform's API / page parse
 - ``calendar``  — derived from interview invites
-- ``inferred``  — synthetic: e.g. silent_check events written by the cron job
+- ``inferred``  — an event inferred from external evidence rather than entered manually
 """
 
 from __future__ import annotations
@@ -39,10 +38,10 @@ EventKind = Literal[
     "replied",
     "assessment",
     "interview",
+    "interview_cancelled",
     "rejected",
     "offer",
     "withdrawn",
-    "silent_check",
 ]
 """Allowed event kinds. Anything else raises ValueError on insert.
 
@@ -51,6 +50,8 @@ Python validator is the gate) and any consumers that branch on kind. Keep this
 list small and concrete — bespoke metadata belongs in `payload`."""
 
 EventSource = Literal["manual", "email", "platform", "calendar", "inferred"]
+CalendarAction = Literal["scheduled", "cancelled"]
+CalendarRecordState = Literal["recorded", "duplicate", "stale"]
 
 _VALID_KINDS: frozenset[str] = frozenset(EventKind.__args__)
 _VALID_SOURCES: frozenset[str] = frozenset(EventSource.__args__)
@@ -64,6 +65,18 @@ class ApplicationEvent:
     occurred_at: float
     source: EventSource
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CalendarRecordOutcome:
+    """Result of applying one versioned calendar message to the event log."""
+
+    state: CalendarRecordState
+    event: ApplicationEvent
+
+    @property
+    def created(self) -> bool:
+        return self.state == "recorded"
 
 
 def record(
@@ -116,6 +129,141 @@ def record(
     )
 
 
+def record_calendar_event(
+    store: Store,
+    *,
+    application_id: int,
+    uid: str,
+    sequence: int,
+    action: CalendarAction,
+    payload: dict[str, Any],
+) -> CalendarRecordOutcome:
+    """Record a calendar revision exactly once and reject stale replays.
+
+    RFC 5546 cancellation messages commonly reuse the latest REQUEST sequence,
+    so identity includes the action as well as UID and SEQUENCE. A cancellation
+    at the same sequence is therefore one additional real lifecycle event; an
+    exact replay is idempotent. Older sequences, and a REQUEST replay after a
+    cancellation at the same sequence, are stale and do not mutate state.
+    """
+    normalized_uid = uid.strip()
+    if not normalized_uid:
+        raise ValueError("calendar event UID is required")
+    if sequence < 0:
+        raise ValueError("calendar event SEQUENCE must be non-negative")
+    if action not in ("scheduled", "cancelled"):
+        raise ValueError(f"unknown calendar action: {action!r}")
+
+    kind: EventKind = (
+        "interview_cancelled" if action == "cancelled" else "interview"
+    )
+    normalized_payload = {
+        **payload,
+        "ics_uid": normalized_uid,
+        "ics_sequence": sequence,
+        "calendar_action": action,
+    }
+    payload_json = json.dumps(normalized_payload, ensure_ascii=False)
+
+    with store.connect() as conn:
+        # Serialize read-before-write so simultaneous uploads cannot append the
+        # same calendar revision twice without requiring a second receipt table.
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT id, application_id, kind, occurred_at, source, payload_json "
+            "FROM application_events "
+            "WHERE application_id = ? AND source = 'calendar' "
+            "ORDER BY id ASC",
+            (application_id,),
+        ).fetchall()
+        matching: list[tuple[ApplicationEvent, int, str]] = []
+        for row in rows:
+            event = _row_to_event(row)
+            event_uid = str(event.payload.get("ics_uid") or "").strip()
+            if event_uid != normalized_uid:
+                continue
+            raw_sequence = event.payload.get("ics_sequence", 0)
+            try:
+                event_sequence = int(raw_sequence)
+            except (TypeError, ValueError):
+                continue
+            event_action = str(event.payload.get("calendar_action") or "scheduled")
+            matching.append((event, event_sequence, event_action))
+
+        max_sequence = max(
+            (event_sequence for _event, event_sequence, _action in matching),
+            default=-1,
+        )
+        if sequence < max_sequence:
+            latest_event = max(matching, key=lambda item: (item[1], item[0].id))[0]
+            return CalendarRecordOutcome(state="stale", event=latest_event)
+
+        cancelled_at_sequence = any(
+            event_sequence == sequence and event_action == "cancelled"
+            for _event, event_sequence, event_action in matching
+        )
+        if action == "scheduled" and cancelled_at_sequence:
+            latest_event = max(matching, key=lambda item: (item[1], item[0].id))[0]
+            return CalendarRecordOutcome(state="stale", event=latest_event)
+
+        for event, event_sequence, event_action in matching:
+            if event_sequence == sequence and event_action == action:
+                return CalendarRecordOutcome(state="duplicate", event=event)
+
+        row = conn.execute(
+            "INSERT INTO application_events(application_id, kind, source, payload_json) "
+            "VALUES (?, ?, 'calendar', ?) RETURNING id, occurred_at",
+            (application_id, kind, payload_json),
+        ).fetchone()
+        if row is None:  # pragma: no cover - SQLite RETURNING contract
+            raise RuntimeError("calendar event insert returned no row")
+        event = ApplicationEvent(
+            id=int(row[0]),
+            application_id=application_id,
+            kind=kind,
+            occurred_at=float(row[1]),
+            source="calendar",
+            payload=normalized_payload,
+        )
+        from .state_machine import sync_status_in_transaction
+
+        sync_status_in_transaction(
+            conn,
+            application_id,
+            event.kind,
+            event.payload,
+        )
+        return CalendarRecordOutcome(state="recorded", event=event)
+
+
+def has_calendar_uid(
+    store: Store,
+    *,
+    application_id: int,
+    uid: str,
+) -> bool:
+    """Whether this application has already accepted a calendar UID."""
+    normalized_uid = uid.strip()
+    if not normalized_uid:
+        return False
+    with store.connect() as conn:
+        rows = conn.execute(
+            "SELECT payload_json FROM application_events "
+            "WHERE application_id = ? AND source = 'calendar'",
+            (application_id,),
+        ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row[0]) if row[0] else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("ics_uid") or "").strip() == normalized_uid:
+            return True
+    return False
+
+
 def list_events(
     store: Store, application_id: int, *, limit: int = 200
 ) -> list[ApplicationEvent]:
@@ -146,8 +294,8 @@ def derive_status(store: Store, application_id: int) -> str:
     """Current status derived from the event log.
 
     Returns the latest event's ``kind``, or ``'no_events'`` if no events exist.
-    Callers that need richer derivation (e.g. "submitted but silent for 14d")
-    should use :func:`silence_age_days` alongside this.
+    Callers that need elapsed time since the latest real event can use
+    :func:`silence_age_days` alongside this.
     """
     last = latest(store, application_id)
     return last.kind if last else "no_events"
@@ -156,9 +304,8 @@ def derive_status(store: Store, application_id: int) -> str:
 def silence_age_days(store: Store, application_id: int, *, now: float | None = None) -> float | None:
     """Days since the latest non-synthetic event. None if no events yet.
 
-    "Synthetic" means events with source ``'inferred'`` — those are created by
-    the silence cron itself, so counting them as "activity" would mask real
-    silence. Returns 0.0 if the latest non-synthetic event is in the future
+    Inferred events are excluded so elapsed time reflects confirmed lifecycle
+    activity. Returns 0.0 if the latest non-inferred event is in the future
     (clock skew safety).
     """
     with store.connect() as conn:

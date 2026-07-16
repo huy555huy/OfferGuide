@@ -77,6 +77,4 @@ class TestAnthropicSkillsCompat:
 def test_at_least_one_skill_exists() -> None:
     """Sanity: skill discovery isn't broken (e.g. wrong path)."""
     skills = _all_skill_md()
-    assert len(skills) >= 5, (
-        f"expected ≥5 SKILLs, found {len(skills)} in {SKILLS_ROOT}"
-    )
+    assert skills, f"expected at least one SKILL.md in {SKILLS_ROOT}"

@@ -1,22 +1,20 @@
-"""Daily LLM cost guardrail (W15.15 review answer).
+"""Optional operator-configured daily LLM cost guardrail.
 
-The agent can run fast loops or call expensive sub-agents. Without a
+The agent can run multi-step loops. Without an
 hard cap, a runaway worldview update or stuck retry can torch the
 budget. This module enforces a per-UTC-day USD cap by summing recent
 ``skill_runs.cost_usd`` + ``harness_runs.cost_usd``.
 
 Design choice: **enforced at entry points**, not per-LLM-call. The two
 entry points that drive 99% of cost are:
-1. ``agent_runtime.run()`` — agent loop with potentially many LLM calls
-2. ``evaluate.evaluate_job()`` — direct flow for paste-1-JD
-
-Each calls ``enforce_daily_budget(store)`` once at start. If over
+The conversation-agent entry point calls ``enforce_daily_budget(store)`` once at start. If over
 cap, raises ``BudgetExceeded`` which the caller surfaces as a 429-ish
 error. We don't try to be clever with mid-run cancellation — agent
 loops are short enough (~$0.10) that "stop the next one" is cheap
 enough.
 
-Default cap: $5/day. Override via ``OFFERGUIDE_DAILY_BUDGET_USD`` env.
+There is no product-level default cap. Set ``OFFERGUIDE_DAILY_BUDGET_USD``
+explicitly when an operator wants a hard deployment limit.
 """
 
 from __future__ import annotations
@@ -29,10 +27,8 @@ from ..memory import Store
 log = logging.getLogger(__name__)
 
 
-DEFAULT_DAILY_CAP_USD = 5.0
-"""$5/day default. Anthropic dev average is $13/active-day; for a
-single-user job-hunt agent this is plenty headroom while preventing
-runaway cost. Override per-deployment via env."""
+DEFAULT_DAILY_CAP_USD = 0.0
+"""Disabled by default; product quality is not traded for an arbitrary cap."""
 
 
 class BudgetExceeded(RuntimeError):
@@ -87,8 +83,7 @@ def get_today_spend_usd(store: Store) -> float:
 def enforce_daily_budget(store: Store, cap_usd: float | None = None) -> None:
     """Raise ``BudgetExceeded`` if today's LLM spend is at/over the cap.
 
-    Call once at the start of any LLM-driven flow (agent runtime loop entry,
-    evaluate-job entry). Cheap (1 SQL aggregate query).
+    Call once at the start of an LLM-driven flow. Cheap (1 SQL aggregate query).
     """
     cap = cap_usd if cap_usd is not None else get_daily_cap_usd()
     if cap <= 0:
@@ -100,5 +95,7 @@ def enforce_daily_budget(store: Store, cap_usd: float | None = None) -> None:
     if spent > cap * 0.8:
         log.warning(
             "budget: today's LLM spend ${:.4f} is at {:.0%} of cap ${:.2f}",
-            spent, spent / cap, cap,
+            spent,
+            spent / cap,
+            cap,
         )

@@ -165,7 +165,7 @@ def check_tavily_key() -> bool:
     key = os.environ.get("TAVILY_API_KEY", "")
     if not key:
         _warn(
-            "TAVILY_API_KEY not set (discover_jobs / web_search will be disabled)",
+            "TAVILY_API_KEY not set (research_jobs / web_search will be disabled)",
             "Get a key at https://tavily.com/ (free tier 1000 calls/mo)",
         )
         return True  # not fatal — agent can still help with pasted JDs
@@ -229,9 +229,8 @@ def check_resume_file() -> bool:
     resume = settings.resume_pdf
     if resume is None:
         _warn(
-            "OFFERGUIDE_RESUME_PDF not set (score_match / tailor_advice will fail)",
-            'Add to .env: `OFFERGUIDE_RESUME_PDF="/path/to/中文简历.pdf"` '
-            "(or .docx — both supported)",
+            "OFFERGUIDE_RESUME_PDF not set (resume workspace creation will fail)",
+            'Add to .env: `OFFERGUIDE_RESUME_PDF="/path/to/中文简历.pdf"`',
         )
         return True
     p = Path(resume)
@@ -245,6 +244,12 @@ def check_resume_file() -> bool:
         _red(
             f"Resume file not readable: {p}",
             f"Fix permissions: `chmod 644 {p}`",
+        )
+        return False
+    if p.suffix.casefold() != ".pdf":
+        _red(
+            f"Resume file is not a PDF: {p}",
+            "Set OFFERGUIDE_RESUME_PDF to the master resume PDF",
         )
         return False
     sz = p.stat().st_size
@@ -273,8 +278,8 @@ def check_port_free() -> bool:
 def check_db_schema() -> bool:
     try:
         from offerguide import Store
-        from offerguide.config import Settings
         from offerguide.agent_runtime import _schema as harness_schema
+        from offerguide.config import Settings
         settings = Settings.from_env()
         store = Store(settings.db_path)
         store.init_schema()
@@ -284,7 +289,7 @@ def check_db_schema() -> bool:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()}
         required = {"jobs", "applications", "skill_runs", "harness_runs",
-                    "harness_events", "harness_scheduled_wakes",
+                    "harness_events",
                     "evolution_signals", "inbox_items"}
         missing = required - tables
         if missing:

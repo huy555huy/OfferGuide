@@ -166,8 +166,6 @@ class GoalProgress:
     # Funnel counts
     apps_total: int
     apps_active: int
-    apps_silent_7d: int
-    apps_silent_14d: int
     interviews_scheduled: int
     interviews_done: int
     offers: int
@@ -260,18 +258,6 @@ class GoalProgress:
                 level=3,
             ),
         ]
-        if self.apps_silent_14d > 0 or self.apps_silent_7d > 0:
-            blocks.append(
-                render_block(
-                    "沉默信号 (事实)",
-                    lines=(
-                        f"- 14+ 天未记录新进展: {self.apps_silent_14d}",
-                        f"- 7-14 天未记录新进展: {max(0, self.apps_silent_7d - self.apps_silent_14d)}",
-                        "- 这表示系统未记录新状态, 不是对用户/公司状态的结论。",
-                    ),
-                    level=3,
-                )
-            )
         blocks.append(
             render_block(
                 f"评估 ({assessment.label})",
@@ -323,16 +309,6 @@ def compute_progress(store: Store, goal: Goal) -> GoalProgress:
             "SELECT COUNT(*) FROM applications "
             "WHERE status NOT IN ('offer','rejected','withdrawn')"
         ).fetchone()[0]
-        apps_silent_7d = conn.execute(
-            "SELECT COUNT(*) FROM applications "
-            "WHERE status NOT IN ('offer','rejected','withdrawn') "
-            "  AND last_status_change < julianday('now') - 7"
-        ).fetchone()[0]
-        apps_silent_14d = conn.execute(
-            "SELECT COUNT(*) FROM applications "
-            "WHERE status NOT IN ('offer','rejected','withdrawn') "
-            "  AND last_status_change < julianday('now') - 14"
-        ).fetchone()[0]
         interviews_scheduled = conn.execute(
             "SELECT COUNT(*) FROM interviews "
             "WHERE scheduled_at IS NOT NULL "
@@ -354,7 +330,6 @@ def compute_progress(store: Store, goal: Goal) -> GoalProgress:
         goal=goal,
         days_left=days_left, days_elapsed=days_elapsed,
         apps_total=apps_total, apps_active=apps_active,
-        apps_silent_7d=apps_silent_7d, apps_silent_14d=apps_silent_14d,
         interviews_scheduled=interviews_scheduled, interviews_done=interviews_done,
         offers=offers, rejects=rejects,
     )

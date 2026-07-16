@@ -8,9 +8,12 @@ and behavior obvious.
 Provider configuration is by env var (so SKILL helpers, tests, CI can all swap
 in stubs without code changes):
 
-    DEEPSEEK_API_KEY      # mandatory for DeepSeek calls
-    DEEPSEEK_BASE_URL     # optional, defaults to https://api.deepseek.com
-    OFFERGUIDE_DEFAULT_MODEL  # optional, defaults to deepseek-v4-flash
+    OFFERGUIDE_LLM_API_KEY   # canonical
+    OFFERGUIDE_LLM_BASE_URL  # optional, defaults to https://api.deepseek.com
+    OFFERGUIDE_LLM_MODEL     # optional, defaults to deepseek-v4-flash
+
+Older DEEPSEEK_*, TOKEN/BASE_URL, OPENAI_*, and OFFERGUIDE_DEFAULT_MODEL
+names remain as fallbacks through `_env_first`.
 
 Confirmed model ids from https://api-docs.deepseek.com/quick_start/pricing
 (2026-04-28): deepseek-v4-flash, deepseek-v4-pro, deepseek-chat, deepseek-reasoner.
@@ -37,6 +40,14 @@ DEFAULT_TRANSPORT_RETRIES = 1
 log = logging.getLogger(__name__)
 
 Role = Literal["system", "user", "assistant"]
+
+
+def _env_first(*names: str) -> str | None:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
 
 
 def _parse_tool_arguments(args_raw: str) -> dict[str, Any]:
@@ -252,15 +263,31 @@ class LLMClient:
         default_model: str | None = None,
         timeout_s: float = 180.0,
     ) -> None:
-        self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+        self.api_key = api_key or _env_first(
+            "OFFERGUIDE_LLM_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "TOKEN",
+            "OPENAI_API_KEY",
+        ) or ""
         raw_base = (
             base_url
-            or os.environ.get("DEEPSEEK_BASE_URL")
+            or _env_first(
+                "OFFERGUIDE_LLM_BASE_URL",
+                "DEEPSEEK_BASE_URL",
+                "BASE_URL",
+                "OPENAI_BASE_URL",
+            )
             or DEFAULT_DEEPSEEK_BASE
         ).rstrip("/")
         self.base_url = _normalize_base_url(raw_base)
         self.default_model = (
-            default_model or os.environ.get("OFFERGUIDE_DEFAULT_MODEL") or DEFAULT_MODEL
+            default_model
+            or _env_first(
+                "OFFERGUIDE_LLM_MODEL",
+                "OFFERGUIDE_DEFAULT_MODEL",
+                "MODEL",
+            )
+            or DEFAULT_MODEL
         )
         self._http = httpx.Client(timeout=timeout_s)
 
@@ -290,7 +317,7 @@ class LLMClient:
 
     def chat(
         self,
-        messages: list[Mapping[str, str]],
+        messages: list[Mapping[str, Any]],
         *,
         model: str | None = None,
         temperature: float = 0.3,
@@ -299,7 +326,8 @@ class LLMClient:
     ) -> LLMResponse:
         if not self.api_key:
             raise LLMError(
-                "No API key configured. Set DEEPSEEK_API_KEY or pass api_key= to LLMClient."
+                "No API key configured. Set OFFERGUIDE_LLM_API_KEY "
+                "(or DEEPSEEK_API_KEY) or pass api_key= to LLMClient."
             )
         body: dict[str, Any] = {
             "model": model or self.default_model,

@@ -145,7 +145,7 @@ async function markAppliedFromList(jobId, btn) {
     try {
         const r = await fetch(`/api/jobs/${jobId}/applied`, {method: 'POST'});
         if (r.ok) {
-            window.toast('✓ 已投 — agent 7 天后会查回应', 'success', 3500);
+            window.toast('已冻结实际提交的 JD、简历和投递材料', 'success', 3500);
             setTimeout(() => location.reload(), 1000);
         } else {
             window.toast('失败: ' + await r.text(), 'error');

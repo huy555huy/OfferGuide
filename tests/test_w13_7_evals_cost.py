@@ -28,7 +28,8 @@ class TestPricing:
     def test_known_model_priced(self):
         cost = estimate_cost_usd(
             model="claude-sonnet-4-6",
-            prompt_tokens=1000, completion_tokens=200,
+            prompt_tokens=1000,
+            completion_tokens=200,
         )
         # 1000 * 3.00 / 1M + 200 * 15.00 / 1M = 0.003 + 0.003 = 0.006
         assert cost == pytest.approx(0.006, abs=0.001)
@@ -36,18 +37,21 @@ class TestPricing:
     def test_deepseek_cheaper_than_claude(self):
         cost_ds = estimate_cost_usd(
             model="deepseek-v4-flash",
-            prompt_tokens=10000, completion_tokens=5000,
+            prompt_tokens=10000,
+            completion_tokens=5000,
         )
         cost_cl = estimate_cost_usd(
             model="claude-sonnet-4-6",
-            prompt_tokens=10000, completion_tokens=5000,
+            prompt_tokens=10000,
+            completion_tokens=5000,
         )
         assert cost_ds < cost_cl
 
     def test_unknown_model_uses_fallback(self):
         cost = estimate_cost_usd(
             model="nonexistent-model-xyz",
-            prompt_tokens=1000, completion_tokens=200,
+            prompt_tokens=1000,
+            completion_tokens=200,
         )
         # Falls back to mid-range estimate (claude-sonnet-tier)
         assert cost > 0
@@ -57,19 +61,25 @@ class TestPricing:
         """claude-sonnet-4-6-20251022 should match claude-sonnet-4-6 base."""
         cost = estimate_cost_usd(
             model="claude-sonnet-4-6-20251022",
-            prompt_tokens=1000, completion_tokens=200,
+            prompt_tokens=1000,
+            completion_tokens=200,
         )
         expected = estimate_cost_usd(
             model="claude-sonnet-4-6",
-            prompt_tokens=1000, completion_tokens=200,
+            prompt_tokens=1000,
+            completion_tokens=200,
         )
         assert cost == pytest.approx(expected, abs=0.0001)
 
     def test_zero_tokens_zero_cost(self):
-        assert estimate_cost_usd(
-            model="claude-sonnet-4-6",
-            prompt_tokens=0, completion_tokens=0,
-        ) == 0
+        assert (
+            estimate_cost_usd(
+                model="claude-sonnet-4-6",
+                prompt_tokens=0,
+                completion_tokens=0,
+            )
+            == 0
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -86,6 +96,7 @@ def store(tmp_path):
 
 class _CostStubLLM:
     """Returns LLMResponse with explicit cost_usd set."""
+
     def __init__(self, cost: float = 0.05):
         self._cost = cost
 
@@ -93,7 +104,8 @@ class _CostStubLLM:
         return LLMResponse(
             content='{"probability": 0.7, "reasoning": "ok"}',
             model="claude-sonnet-4-6",
-            prompt_tokens=1000, completion_tokens=200,
+            prompt_tokens=1000,
+            completion_tokens=200,
             cost_usd=self._cost,
         )
 
@@ -101,8 +113,11 @@ class _CostStubLLM:
 class TestCostPersistence:
     def test_skill_run_records_cost(self, store):
         seed_spec = SkillSpec(
-            name="test_cost", description="d", version="0.1.0",
-            body="b", inputs=("x",),
+            name="test_cost",
+            description="d",
+            version="0.1.0",
+            body="b",
+            inputs=("x",),
         )
         rt = SkillRuntime(llm=_CostStubLLM(cost=0.05), store=store)
         result = rt.invoke(seed_spec, {"x": "y"})
@@ -110,17 +125,24 @@ class TestCostPersistence:
 
         with store.connect() as conn:
             row = conn.execute(
-                "SELECT cost_usd FROM skill_runs WHERE id = ?", (result.skill_run_id,),
+                "SELECT cost_usd FROM skill_runs WHERE id = ?",
+                (result.skill_run_id,),
             ).fetchone()
         assert row[0] == pytest.approx(0.05)
 
     def test_zero_cost_when_stub_absent(self, store):
         """Old stub-style LLMs without cost_usd should not crash; record 0."""
+
         class _OldStub:
             def chat(self, messages, **kw):
                 return LLMResponse(content="{}", model="stub")  # no cost set
+
         seed_spec = SkillSpec(
-            name="test", description="d", version="0.1.0", body="b", inputs=(),
+            name="test",
+            description="d",
+            version="0.1.0",
+            body="b",
+            inputs=(),
         )
         rt = SkillRuntime(llm=_OldStub(), store=store)
         result = rt.invoke(seed_spec, {})
@@ -135,7 +157,8 @@ class TestCostPersistence:
 class TestEvalScoring:
     def test_passes_when_all_assertions_satisfied(self):
         case = EvalCase(
-            name="ok", inputs={},
+            name="ok",
+            inputs={},
             expected={
                 "json_valid": True,
                 "must_contain_keys": ["a"],
@@ -147,51 +170,34 @@ class TestEvalScoring:
         assert failures == []
 
     def test_fails_missing_key(self):
-        case = EvalCase(name="x", inputs={},
-                         expected={"json_valid": True, "must_contain_keys": ["xxx"]})
+        case = EvalCase(
+            name="x", inputs={}, expected={"json_valid": True, "must_contain_keys": ["xxx"]}
+        )
         failures = _score_case(case, parsed={"yyy": 1}, raw_text="")
         assert any("xxx" in f for f in failures)
 
     def test_fails_missing_phrase(self):
-        case = EvalCase(name="x", inputs={},
-                         expected={"must_contain_phrases_in_output": ["LoRA"]})
+        case = EvalCase(name="x", inputs={}, expected={"must_contain_phrases_in_output": ["LoRA"]})
         failures = _score_case(case, parsed=None, raw_text="lots of words but no L word")
         assert any("LoRA" in f for f in failures)
 
     def test_fails_forbidden_phrase(self):
-        case = EvalCase(name="x", inputs={},
-                         expected={"must_not_contain_phrases": ["编造"]})
+        case = EvalCase(name="x", inputs={}, expected={"must_not_contain_phrases": ["编造"]})
         failures = _score_case(case, parsed=None, raw_text="建议编造一个项目")
         assert any("编造" in f for f in failures)
 
     def test_fails_score_range(self):
-        case = EvalCase(name="x", inputs={},
-                         expected={"score_range": {"prob": [0.4, 0.6]}})
+        case = EvalCase(name="x", inputs={}, expected={"score_range": {"prob": [0.4, 0.6]}})
         failures = _score_case(case, parsed={"prob": 0.9}, raw_text="")
         assert any("0.9" in f and "0.4" in f for f in failures)
 
     def test_score_range_passes_in_bounds(self):
-        case = EvalCase(name="x", inputs={},
-                         expected={"score_range": {"prob": [0.4, 0.6]}})
+        case = EvalCase(name="x", inputs={}, expected={"score_range": {"prob": [0.4, 0.6]}})
         failures = _score_case(case, parsed={"prob": 0.5}, raw_text="")
         assert failures == []
 
 
 class TestEvalDatasets:
-    def test_score_match_dataset_loads(self):
-        cases = load_cases("score_match")
-        assert len(cases) > 0
-        # First case should have basic structure
-        c = cases[0]
-        assert c.name
-        assert "job_text" in c.inputs
-        assert "user_profile" in c.inputs
-        assert "expected" in c.__dict__
-
-    def test_analyze_gaps_dataset_loads(self):
-        cases = load_cases("analyze_gaps")
-        assert len(cases) > 0
-
     def test_unknown_skill_returns_empty(self):
         assert load_cases("nonexistent_skill_xyz") == []
 
@@ -200,7 +206,9 @@ class TestRunEvalIntegration:
     def test_runner_executes_against_stub_and_aggregates(self, store):
         """Smoke: runner invokes SKILL through SkillRuntime + collects results."""
         seed_spec = SkillSpec(
-            name="score_match", description="d", version="0.1.0",
+            name="example_eval",
+            description="d",
+            version="0.1.0",
             body="output JSON with probability + reasoning",
             inputs=("job_text", "user_profile"),
         )
@@ -208,7 +216,8 @@ class TestRunEvalIntegration:
         # Minimal cases (don't actually rely on the on-disk dataset for this test)
         cases = [
             EvalCase(
-                name="t1", inputs={"job_text": "x", "user_profile": "y"},
+                name="t1",
+                inputs={"job_text": "x", "user_profile": "y"},
                 expected={
                     "json_valid": True,
                     "must_contain_keys": ["probability"],
@@ -216,6 +225,7 @@ class TestRunEvalIntegration:
             ),
         ]
         from offerguide.eval.runner import run_eval_for_skill
+
         report = run_eval_for_skill(runtime=rt, spec=seed_spec, cases=cases)
         assert report.total == 1
         assert report.passed == 1
@@ -223,19 +233,24 @@ class TestRunEvalIntegration:
 
     def test_runner_marks_failure_when_assertion_fails(self, store):
         seed_spec = SkillSpec(
-            name="x", description="d", version="0.1.0",
-            body="b", inputs=("a",),
+            name="x",
+            description="d",
+            version="0.1.0",
+            body="b",
+            inputs=("a",),
         )
         rt = SkillRuntime(llm=_CostStubLLM(cost=0.01), store=store)
         cases = [
             EvalCase(
-                name="will_fail", inputs={"a": "x"},
+                name="will_fail",
+                inputs={"a": "x"},
                 expected={
                     "must_contain_phrases_in_output": ["this string is not in output"],
                 },
             ),
         ]
         from offerguide.eval.runner import run_eval_for_skill
+
         report = run_eval_for_skill(runtime=rt, spec=seed_spec, cases=cases)
         assert report.passed == 0
         assert report.results[0].failures

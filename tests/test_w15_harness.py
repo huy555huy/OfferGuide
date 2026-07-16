@@ -21,16 +21,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 import offerguide
-from offerguide.config import Settings
 from offerguide.agent_runtime import (
     AgentRuntimeDeps,
     MemoryStore,
     SystemFacts,
     TriggerEvent,
-    fire_event,
-    make_cron_heartbeat,
     make_user_input_trigger,
-    poll_pending,
 )
 from offerguide.agent_runtime import _schema as harness_schema
 from offerguide.agent_runtime import (
@@ -45,6 +41,7 @@ from offerguide.agent_runtime.loop import RunResult
 from offerguide.agent_runtime.loop import run as agent_runtime_run
 from offerguide.agent_runtime.memory import MEMORY_TOOL_SCHEMA
 from offerguide.agent_runtime.tools import ALL_TOOL_SCHEMAS, dispatch
+from offerguide.config import Settings
 from offerguide.llm import LLMResponse, ToolCall
 
 # ═══════════════════════════════════════════════════════════════════
@@ -72,17 +69,27 @@ class StubLLM:
         return LLMResponse(content="(stub chat)", model="stub")
 
     def push_text(self, text: str) -> None:
-        self.queue.append(LLMResponse(
-            content=text, model="stub",
-            prompt_tokens=100, completion_tokens=20,
-        ))
+        self.queue.append(
+            LLMResponse(
+                content=text,
+                model="stub",
+                prompt_tokens=100,
+                completion_tokens=20,
+            )
+        )
 
-    def push_tool_call(self, *, name: str, arguments: dict[str, Any], call_id: str = "tc_0") -> None:
-        self.queue.append(LLMResponse(
-            content="", model="stub",
-            tool_calls=[ToolCall(id=call_id, name=name, arguments=arguments)],
-            prompt_tokens=100, completion_tokens=10,
-        ))
+    def push_tool_call(
+        self, *, name: str, arguments: dict[str, Any], call_id: str = "tc_0"
+    ) -> None:
+        self.queue.append(
+            LLMResponse(
+                content="",
+                model="stub",
+                tool_calls=[ToolCall(id=call_id, name=name, arguments=arguments)],
+                prompt_tokens=100,
+                completion_tokens=10,
+            )
+        )
 
 
 @pytest.fixture
@@ -120,13 +127,12 @@ class TestMemoryTool:
     def test_bootstrap_creates_starter_files(self, tmp_worldview):
         m = MemoryStore(root=tmp_worldview)
         files = set(m.list_files())
-        assert "MEMORY.md" in files
-        assert "agenda.md" in files
-        assert "candidate.md" in files
-        assert "tracked-jobs.md" in files
-        assert "upcoming-events.md" in files
-        assert "reflections.md" in files
-        assert "strategy.md" in files
+        assert files == {
+            "MEMORY.md",
+            "candidate.md",
+            "tracked-jobs.md",
+            "upcoming-events.md",
+        }
 
     def test_view_returns_numbered_lines(self, tmp_worldview):
         m = MemoryStore(root=tmp_worldview)
@@ -136,10 +142,8 @@ class TestMemoryTool:
 
     def test_view_with_view_range(self, tmp_worldview):
         m = MemoryStore(root=tmp_worldview)
-        m.execute({"command": "create", "path": "x.md",
-                   "file_text": "a\nb\nc\nd\ne\n"})
-        result = m.execute({"command": "view", "path": "x.md",
-                            "view_range": [2, 4]})
+        m.execute({"command": "create", "path": "x.md", "file_text": "a\nb\nc\nd\ne\n"})
+        result = m.execute({"command": "view", "path": "x.md", "view_range": [2, 4]})
         assert "OK x.md (lines 2-4)" in result
         assert "    2\tb" in result and "    4\td" in result
         assert "    1\ta" not in result
@@ -152,42 +156,42 @@ class TestMemoryTool:
 
     def test_create_writes_and_overwrites(self, tmp_worldview):
         m = MemoryStore(root=tmp_worldview)
-        r1 = m.execute({"command": "create", "path": "new.md",
-                        "file_text": "hello"})
+        r1 = m.execute({"command": "create", "path": "new.md", "file_text": "hello"})
         assert "OK created new.md" in r1
         # Overwrite
-        r2 = m.execute({"command": "create", "path": "new.md",
-                        "file_text": "world"})
+        r2 = m.execute({"command": "create", "path": "new.md", "file_text": "world"})
         assert "OK created" in r2
         check = m.execute({"command": "view", "path": "new.md"})
         assert "world" in check
 
     def test_str_replace_unique_match_required(self, tmp_worldview):
         m = MemoryStore(root=tmp_worldview)
-        m.execute({"command": "create", "path": "x.md",
-                   "file_text": "foo bar foo"})
+        m.execute({"command": "create", "path": "x.md", "file_text": "foo bar foo"})
         # Non-unique → ERROR
-        r = m.execute({"command": "str_replace", "path": "x.md",
-                       "old_str": "foo", "new_str": "BAR"})
+        r = m.execute(
+            {"command": "str_replace", "path": "x.md", "old_str": "foo", "new_str": "BAR"}
+        )
         assert "ERROR" in r
         assert "matches 2 times" in r
         # Unique with context → OK
-        r2 = m.execute({"command": "str_replace", "path": "x.md",
-                        "old_str": "foo bar", "new_str": "BAR baz"})
+        r2 = m.execute(
+            {"command": "str_replace", "path": "x.md", "old_str": "foo bar", "new_str": "BAR baz"}
+        )
         assert "OK replaced" in r2
 
     def test_str_replace_missing_file(self, tmp_worldview):
         m = MemoryStore(root=tmp_worldview)
-        r = m.execute({"command": "str_replace", "path": "ghost.md",
-                       "old_str": "x", "new_str": "y"})
+        r = m.execute(
+            {"command": "str_replace", "path": "ghost.md", "old_str": "x", "new_str": "y"}
+        )
         assert r.startswith("ERROR:")
 
     def test_insert_at_line(self, tmp_worldview):
         m = MemoryStore(root=tmp_worldview)
-        m.execute({"command": "create", "path": "x.md",
-                   "file_text": "line1\nline3\n"})
-        r = m.execute({"command": "insert", "path": "x.md",
-                       "insert_line": 1, "insert_text": "line2"})
+        m.execute({"command": "create", "path": "x.md", "file_text": "line1\nline3\n"})
+        r = m.execute(
+            {"command": "insert", "path": "x.md", "insert_line": 1, "insert_text": "line2"}
+        )
         assert "OK inserted" in r
         check = m.execute({"command": "view", "path": "x.md"})
         # Order: line1, line2, line3
@@ -195,10 +199,10 @@ class TestMemoryTool:
 
     def test_insert_invalid_line(self, tmp_worldview):
         m = MemoryStore(root=tmp_worldview)
-        m.execute({"command": "create", "path": "x.md",
-                   "file_text": "only one line"})
-        r = m.execute({"command": "insert", "path": "x.md",
-                       "insert_line": 99, "insert_text": "off the end"})
+        m.execute({"command": "create", "path": "x.md", "file_text": "only one line"})
+        r = m.execute(
+            {"command": "insert", "path": "x.md", "insert_line": 99, "insert_text": "off the end"}
+        )
         assert "ERROR" in r
 
     def test_delete(self, tmp_worldview):
@@ -211,8 +215,7 @@ class TestMemoryTool:
     def test_rename(self, tmp_worldview):
         m = MemoryStore(root=tmp_worldview)
         m.execute({"command": "create", "path": "old.md", "file_text": "x"})
-        r = m.execute({"command": "rename", "path": "old.md",
-                       "new_path": "renamed/new.md"})
+        r = m.execute({"command": "rename", "path": "old.md", "new_path": "renamed/new.md"})
         assert "OK renamed" in r
         assert "renamed/new.md" in m.list_files()
         assert "old.md" not in m.list_files()
@@ -271,27 +274,28 @@ class TestContextManager:
         )
         sys_msg = cm.build_initial_system()
         # instructions.md content
-        assert "求职 agent" in sys_msg
+        assert "OfferGuide 求职 Agent" in sys_msg
         # System facts
         assert "今天" in sys_msg
-        assert "活跃目标与进度快照" in sys_msg
-        assert "Agent Agenda" in sys_msg
-        assert "act / ask / notify / sleep" in sys_msg
+        assert "三个核心任务" in sys_msg
+        assert "Skill 自进化" in sys_msg
         # Worldview MEMORY.md auto-loaded (bootstrap'd)
-        assert "你的主页" in sys_msg or "你脑子里的当前状态" in sys_msg
+        assert "已确认的长期求职上下文" in sys_msg
 
     def test_build_initial_system_includes_persistent_agenda(self, deps):
-        deps.memory_store.execute({
-            "command": "create",
-            "path": "agenda.md",
-            "file_text": (
-                "# Agent Agenda\n\n"
-                "## 开放回路\n"
-                "- Open loop: follow up ByteDance by 2026-05-23\n\n"
-                "## 安静等待\n"
-                "- Do not notify about low-confidence roles.\n"
-            ),
-        })
+        deps.memory_store.execute(
+            {
+                "command": "create",
+                "path": "agenda.md",
+                "file_text": (
+                    "# Agent Agenda\n\n"
+                    "## 开放回路\n"
+                    "- Open loop: follow up ByteDance by 2026-05-23\n\n"
+                    "## 安静等待\n"
+                    "- Do not notify about low-confidence roles.\n"
+                ),
+            }
+        )
         cm = ContextManager(
             llm=deps.llm,
             memory=deps.memory_store,
@@ -299,10 +303,9 @@ class TestContextManager:
         )
         sys_msg = cm.build_initial_system()
 
-        assert "Agent Agenda (开放回路与责任账本)" in sys_msg
+        assert "已有开放事项（仅在仍与当前求职阶段相关时使用）" in sys_msg
         assert "Open loop: follow up ByteDance" in sys_msg
         assert "Do not notify about low-confidence roles" in sys_msg
-        assert "收束前更新关闭/新增的开放回路" in sys_msg
 
     def test_build_initial_system_includes_active_goal_progress(self, deps):
         from offerguide import goals as _goals
@@ -319,14 +322,12 @@ class TestContextManager:
             memory=deps.memory_store,
             store=deps.store,
         )
-        sys_msg = cm.build_initial_system(
-            system_facts=SystemFacts(today=_dt.date(2026, 5, 16))
-        )
+        sys_msg = cm.build_initial_system(system_facts=SystemFacts(today=_dt.date(2026, 5, 16)))
 
         assert "拿到 1 个 AI Agent 暑期实习 offer" in sys_msg
-        assert "target_metric: 1 offer" in sys_msg
-        assert "active_apps=" in sys_msg
-        assert "这是启发式判断, 不是事实" in sys_msg
+        assert "target_date: 2026-07-15" in sys_msg
+        assert "进行中申请=" in sys_msg
+        assert "heuristic:" not in sys_msg
 
     def test_build_initial_system_excludes_completed_work_items(self, deps):
         open_id = harness_schema.ensure_work_item(
@@ -371,14 +372,13 @@ class TestContextManager:
             f.unlink()
         cm = ContextManager(llm=StubLLM(), memory=m)  # type: ignore[arg-type]
         sys_msg = cm.build_initial_system()
-        assert "worldview 是空的" in sys_msg or "第一次 wake" in sys_msg
+        assert "当前没有可用的长期记忆" in sys_msg
 
-    def test_system_facts_includes_calendar_phase(self):
-        # Pin a date in May (暑期投递高峰末期)
+    def test_system_facts_do_not_invent_a_recruiting_phase(self):
         facts = SystemFacts(today=_dt.date(2026, 5, 6))
         rendered = facts.render()
         assert "2026-05-06" in rendered
-        assert "校招阶段" in rendered
+        assert "校招阶段" not in rendered
 
     def test_clearing_skipped_when_under_threshold(self, deps):
         cm = ContextManager(llm=deps.llm, memory=deps.memory_store)
@@ -400,10 +400,13 @@ class TestContextManager:
         msgs = [{"role": "system", "content": "sys"}]
         for i in range(8):
             msgs.append({"role": "assistant", "content": f"call {i}"})
-            msgs.append({
-                "role": "tool", "tool_call_id": f"t{i}",
-                "content": "x" * 500,
-            })
+            msgs.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": f"t{i}",
+                    "content": "x" * 500,
+                }
+            )
         new_msgs, cleared = cm.maybe_clear_tool_results(msgs)
         # Should clear all but last 4
         assert cleared >= 1
@@ -446,37 +449,12 @@ class TestToolDispatch:
         r = dispatch("memory", {"command": "view", "path": "MEMORY.md"}, deps)
         assert r.startswith("OK MEMORY.md")
 
-    def test_schedule_next_wake_inserts_row(self, deps):
-        r = dispatch("schedule_next_wake",
-                     {"delay_seconds": 3600, "reason": "test"}, deps)
-        assert r.startswith("OK scheduled_wake#")
+    def test_record_event_rejects_unbound_legacy_lifecycle_claim(self, deps):
+        r = dispatch("record_event", {"kind": "applied", "job_id": 42, "note": "投了"}, deps)
+        assert r == "ERROR: record_event requires integer application_id"
         with deps.store.connect() as conn:
-            n = conn.execute(
-                "SELECT COUNT(*) FROM harness_scheduled_wakes"
-            ).fetchone()[0]
-        assert n == 1
-
-    def test_schedule_next_wake_validates_bounds(self, deps):
-        # Too small
-        r1 = dispatch("schedule_next_wake",
-                      {"delay_seconds": 30, "reason": "x"}, deps)
-        assert "ERROR" in r1 and "≥ 60" in r1
-        # Too big
-        r2 = dispatch("schedule_next_wake",
-                      {"delay_seconds": 99 * 86400, "reason": "x"}, deps)
-        assert "ERROR" in r2 and "30 days" in r2
-
-    def test_record_event_inserts_row(self, deps):
-        r = dispatch("record_event",
-                     {"kind": "applied", "job_id": 42, "note": "投了"}, deps)
-        assert r.startswith("OK event#")
-        with deps.store.connect() as conn:
-            row = conn.execute(
-                "SELECT kind, job_id, note FROM harness_events "
-                "ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        assert row[0] == "applied"
-        assert row[1] == 42
+            count = conn.execute("SELECT COUNT(*) FROM harness_events").fetchone()[0]
+        assert count == 0
 
     def test_update_work_item_marks_done_and_removes_from_active(self, deps):
         item_id = harness_schema.ensure_work_item(
@@ -488,12 +466,20 @@ class TestToolDispatch:
             priority=90,
         )
 
-        r = dispatch("update_work_item", {
-            "work_item_id": item_id,
-            "status": "done",
-            "summary": "已完成 JD 判断并生成可读结论",
-            "evidence": {"job_id": 7, "skill_run_id": 11, "view": "/tailor"},
-        }, deps)
+        r = dispatch(
+            "update_work_item",
+            {
+                "work_item_id": item_id,
+                "status": "done",
+                "summary": "已完成 JD 判断并生成可读结论",
+                "evidence": {
+                    "job_id": 7,
+                    "skill_run_id": 11,
+                    "view": "/jobs/7/apply-pack",
+                },
+            },
+            deps,
+        )
 
         assert r.startswith(f"OK work_item#{item_id} done")
         active_ids = [item.id for item in harness_schema.list_active_work_items(deps.store)]
@@ -517,70 +503,53 @@ class TestToolDispatch:
             source_ref="wi-wait-test",
         )
 
-        missing = dispatch("update_work_item", {
-            "work_item_id": item_id,
-            "status": "waiting",
-            "summary": "已安排后续检查",
-        }, deps)
+        missing = dispatch(
+            "update_work_item",
+            {
+                "work_item_id": item_id,
+                "status": "waiting",
+                "summary": "已安排后续检查",
+            },
+            deps,
+        )
         assert "ERROR" in missing and "requires next_action" in missing
 
-        ok = dispatch("update_work_item", {
-            "work_item_id": item_id,
-            "status": "waiting",
-            "summary": "已投递, 当前未记录新回复",
-            "next_action": "7 天后检查是否有面试或拒信记录",
-            "due_seconds": 3600,
-            "evidence": {"application_id": 3},
-        }, deps)
+        ok = dispatch(
+            "update_work_item",
+            {
+                "work_item_id": item_id,
+                "status": "waiting",
+                "summary": "已投递, 当前未记录新回复",
+                "next_action": "明天面试前检查项目追问是否已准备",
+                "due_seconds": 3600,
+                "evidence": {"application_id": 3},
+            },
+            deps,
+        )
         assert ok.startswith(f"OK work_item#{item_id} waiting")
         with deps.store.connect() as conn:
             row = conn.execute(
-                "SELECT status, closed_at, due_at, next_action "
-                "FROM agent_work_items WHERE id = ?",
+                "SELECT status, closed_at, due_at, next_action FROM agent_work_items WHERE id = ?",
                 (item_id,),
             ).fetchone()
         assert row[0] == "waiting"
         assert row[1] is None
         assert row[2] is not None
-        assert "7 天后" in row[3]
-
-    def test_read_artifact_reads_latest_tailor_event(self, deps):
-        with deps.store.connect() as conn:
-            conn.execute(
-                "INSERT INTO skill_runs(skill_name, skill_version, input_hash, "
-                "input_json, output_json, cost_usd, latency_ms) "
-                "VALUES ('tailor_resume', '0.2.0', 'h_art', '{}', ?, 0.0, 1)",
-                (_json.dumps({
-                    "company": "字节",
-                    "role_focus": "AI Agent 实习",
-                    "suggested_filename": "resume-byte-agent.pdf",
-                    "change_log": ["把项目描述从术语堆叠改成任务-方法-边界"],
-                    "cannot_fake_warnings": ["不要写准确率提升 30%，没有证据"],
-                }, ensure_ascii=False),),
-            )
-            srid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            conn.execute(
-                "INSERT INTO harness_events(kind, job_id, note, source) "
-                "VALUES ('tailor_resume_generated', 7, ?, 'agent')",
-                (_json.dumps({"skill_run_id": srid, "view": "/tailor"}, ensure_ascii=False),),
-            )
-
-        out = dispatch("read_artifact", {"artifact_kind": "latest_tailor"}, deps)
-
-        assert out.startswith(f"OK artifact skill_run#{srid}")
-        assert "View: /tailor" in out
-        assert "resume-byte-agent.pdf" in out
-        assert "不要写准确率提升" in out
+        assert "明天面试前" in row[3]
 
     def test_ask_user_writes_inbox_question(self, deps):
-        r = dispatch("ask_user", {
-            "question": "你想投北京吗?",
-            "context": "你 cv 没说地点偏好",
-            "options": [
-                {"id": "yes", "label": "可以"},
-                {"id": "no", "label": "不要"},
-            ],
-        }, deps)
+        r = dispatch(
+            "ask_user",
+            {
+                "question": "你想投北京吗?",
+                "context": "你 cv 没说地点偏好",
+                "options": [
+                    {"id": "yes", "label": "可以"},
+                    {"id": "no", "label": "不要"},
+                ],
+            },
+            deps,
+        )
         assert r.startswith("OK ask_user")
         with deps.store.connect() as conn:
             row = conn.execute(
@@ -590,27 +559,33 @@ class TestToolDispatch:
         assert row[0] == "question"
 
     def test_ask_user_requires_two_options(self, deps):
-        r = dispatch("ask_user", {
-            "question": "x", "context": "y", "options": [{"id": "1", "label": "a"}],
-        }, deps)
+        r = dispatch(
+            "ask_user",
+            {
+                "question": "x",
+                "context": "y",
+                "options": [{"id": "1", "label": "a"}],
+            },
+            deps,
+        )
         assert "ERROR" in r and "≥2" in r
 
     def test_notify_user_writes_inbox(self, deps):
-        r = dispatch("notify_user", {
-            "title": "找到一个好岗位",
-            "body": "字节 NLP 实习, 高匹配",
-            "priority": "important",
-        }, deps)
+        r = dispatch(
+            "notify_user",
+            {
+                "title": "找到一个好岗位",
+                "body": "字节 NLP 实习, 高匹配",
+                "priority": "important",
+            },
+            deps,
+        )
         assert r.startswith("OK notify_user")
 
     def test_web_search_without_search_backend_errors(self, deps):
         # deps fixture doesn't set search → should ERROR
         r = dispatch("web_search", {"query": "test"}, deps)
         assert "ERROR" in r and "SearchBackend" in r
-
-    def test_score_match_without_runtime_errors(self, deps):
-        r = dispatch("score_match", {"job_id": 1}, deps)
-        assert "ERROR" in r and "SkillRuntime" in r
 
     def test_all_tool_schemas_have_required_fields(self):
         # Sanity: each schema is well-formed OpenAI function spec
@@ -630,8 +605,7 @@ class TestToolDispatch:
         names = [s["function"]["name"] for s in ALL_TOOL_SCHEMAS]
         assert "update_work_item" in names
         schema = next(
-            s["function"] for s in ALL_TOOL_SCHEMAS
-            if s["function"]["name"] == "update_work_item"
+            s["function"] for s in ALL_TOOL_SCHEMAS if s["function"]["name"] == "update_work_item"
         )
         assert "durable work item" in schema["description"]
         assert "work_item_id" in schema["parameters"]["required"]
@@ -647,7 +621,8 @@ class TestHarnessLoop:
         # Stub LLM returns end_turn immediately
         deps.llm.push_text("nothing to do, sleeping")  # type: ignore[union-attr]
         result = agent_runtime_run(
-            trigger=make_cron_heartbeat(), deps=deps,
+            trigger=TriggerEvent(kind="test"),
+            deps=deps,
             max_iterations=3,
         )
         assert isinstance(result, RunResult)
@@ -657,38 +632,36 @@ class TestHarnessLoop:
         # Persisted
         with deps.store.connect() as conn:
             row = conn.execute(
-                "SELECT trigger_kind, status, iterations FROM harness_runs "
-                "WHERE id = ?", (result.run_id,),
+                "SELECT trigger_kind, status, iterations FROM harness_runs WHERE id = ?",
+                (result.run_id,),
             ).fetchone()
-        assert row[0] == "cron"
+        assert row[0] == "test"
         assert row[1] == "ok"
         assert row[2] == 1
 
     def test_loop_executes_tool_call_then_terminates(self, deps):
-        # Two-step: call schedule_next_wake, then end_turn
+        # Two-step: reject an unbound pseudo-event, then end the turn.
         deps.llm.push_tool_call(  # type: ignore[union-attr]
-            name="schedule_next_wake",
-            arguments={"delay_seconds": 600, "reason": "test"},
-            call_id="wake_1",
+            name="record_event",
+            arguments={"kind": "note", "note": "test"},
+            call_id="event_1",
         )
         deps.llm.push_text("done")  # type: ignore[union-attr]
         result = agent_runtime_run(
-            trigger=make_user_input_trigger("找点事做"), deps=deps,
+            trigger=make_user_input_trigger("找点事做"),
+            deps=deps,
             max_iterations=5,
         )
         assert result.iterations == 2
         assert result.finish_reason == "end_turn"
-        assert "schedule_next_wake" in result.tool_call_log[0]
-        # Side-effect: scheduled_wake row created
+        assert "record_event" in result.tool_call_log[0]
         with deps.store.connect() as conn:
-            n = conn.execute(
-                "SELECT COUNT(*) FROM harness_scheduled_wakes"
-            ).fetchone()[0]
+            event_count = conn.execute("SELECT COUNT(*) FROM harness_events").fetchone()[0]
             work = conn.execute(
                 "SELECT title, status, last_run_id FROM agent_work_items "
                 "WHERE source_kind = 'user_input' ORDER BY id DESC LIMIT 1"
             ).fetchone()
-        assert n == 1
+        assert event_count == 0
         assert work[0].startswith("User request:")
         assert work[1] == "in_progress"
         assert work[2] == result.run_id
@@ -722,8 +695,7 @@ class TestHarnessLoop:
         assert "update_work_item" in result.tool_call_log[0]
         with deps.store.connect() as conn:
             row = conn.execute(
-                "SELECT status, closed_at, last_run_id, summary "
-                "FROM agent_work_items WHERE id = ?",
+                "SELECT status, closed_at, last_run_id, summary FROM agent_work_items WHERE id = ?",
                 (item_id,),
             ).fetchone()
         assert row[0] == "done"
@@ -740,7 +712,8 @@ class TestHarnessLoop:
                 call_id=f"t{i}",
             )
         result = agent_runtime_run(
-            trigger=make_cron_heartbeat(), deps=deps,
+            trigger=TriggerEvent(kind="test"),
+            deps=deps,
             max_iterations=3,
         )
         assert result.iterations == 3
@@ -754,7 +727,8 @@ class TestHarnessLoop:
             llm=None,
         )
         result = agent_runtime_run(
-            trigger=make_cron_heartbeat(), deps=deps_no_llm,
+            trigger=TriggerEvent(kind="test"),
+            deps=deps_no_llm,
         )
         assert result.finish_reason == "no_llm"
         assert result.run_id is None
@@ -768,7 +742,8 @@ class TestHarnessLoop:
         )
         deps.llm.push_text("done")  # type: ignore[union-attr]
         result = agent_runtime_run(
-            trigger=make_cron_heartbeat(), deps=deps,
+            trigger=TriggerEvent(kind="test"),
+            deps=deps,
             max_iterations=3,
         )
         # Check the inbox row got source_agent_run_id set to result.run_id
@@ -781,72 +756,11 @@ class TestHarnessLoop:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Triggers — fire_event, poll_pending, scheduled wakes
+# Synchronous user-input trigger
 # ═══════════════════════════════════════════════════════════════════
 
 
-class TestTriggers:
-    def test_fire_event_inserts_row(self, tmp_store):
-        fire_event(tmp_store, event_kind="user_paste_jd",
-                   detail={"job_id": 5, "note": "from bo zhi"})
-        with tmp_store.connect() as conn:
-            row = conn.execute(
-                "SELECT id, kind, job_id, note, source FROM harness_events "
-                "ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            work = conn.execute(
-                "SELECT title, source_kind, source_ref, job_id, status, next_action "
-                "FROM agent_work_items ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        assert row[1] == "user_paste_jd"
-        assert row[2] == 5
-        assert row[4] == "user"
-        assert work[0] == "Process pasted JD for job#5"
-        assert work[1] == "event"
-        assert work[2] == str(row[0])
-        assert work[3] == 5
-        assert work[4] == "open"
-        assert "discovery" in work[5]
-        assert "surface this opportunity" in work[5]
-
-    def test_poll_pending_picks_up_due_scheduled_wake(self, tmp_store):
-        # Insert a scheduled wake with fire_at in the past
-        with tmp_store.connect() as conn:
-            conn.execute(
-                "INSERT INTO harness_scheduled_wakes(fire_at, reason) "
-                "VALUES (julianday('now') - 0.001, 'test')"
-            )
-        pending = poll_pending(tmp_store)
-        assert len(pending) >= 1
-        assert pending[0].source == "scheduled"
-        assert pending[0].trigger_event.kind == "scheduled"
-        # Cleanup callback marks fired_at
-        pending[0].cleanup()
-        with tmp_store.connect() as conn:
-            row = conn.execute(
-                "SELECT fired_at FROM harness_scheduled_wakes "
-                "ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        assert row[0] is not None
-
-    def test_poll_pending_skips_future_scheduled(self, tmp_store):
-        with tmp_store.connect() as conn:
-            conn.execute(
-                "INSERT INTO harness_scheduled_wakes(fire_at, reason) "
-                "VALUES (julianday('now') + 1, 'far future')"
-            )
-        pending = poll_pending(tmp_store)
-        assert all(p.trigger_event.detail.get("reason") != "far future"
-                   for p in pending)
-
-    def test_poll_pending_picks_up_unprocessed_events(self, tmp_store):
-        fire_event(tmp_store, event_kind="user_marked_applied",
-                   detail={"job_id": 7})
-        pending = poll_pending(tmp_store)
-        events = [p for p in pending if p.source == "event"]
-        assert len(events) >= 1
-        assert events[0].trigger_event.detail["event"] == "user_marked_applied"
-
+class TestUserInputTrigger:
     def test_user_input_trigger_creates_work_item_for_run(self, deps):
         deps.llm.push_text("done")  # type: ignore[union-attr]
         result = agent_runtime_run(
@@ -865,12 +779,6 @@ class TestTriggers:
         assert row[3] == result.run_id
         assert "JD" in row[4]
 
-    def test_make_cron_heartbeat_returns_cron_kind(self):
-        t = make_cron_heartbeat()
-        assert isinstance(t, TriggerEvent)
-        assert t.kind == "cron"
-        assert "timestamp" in t.detail
-
     def test_make_user_input_truncates_long(self):
         t = make_user_input_trigger("x" * 5000)
         assert len(t.detail["message"]) <= 2000
@@ -884,14 +792,17 @@ class TestTriggers:
 class TestFeedback:
     def test_accept_writes_positive_thumb(self, tmp_store):
         sig_id = harness_feedback.on_inbox_accepted(
-            tmp_store, inbox_id=1, skill_run_id=None,
+            tmp_store,
+            inbox_id=1,
+            skill_run_id=None,
             user_text="不错",
         )
         assert sig_id > 0
         with tmp_store.connect() as conn:
             row = conn.execute(
                 "SELECT signal_kind, signal_value, skill_name, notes "
-                "FROM evolution_signals WHERE id = ?", (sig_id,),
+                "FROM evolution_signals WHERE id = ?",
+                (sig_id,),
             ).fetchone()
         assert row[0] == "user_thumbs"
         assert row[1] == 1.0
@@ -903,25 +814,30 @@ class TestFeedback:
 
     def test_reject_writes_negative_thumb(self, tmp_store):
         sig_id = harness_feedback.on_inbox_rejected(
-            tmp_store, inbox_id=2, skill_run_id=None, user_text="不要",
+            tmp_store,
+            inbox_id=2,
+            skill_run_id=None,
+            user_text="不要",
         )
         with tmp_store.connect() as conn:
             row = conn.execute(
-                "SELECT signal_kind, signal_value FROM evolution_signals "
-                "WHERE id = ?", (sig_id,),
+                "SELECT signal_kind, signal_value FROM evolution_signals WHERE id = ?",
+                (sig_id,),
             ).fetchone()
         assert row[0] == "user_thumbs"
         assert row[1] == -1.0
 
     def test_question_answered_records_option_id(self, tmp_store):
         sig_id = harness_feedback.on_question_answered(
-            tmp_store, inbox_id=99, option_id="yes_beijing",
+            tmp_store,
+            inbox_id=99,
+            option_id="yes_beijing",
             free_text=None,
         )
         with tmp_store.connect() as conn:
             row = conn.execute(
-                "SELECT signal_kind, notes FROM evolution_signals "
-                "WHERE id = ?", (sig_id,),
+                "SELECT signal_kind, notes FROM evolution_signals WHERE id = ?",
+                (sig_id,),
             ).fetchone()
         assert row[0] == "user_question_answer"
         notes = _json.loads(row[1])
@@ -929,12 +845,15 @@ class TestFeedback:
 
     def test_ignored_signal_has_lower_weight(self, tmp_store):
         sig_id = harness_feedback.on_inbox_ignored(
-            tmp_store, inbox_id=5, days_ignored=10,
+            tmp_store,
+            inbox_id=5,
+            days_ignored=10,
         )
         with tmp_store.connect() as conn:
             row = conn.execute(
                 "SELECT signal_kind, signal_value, signal_weight, notes "
-                "FROM evolution_signals WHERE id = ?", (sig_id,),
+                "FROM evolution_signals WHERE id = ?",
+                (sig_id,),
             ).fetchone()
         assert row[0] == "user_ignored"
         assert row[1] < 0  # negative
@@ -949,19 +868,21 @@ class TestFeedback:
                 "INSERT INTO skill_runs("
                 "  skill_name, skill_version, input_hash, input_json, "
                 "  output_json, latency_ms, cost_usd"
-                ") VALUES ('score_match', 'v3', 'h', '{}', '{}', 0, 0) "
+                ") VALUES ('example_skill', 'v3', 'h', '{}', '{}', 0, 0) "
                 "RETURNING id"
             )
             sr_id = int(cur.fetchone()[0])
         sig_id = harness_feedback.on_inbox_accepted(
-            tmp_store, inbox_id=10, skill_run_id=sr_id,
+            tmp_store,
+            inbox_id=10,
+            skill_run_id=sr_id,
         )
         with tmp_store.connect() as conn:
             row = conn.execute(
-                "SELECT skill_name, skill_version FROM evolution_signals "
-                "WHERE id = ?", (sig_id,),
+                "SELECT skill_name, skill_version FROM evolution_signals WHERE id = ?",
+                (sig_id,),
             ).fetchone()
-        assert row[0] == "score_match"
+        assert row[0] == "example_skill"
         assert row[1] == "v3"
 
 
@@ -981,8 +902,12 @@ def web_client(tmp_path):
     skills = discover_skills(Path(__file__).parent.parent / "src/offerguide/skills")
     s = Settings(deepseek_api_key="", default_model="stub")  # no LLM ok for read tests
     app = create_app(
-        settings=s, store=store, profile=None, skills=skills,
-        runtime=None, notifier=ConsoleNotifier(),
+        settings=s,
+        store=store,
+        master_source=None,
+        skills=skills,
+        runtime=None,
+        notifier=ConsoleNotifier(),
     )
     return TestClient(app), store
 
@@ -995,12 +920,9 @@ class TestHomeWithW15:
         assert "OfferGuide · 指挥台" in resp.text
         assert "Mission Control" in resp.text
         assert "需决定" in resp.text
-        assert "快速评估 · 粘 JD" in resp.text
-        assert "新进候选" in resp.text
         assert 'href="/pipeline"' in resp.text
-        assert 'href="/tailor"' in resp.text
-        assert 'href="/interviews"' in resp.text
-        assert 'href="/evolution"' in resp.text
+        assert 'href="/project-vault"' in resp.text
+        assert 'href="/evolution"' not in resp.text
         assert "和 Agent 对话" in resp.text
         assert "发送给 Agent" in resp.text
         assert "trigger_kind=user_input" in resp.text
@@ -1013,12 +935,17 @@ class TestHomeWithW15:
             conn.execute(
                 "INSERT INTO harness_events(kind, note, source) "
                 "VALUES ('project_record_saved', ?, 'agent')",
-                (_json.dumps({
-                    "project_id": 3,
-                    "title": "Deep Research Workspace",
-                    "direction": "AI Agent",
-                    "view": "/project-vault",
-                }, ensure_ascii=False),),
+                (
+                    _json.dumps(
+                        {
+                            "project_id": 3,
+                            "title": "Deep Research Workspace",
+                            "direction": "AI Agent",
+                            "view": "/project-vault",
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
             )
         resp = client.get("/")
         assert resp.status_code == 200
@@ -1043,8 +970,12 @@ class TestHomeWithW15:
         s = Settings(deepseek_api_key="x", default_model="stub")
         skills = discover_skills(Path(__file__).parent.parent / "src/offerguide/skills")
         app = create_app(
-            settings=s, store=store, profile=None, skills=skills,
-            runtime=None, notifier=ConsoleNotifier(),
+            settings=s,
+            store=store,
+            master_source=None,
+            skills=skills,
+            runtime=None,
+            notifier=ConsoleNotifier(),
         )
         client = TestClient(app)
         r1 = client.post("/api/home/chat", json={"message": ""})
@@ -1057,16 +988,13 @@ class TestDebugView:
         resp = client.get("/debug")
         assert resp.status_code == 200
         assert "Harness Runs" in resp.text
-        assert "Scheduled Wakes" in resp.text or "scheduled" in resp.text.lower()
         assert "Harness Events" in resp.text
-        assert "Daemon Runs" in resp.text
 
     def test_debug_handles_empty_state(self, web_client):
         client, _ = web_client
         resp = client.get("/debug")
         assert resp.status_code == 200
-        # All 4 sections show empty messages, not crash
-        # (just verify status 200 + key headings present, done above)
+        # Empty runtime state renders without crashing.
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1079,8 +1007,11 @@ class TestInboxFeedbackWiring:
         """User clicks 'approve' on agent suggestion → +1 thumb signal."""
         client, store = web_client
         from offerguide import inbox as inbox_mod
+
         item = inbox_mod.enqueue_agent_suggestion(
-            store, title="试试这家公司", body="字节 NLP 实习",
+            store,
+            title="试试这家公司",
+            body="字节 NLP 实习",
             source_agent_run_id=None,
         )
         resp = client.post(
@@ -1102,14 +1033,16 @@ class TestInboxFeedbackWiring:
     def test_decide_rejected_records_negative_thumb(self, web_client):
         client, store = web_client
         from offerguide import inbox as inbox_mod
+
         item = inbox_mod.enqueue_agent_suggestion(
-            store, title="不喜欢的公司", body="x",
+            store,
+            title="不喜欢的公司",
+            body="x",
         )
         client.post(f"/inbox/{item.id}/decide", data={"decision": "rejected"})
         with store.connect() as conn:
             row = conn.execute(
-                "SELECT signal_kind, signal_value FROM evolution_signals "
-                "ORDER BY id DESC LIMIT 1"
+                "SELECT signal_kind, signal_value FROM evolution_signals ORDER BY id DESC LIMIT 1"
             ).fetchone()
         assert row[0] == "user_thumbs"
         assert row[1] == -1.0
@@ -1117,14 +1050,16 @@ class TestInboxFeedbackWiring:
     def test_decide_dismissed_records_ignored(self, web_client):
         client, store = web_client
         from offerguide import inbox as inbox_mod
+
         item = inbox_mod.enqueue_agent_suggestion(
-            store, title="无所谓", body="x",
+            store,
+            title="无所谓",
+            body="x",
         )
         client.post(f"/inbox/{item.id}/decide", data={"decision": "dismissed"})
         with store.connect() as conn:
             row = conn.execute(
-                "SELECT signal_kind, signal_weight FROM evolution_signals "
-                "ORDER BY id DESC LIMIT 1"
+                "SELECT signal_kind, signal_weight FROM evolution_signals ORDER BY id DESC LIMIT 1"
             ).fetchone()
         assert row[0] == "user_ignored"
         # Weight should be reduced (vs explicit thumbs)
@@ -1139,14 +1074,17 @@ class TestInboxFeedbackWiring:
                 "INSERT INTO skill_runs("
                 "  skill_name, skill_version, input_hash, input_json, "
                 "  output_json, latency_ms, cost_usd"
-                ") VALUES ('score_match', 'v5', 'h', '{}', '{}', 0, 0) "
+                ") VALUES ('example_skill', 'v5', 'h', '{}', '{}', 0, 0) "
                 "RETURNING id"
             )
             sr_id = int(cur.fetchone()[0])
 
         from offerguide import inbox as inbox_mod
+
         item = inbox_mod.enqueue_agent_suggestion(
-            store, title="字节高匹配", body="x",
+            store,
+            title="字节高匹配",
+            body="x",
             source_skill_run_id=sr_id,
         )
         client.post(f"/inbox/{item.id}/decide", data={"decision": "approved"})
@@ -1155,7 +1093,7 @@ class TestInboxFeedbackWiring:
                 "SELECT skill_name, skill_version, skill_run_id "
                 "FROM evolution_signals ORDER BY id DESC LIMIT 1"
             ).fetchone()
-        assert row[0] == "score_match"
+        assert row[0] == "example_skill"
         assert row[1] == "v5"
         assert row[2] == sr_id
 
@@ -1163,6 +1101,7 @@ class TestInboxFeedbackWiring:
         """User answers an agent's question → user_question_answer signal."""
         client, store = web_client
         from offerguide import inbox as inbox_mod
+
         item = inbox_mod.enqueue_question(
             store,
             question="你想投北京吗?",
@@ -1180,8 +1119,7 @@ class TestInboxFeedbackWiring:
         assert resp.status_code == 303  # redirect to /
         with store.connect() as conn:
             row = conn.execute(
-                "SELECT signal_kind, notes FROM evolution_signals "
-                "ORDER BY id DESC LIMIT 1"
+                "SELECT signal_kind, notes FROM evolution_signals ORDER BY id DESC LIMIT 1"
             ).fetchone()
         assert row[0] == "user_question_answer"
         notes = _json.loads(row[1])
@@ -1197,16 +1135,12 @@ class TestInboxFeedbackWiring:
         client, store = web_client
         # Count signals before
         with store.connect() as conn:
-            n_before = conn.execute(
-                "SELECT COUNT(*) FROM evolution_signals"
-            ).fetchone()[0]
+            n_before = conn.execute("SELECT COUNT(*) FROM evolution_signals").fetchone()[0]
         # Decide on nonexistent item
         resp = client.post("/inbox/99999/decide", data={"decision": "approved"})
         assert resp.status_code == 404
         with store.connect() as conn:
-            n_after = conn.execute(
-                "SELECT COUNT(*) FROM evolution_signals"
-            ).fetchone()[0]
+            n_after = conn.execute("SELECT COUNT(*) FROM evolution_signals").fetchone()[0]
         # No signal recorded for failed decide
         assert n_after == n_before
 
@@ -1227,7 +1161,8 @@ class TestReviewFixes:
                 call_id=f"t{i}",
             )
         result = agent_runtime_run(
-            trigger=make_cron_heartbeat(), deps=deps,
+            trigger=TriggerEvent(kind="test"),
+            deps=deps,
             max_iterations=2,
         )
         assert result.finish_reason == "max_iterations"
@@ -1240,7 +1175,7 @@ class TestReviewFixes:
 
     def test_end_turn_persists_ok_status(self, deps):
         deps.llm.push_text("nothing to do")  # type: ignore[union-attr]
-        result = agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
+        result = agent_runtime_run(trigger=TriggerEvent(kind="test"), deps=deps)
         with deps.store.connect() as conn:
             row = conn.execute(
                 "SELECT status FROM harness_runs WHERE id = ?",
@@ -1251,25 +1186,34 @@ class TestReviewFixes:
     # ── Bug 2: final_text accumulates content from tool-calling iterations
     def test_final_text_captures_reasoning_alongside_tool_calls(self, deps):
         # Iter 1: model returns BOTH content + tool_call (some models do this)
-        deps.llm.queue.append(LLMResponse(  # type: ignore[union-attr]
-            content="我先看一眼 worldview.",
-            model="stub",
-            tool_calls=[ToolCall(
-                id="t1", name="memory",
-                arguments={"command": "view", "path": "MEMORY.md"},
-            )],
-            prompt_tokens=100, completion_tokens=20,
-        ))
+        deps.llm.queue.append(
+            LLMResponse(  # type: ignore[union-attr]
+                content="我先看一眼 worldview.",
+                model="stub",
+                tool_calls=[
+                    ToolCall(
+                        id="t1",
+                        name="memory",
+                        arguments={"command": "view", "path": "MEMORY.md"},
+                    )
+                ],
+                prompt_tokens=100,
+                completion_tokens=20,
+            )
+        )
         # Iter 2: end_turn with final reasoning
         deps.llm.push_text("看完了, 不做事了.")  # type: ignore[union-attr]
-        result = agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
+        result = agent_runtime_run(trigger=TriggerEvent(kind="test"), deps=deps)
         # Both iterations' content present
         assert "我先看一眼" in result.final_text
         assert "看完了" in result.final_text
 
     # ── Bug 3: try/finally ensures harness_runs never stuck in 'running'
     def test_loop_crash_in_ctx_management_records_error(
-        self, tmp_store, tmp_worldview, monkeypatch,
+        self,
+        tmp_store,
+        tmp_worldview,
+        monkeypatch,
     ):
         from offerguide.agent_runtime import context as ctx_mod
 
@@ -1277,7 +1221,9 @@ class TestReviewFixes:
             raise RuntimeError("simulated ctx crash")
 
         monkeypatch.setattr(
-            ctx_mod.ContextManager, "maybe_clear_tool_results", _exploding_clear,
+            ctx_mod.ContextManager,
+            "maybe_clear_tool_results",
+            _exploding_clear,
         )
         deps = AgentRuntimeDeps(
             settings=Settings(deepseek_api_key="x", default_model="stub"),
@@ -1285,7 +1231,7 @@ class TestReviewFixes:
             memory_store=MemoryStore(root=tmp_worldview),
             llm=StubLLM(),  # type: ignore[arg-type]
         )
-        result = agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
+        result = agent_runtime_run(trigger=TriggerEvent(kind="test"), deps=deps)
         assert result.finish_reason == "loop_crash"
         with tmp_store.connect() as conn:
             row = conn.execute(
@@ -1299,6 +1245,7 @@ class TestReviewFixes:
     # ── Bug 4: paste:// URL stable across processes
     def test_paste_synthetic_url_is_stable(self, deps):
         from offerguide.agent_runtime.tools import _exec_fetch_jd
+
         text = "x" * 250  # ≥ 200 chars to pass validation
 
         # Same content twice → same URL → second is detected as dup
@@ -1306,22 +1253,22 @@ class TestReviewFixes:
         r2 = _exec_fetch_jd({"url_or_text": text}, deps)
 
         assert "OK ingested" in r1
-        # Second call should detect dup (same URL via stable hash)
-        assert "dup of existing job" in r2
+        # Second call updates the same canonical manual-job record.
+        assert "updated existing job#" in r2
 
-    # ── Bug 5: discover_jobs cost flows into harness_runs.cost_usd
+    # ── Bug 5: supporting tool cost flows into harness_runs.cost_usd
     def test_extra_cost_usd_reset_each_run(self, deps):
         # Pre-set extra_cost_usd to non-zero (simulating leak from prior run)
         deps.extra_cost_usd = 99.99
         deps.llm.push_text("done")  # type: ignore[union-attr]
-        result = agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
+        result = agent_runtime_run(trigger=TriggerEvent(kind="test"), deps=deps)
         # The 99.99 must NOT contaminate this run — loop resets to 0
         # at start, so cost_usd here is just stub LLM's $0.0 + 0
         assert result.cost_usd < 1.0  # nowhere near 99.99
 
     def test_sub_agent_cost_added_to_total(self, deps):
         # Manually set extra_cost_usd as if a sub-agent ran (simulates
-        # what _exec_discover_jobs does)
+        # what _exec_supporting tool does)
         deps.llm.push_tool_call(  # type: ignore[union-attr]
             name="memory",
             arguments={"command": "view", "path": "MEMORY.md"},
@@ -1337,7 +1284,7 @@ class TestReviewFixes:
 
         deps.llm.chat_with_tools = _patched  # type: ignore[union-attr]
         deps.llm.push_text("done")  # type: ignore[union-attr]
-        result = agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
+        result = agent_runtime_run(trigger=TriggerEvent(kind="test"), deps=deps)
         assert result.cost_usd >= 0.5  # sub-agent cost included
         # Persisted too
         with deps.store.connect() as conn:
@@ -1355,7 +1302,10 @@ class TestReviewFixes:
         # Huge user_text that would naively dumps()→2000-char-truncate to invalid JSON
         huge_text = "我的反馈非常长 " * 500  # ~3500 chars
         sig_id = harness_feedback.on_inbox_accepted(
-            tmp_store, inbox_id=1, skill_run_id=None, user_text=huge_text,
+            tmp_store,
+            inbox_id=1,
+            skill_run_id=None,
+            user_text=huge_text,
         )
         with tmp_store.connect() as conn:
             row = conn.execute(
@@ -1389,51 +1339,12 @@ class TestReviewFixes:
         assert isinstance(parsed, dict)
         assert "metadata" in parsed
 
-    # ── Bug 7: scheduler cleanup runs even if agent_runtime_run fails
-    def test_scheduler_cleanup_runs_on_harness_failure(self, tmp_store):
-        # Create a scheduled wake that's due
-        with tmp_store.connect() as conn:
-            conn.execute(
-                "INSERT INTO harness_scheduled_wakes(fire_at, reason) "
-                "VALUES (julianday('now') - 0.001, 'test')"
-            )
-            wake_id = int(conn.execute(
-                "SELECT id FROM harness_scheduled_wakes "
-                "ORDER BY id DESC LIMIT 1"
-            ).fetchone()[0])
-
-        pending = poll_pending(tmp_store)
-        assert len(pending) >= 1
-        pt = pending[0]
-
-        # Simulate scheduler logic: agent_runtime_run fails, but cleanup still runs.
-        try:
-            raise RuntimeError("simulated harness crash")
-        except Exception:
-            pass
-        finally:
-            if pt.cleanup is not None:
-                pt.cleanup()
-
-        # Wake should now be marked fired (won't be polled again)
-        with tmp_store.connect() as conn:
-            row = conn.execute(
-                "SELECT fired_at FROM harness_scheduled_wakes WHERE id = ?",
-                (wake_id,),
-            ).fetchone()
-        assert row[0] is not None  # cleanup did run
-
-    # ── Smell 1: auto_load includes worldview file index
-    def test_auto_load_includes_file_index(self, tmp_worldview):
+    def test_auto_load_only_includes_confirmed_memory_summary(self, tmp_worldview):
         m = MemoryStore(root=tmp_worldview)
         text = m.auto_load_text(max_lines=200)
-        # Index header present
-        assert "worldview/ 文件索引" in text
-        # Each non-MEMORY.md file appears with line count
-        assert "candidate.md" in text
-        assert "tracked-jobs.md" in text
-        # Pattern: "- name (N lines): heading"
-        assert "lines)" in text
+        assert "已确认的求职上下文" in text
+        assert "worldview/ 文件索引" not in text
+        assert "candidate.md" not in text
 
     # ── Smell 8: view truncates large files
     def test_view_truncates_huge_file(self, tmp_worldview):
@@ -1450,7 +1361,7 @@ class TestReviewFixes:
     # ── Q1: temperature is configurable per-call (W15.13)
     def test_temperature_default_passed_through(self, deps):
         deps.llm.push_text("done")  # type: ignore[union-attr]
-        agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
+        agent_runtime_run(trigger=TriggerEvent(kind="test"), deps=deps)
         # StubLLM stores all chat_with_tools calls
         assert deps.llm.calls  # type: ignore[union-attr]
         last = deps.llm.calls[-1]  # type: ignore[union-attr]
@@ -1474,49 +1385,12 @@ class TestReviewFixes:
             CLEAR_TOOL_RESULTS_TRIGGER_TOKENS,
             COMPACTION_TRIGGER_TOKENS,
         )
+
         assert COMPACTION_TRIGGER_TOKENS == 30_000
         assert CLEAR_TOOL_RESULTS_TRIGGER_TOKENS == 12_000
         # Invariant: clear must trigger BEFORE compaction so the cheap
         # path runs first and may avoid an expensive LLM compaction call.
         assert CLEAR_TOOL_RESULTS_TRIGGER_TOKENS < COMPACTION_TRIGGER_TOKENS
-
-    # ── W15.14: evaluate_job() reactive flow
-    def test_evaluate_job_with_paste_text_no_runtime(self, tmp_store, tmp_worldview):
-        """No runtime → fetch succeeds, score/tailor skipped (graceful)."""
-        from offerguide.agent_runtime.evaluate import evaluate_job
-        deps = AgentRuntimeDeps(
-            settings=Settings(deepseek_api_key="x", default_model="stub"),
-            store=tmp_store,
-            memory_store=MemoryStore(root=tmp_worldview),
-            llm=None, runtime=None,
-        )
-        text = "字节跳动算法实习生 招聘信息 工作内容 NLP/Agent " * 30
-        result = evaluate_job(url_or_text=text, deps=deps)
-        assert result.fetch_status == "ok"
-        assert result.job_id is not None
-        assert result.score_status == "skipped"
-        assert result.tailor_status == "skipped"
-
-    def test_evaluate_job_too_short_text(self, tmp_store, tmp_worldview):
-        from offerguide.agent_runtime.evaluate import evaluate_job
-        deps = AgentRuntimeDeps(
-            settings=Settings(deepseek_api_key="x", default_model="stub"),
-            store=tmp_store,
-            memory_store=MemoryStore(root=tmp_worldview),
-        )
-        result = evaluate_job(url_or_text="too short", deps=deps)
-        assert result.fetch_status == "error"
-        assert "太短" in (result.user_facing_error or "")
-
-    # ── W15.14: /api/evaluate-job endpoint
-    def test_evaluate_endpoint_requires_llm(self, web_client):
-        client, _ = web_client
-        resp = client.post(
-            "/api/evaluate-job",
-            json={"url_or_text": "x" * 250},
-        )
-        # web_client fixture has no LLM key set
-        assert resp.status_code == 400
 
     # ── W15.14: /api/jobs/{id}/track endpoint
     def test_track_job_idempotent(self, web_client):
@@ -1547,8 +1421,8 @@ class TestReviewFixes:
         resp = client.post("/api/jobs/99999/track")
         assert resp.status_code == 404
 
-    # ── W15.14: /api/jobs/{id}/applied schedules followup wake
-    def test_marked_applied_schedules_7d_wake(self, web_client):
+    # ── Submission freezes exact material without inventing a follow-up deadline
+    def test_marked_applied_freezes_the_exact_workspace(self, web_client):
         client, store = web_client
         with store.connect() as conn:
             cur = conn.execute(
@@ -1556,11 +1430,85 @@ class TestReviewFixes:
                 "VALUES ('test', 'paste://t2', 't', 'co', 'x', 'hash2') RETURNING id"
             )
             job_id = int(cur.fetchone()[0])
+            application_id = int(
+                conn.execute(
+                    "INSERT INTO applications(job_id, status) "
+                    "VALUES (?, 'considered') RETURNING id",
+                    (job_id,),
+                ).fetchone()[0]
+            )
 
+        import hashlib
+
+        from offerguide.resume import (
+            MasterResumeDocument,
+            MasterResumeSource,
+            ResumeJobContext,
+            ResumeWorkspaceRepository,
+            build_resume_context,
+        )
+
+        repo = ResumeWorkspaceRepository(store)
+        master_pdf = store.db_path.parent / "master.pdf"
+        master_pdf.write_bytes(b"master resume")
+        master_sha = hashlib.sha256(master_pdf.read_bytes()).hexdigest()
+        master_source = MasterResumeSource(
+            source_path=str(master_pdf.resolve()),
+            sha256=master_sha,
+            extracted_text="candidate resume",
+        )
+        master_document = MasterResumeDocument(
+            source_sha256=master_sha,
+            semantic_text="candidate resume",
+            confirmed_by_user=True,
+        )
+        repo.save_master(
+            source_path=master_pdf,
+            source_sha256=master_sha,
+            extracted_text="candidate resume",
+            semantic_document=master_document.model_dump(mode="json"),
+            confirmed=True,
+        )
+        context = build_resume_context(
+            job=ResumeJobContext(
+                job_id=job_id,
+                company="co",
+                title="t",
+                jd_text="x",
+            ),
+            master_source=master_source,
+            master_document=master_document,
+        )
+        resume_pdf = store.db_path.parent / "resume.pdf"
+        resume_pdf.write_bytes(b"rendered resume")
+        repo.save_draft(
+            application_id,
+            job_snapshot={"job_id": job_id, "company": "co", "title": "t"},
+            master_source_sha256=master_sha,
+            context=context.model_dump(mode="json"),
+            resume_document={
+                "header": {
+                    "name": {"spans": [{"text": "candidate"}]},
+                    "lines": [],
+                },
+                "sections": [
+                    {
+                        "title": {"spans": [{"text": "Experience"}]},
+                        "entries": [
+                            {
+                                "rows": [{"left": {"spans": [{"text": "Project"}]}}],
+                                "blocks": [],
+                            }
+                        ],
+                    }
+                ],
+            },
+            pdf_path=resume_pdf,
+            pdf_sha256=hashlib.sha256(resume_pdf.read_bytes()).hexdigest(),
+            apply_pack={"assistant": {"message": "Relevant application message"}},
+        )
         resp = client.post(f"/api/jobs/{job_id}/applied")
         assert resp.status_code == 200
-        d = resp.json()
-        assert d["next_wake"] == "+7d"
 
         # Application created with status='applied'
         with store.connect() as conn:
@@ -1569,16 +1517,9 @@ class TestReviewFixes:
                 (job_id,),
             ).fetchone()
         assert row[0] == "applied"
-
-        # Scheduled wake row created ~7 days out (use SQL for ground truth)
-        with store.connect() as conn:
-            row = conn.execute(
-                "SELECT reason, fire_at - julianday('now') AS days_out "
-                "FROM harness_scheduled_wakes ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        assert f"job#{job_id}" in row[0]
-        days_out = float(row[1])
-        assert 6.99 < days_out < 7.01, f"expected ~7 days, got {days_out:.4f}"
+        workspace = repo.get(application_id)
+        assert workspace is not None
+        assert workspace.status == "submitted"
 
     # ── W15.14: /jobs page
     def test_jobs_page_renders(self, web_client):
@@ -1608,6 +1549,7 @@ class TestReviewFixes:
     # ── W15.15: cache_hit_tokens parsing (DeepSeek + Anthropic formats)
     def test_cache_split_parses_deepseek_format(self):
         from offerguide.llm.client import _parse_cache_split
+
         usage = {
             "prompt_tokens": 1000,
             "prompt_cache_hit_tokens": 800,
@@ -1619,6 +1561,7 @@ class TestReviewFixes:
 
     def test_cache_split_parses_anthropic_format(self):
         from offerguide.llm.client import _parse_cache_split
+
         usage = {
             "input_tokens": 200,
             "cache_read_input_tokens": 800,
@@ -1632,6 +1575,7 @@ class TestReviewFixes:
     def test_cache_split_falls_back_to_no_cache(self):
         """Old proxy / OpenAI without cache info — assume all miss."""
         from offerguide.llm.client import _parse_cache_split
+
         usage = {"prompt_tokens": 500, "completion_tokens": 100}
         hit, miss = _parse_cache_split(usage, 500)
         assert hit == 0
@@ -1640,16 +1584,19 @@ class TestReviewFixes:
     def test_estimate_cost_with_cache_hit_cheaper(self):
         """Cache-hit tokens should be charged at the cheaper rate."""
         from offerguide.llm.pricing import estimate_cost_usd
+
         # 1000 tokens, no cache hit
         no_cache = estimate_cost_usd(
             model="deepseek-v4-flash",
-            prompt_tokens=1000, completion_tokens=0,
+            prompt_tokens=1000,
+            completion_tokens=0,
             cache_hit_tokens=0,
         )
         # 1000 tokens, all cache hit
         all_cache = estimate_cost_usd(
             model="deepseek-v4-flash",
-            prompt_tokens=1000, completion_tokens=0,
+            prompt_tokens=1000,
+            completion_tokens=0,
             cache_hit_tokens=1000,
         )
         # Cache-hit price should be ~10% of no-cache
@@ -1659,11 +1606,13 @@ class TestReviewFixes:
     # ── W15.15: daily budget guardrail
     def test_budget_under_cap_passes(self, tmp_store):
         from offerguide.llm.budget import enforce_daily_budget
+
         # Fresh store, no spend → should not raise
         enforce_daily_budget(tmp_store, cap_usd=5.0)  # no exception
 
     def test_budget_over_cap_raises(self, tmp_store):
         from offerguide.llm.budget import BudgetExceeded, enforce_daily_budget
+
         # Inject a huge agent_runtime_run cost
         with tmp_store.connect() as conn:
             conn.execute(
@@ -1677,6 +1626,7 @@ class TestReviewFixes:
 
     def test_budget_disabled_when_cap_zero(self, tmp_store):
         from offerguide.llm.budget import enforce_daily_budget
+
         # Inject huge cost
         with tmp_store.connect() as conn:
             conn.execute(
@@ -1688,15 +1638,16 @@ class TestReviewFixes:
 
     def test_budget_includes_skill_runs_too(self, tmp_store):
         from offerguide.llm.budget import get_today_spend_usd
+
         with tmp_store.connect() as conn:
             conn.execute(
                 "INSERT INTO skill_runs(skill_name, skill_version, input_hash, "
                 "  input_json, output_json, cost_usd) "
-                "VALUES ('score_match', 'v1', 'h', '{}', '{}', 1.50)"
+                "VALUES ('example_skill', 'v1', 'h', '{}', '{}', 1.50)"
             )
             conn.execute(
                 "INSERT INTO harness_runs(trigger_kind, started_at, cost_usd) "
-                "VALUES ('cron', julianday('now'), 0.30)"
+                "VALUES ('test', julianday('now'), 0.30)"
             )
         spent = get_today_spend_usd(tmp_store)
         assert abs(spent - 1.80) < 0.01
@@ -1704,11 +1655,10 @@ class TestReviewFixes:
     def test_loop_returns_budget_exceeded_finish_reason(self, tmp_store, tmp_worldview):
         """Harness loop refuses to start when over budget."""
         from offerguide.agent_runtime.loop import run as agent_runtime_run
-        from offerguide.agent_runtime.triggers import make_cron_heartbeat
         with tmp_store.connect() as conn:
             conn.execute(
                 "INSERT INTO harness_runs(trigger_kind, started_at, cost_usd) "
-                "VALUES ('cron', julianday('now'), 99.99)"
+                "VALUES ('test', julianday('now'), 99.99)"
             )
         deps = AgentRuntimeDeps(
             settings=Settings(deepseek_api_key="x", default_model="stub"),
@@ -1718,10 +1668,11 @@ class TestReviewFixes:
         )
         # Set a low cap via env
         import os as _os
+
         prev = _os.environ.get("OFFERGUIDE_DAILY_BUDGET_USD")
         _os.environ["OFFERGUIDE_DAILY_BUDGET_USD"] = "5.0"
         try:
-            result = agent_runtime_run(trigger=make_cron_heartbeat(), deps=deps)
+            result = agent_runtime_run(trigger=TriggerEvent(kind="test"), deps=deps)
         finally:
             if prev is None:
                 _os.environ.pop("OFFERGUIDE_DAILY_BUDGET_USD", None)
@@ -1754,198 +1705,19 @@ class TestReviewFixes:
         # 老的 "trajectory" 链接文字被改
         assert "执行记录" in resp.text or "Trajectory" not in resp.text
 
-    def test_navbar_5_main_groups(self, web_client):
-        """W21 — rail compresses the app into the 5 redesigned groups."""
+    def test_navbar_keeps_the_three_stage_product_visible(self, web_client):
+        """主导航突出找岗、投递材料和面试，不把内部实验室当主流程。"""
         client, _ = web_client
         resp = client.get("/")
-        for href in ("/", "/pipeline", "/tailor", "/interviews", "/evolution", "/debug"):
+        for href in ("/", "/pipeline", "/project-vault", "/debug"):
             assert f'href="{href}"' in resp.text
+        assert 'href="/evolution"' not in resp.text
 
-    def test_home_has_resume_tailor_hero(self, web_client):
-        """Root still routes resume tailoring as a first-class workflow."""
+    def test_home_keeps_resume_editing_attached_to_a_job(self, web_client):
         client, _ = web_client
         resp = client.get("/")
-        assert "Tailor" in resp.text
-        assert 'href="/tailor"' in resp.text
-
-    # ── W15.17 正确修法 2: app_limit_with_attribution 返结构化 source 信息
-    def test_app_limit_attribution_default_fallback(self, tmp_store):
-        from offerguide.briefs import app_limit_with_attribution
-        # 完全未知公司 → default_fallback
-        ans = app_limit_with_attribution(tmp_store, "随便一个不知道的公司", default=3)
-        assert ans.source == "default_fallback"
-        assert ans.is_research_recommended is True
-        assert ans.confidence < 0.5
-        assert "未知" in ans.notes or "默认" in ans.notes
-
-    def test_app_limit_attribution_community_estimate(self, tmp_store):
-        from offerguide.briefs import app_limit_with_attribution
-        # 字节在 hardcoded 表里 → community_estimate
-        ans = app_limit_with_attribution(tmp_store, "字节跳动")
-        assert ans.source == "community_estimate"
-        assert ans.is_research_recommended is True  # 应该建议 agent 现搜
-        assert ans.limit == 2
-        assert "社区" in ans.notes or "网传" in ans.notes
-
-    def test_app_limit_attribution_high_confidence_brief(self, tmp_store):
-        """Brief w/ confidence ≥ 0.7 → 不建议 research."""
-        import json as _json
-
-        from offerguide.briefs import app_limit_with_attribution
-
-        # Inject a high-confidence brief directly
-        with tmp_store.connect() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS company_briefs ("
-                "  company TEXT PRIMARY KEY, brief_json TEXT NOT NULL, "
-                "  last_updated_at REAL, update_count INTEGER DEFAULT 1)"
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO company_briefs "
-                "  (company, brief_json, last_updated_at, update_count) "
-                "VALUES (?, ?, julianday('now'), 5)",
-                ("某独角兽 AI", _json.dumps({
-                    "summary": "agent 已观察 5 次",
-                    "current_app_limit": 4,
-                    "interview_style": "重 Agent / RAG 落地题",
-                    "recent_signals": ["多次 retrieval miss"],
-                    "hiring_trend": "expanding",
-                    "confidence": 0.85,
-                })),
-            )
-        ans = app_limit_with_attribution(tmp_store, "某独角兽 AI")
-        assert ans.source == "brief_high_confidence"
-        assert ans.is_research_recommended is False  # 不需要 refresh
-        assert ans.limit == 4
-        assert ans.confidence == 0.85
-
-    def test_lookup_application_limit_logs_deprecation(self, caplog):
-        import logging as _log
-
-        from offerguide.skills.compare_jobs.helpers import lookup_application_limit
-        with caplog.at_level(_log.DEBUG, logger="offerguide.skills.compare_jobs.helpers"):
-            lookup_application_limit("字节跳动")
-        # 应该有 deprecation hint 日志 (encourages calling new API)
-        assert any("community-estimate" in r.message or "fallback" in r.message
-                   for r in caplog.records)
-
-    # ── W15.17 正确修法 1: tailor_resume SKILL.md schema 升级到 v0.2.0
-    def test_tailor_skill_v02_has_inserted_claims(self):
-        """tailor_resume SKILL.md 应该 v0.2.0 + inserted_claims 字段."""
-        from pathlib import Path
-        skill_path = Path(__file__).parent.parent / "src/offerguide/skills/tailor_resume/SKILL.md"
-        text = skill_path.read_text(encoding="utf-8")
-        assert "version: 0.2.0" in text
-        assert "inserted_claims" in text
-        # schema 必备字段
-        assert "source_kind" in text
-        assert "completely_new" in text  # 三档之一
-        assert "prep_plan" in text
-        assert "interview_questions_to_prep" in text
-        assert "fallback_if_unprepared" in text
-
-    def test_tailor_template_renders_inserted_claims(self):
-        """_tailor_result.html 应该有 inserted_claims 渲染块."""
-        from pathlib import Path
-        tpl = Path(__file__).parent.parent / "src/offerguide/ui/templates/_tailor_result.html"
-        text = tpl.read_text(encoding="utf-8")
-        assert "inserted_claims" in text
-        assert "你需要准备的事" in text
-        assert "学习清单" in text
-        assert "万一还没准备好" in text
-
-    # ── W15.18: BOSS 推荐列表 bulk_ingest endpoint
-    def test_bulk_ingest_2_jobs(self, web_client):
-        """Extension v0.2 推荐列表模式 — 一次传 N 个岗位."""
-        client, store = web_client
-        resp = client.post("/api/extension/bulk_ingest", json={
-            "page_url": "https://www.zhipin.com/web/geek/recommend",
-            "items": [
-                {
-                    "url": "https://www.zhipin.com/job_detail/abc123.html",
-                    "title": "AI Agent 实习",
-                    "company": "字节跳动",
-                    "location": "北京",
-                    "salary": "300-500/天",
-                    "tags": ["LLM", "Agent", "Python"],
-                },
-                {
-                    "url": "https://www.zhipin.com/job_detail/def456.html",
-                    "title": "NLP 算法工程师 (实习)",
-                    "company": "阿里巴巴",
-                    "location": "杭州",
-                    "salary": "350/天",
-                    "tags": ["BERT", "PyTorch"],
-                },
-            ],
-            "captured_at": "2026-05-09T10:00:00Z",
-        })
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["total"] == 2
-        assert data["inserted"] == 2
-        assert data["duplicate"] == 0
-        assert len(data["job_ids"]) == 2
-
-    def test_bulk_ingest_dedup(self, web_client):
-        """同样 URL 第二次发送 → duplicate 不重复入库."""
-        client, _ = web_client
-        item = {
-            "url": "https://www.zhipin.com/job_detail/dup.html",
-            "title": "重复岗位",
-            "company": "测试公司",
-        }
-        # 第一次
-        r1 = client.post("/api/extension/bulk_ingest",
-                          json={"items": [item]})
-        assert r1.status_code == 200
-        assert r1.json()["inserted"] == 1
-        # 第二次
-        r2 = client.post("/api/extension/bulk_ingest",
-                          json={"items": [item]})
-        assert r2.status_code == 200
-        assert r2.json()["inserted"] == 0
-        assert r2.json()["duplicate"] == 1
-
-    def test_bulk_ingest_empty_400(self, web_client):
-        client, _ = web_client
-        resp = client.post("/api/extension/bulk_ingest", json={"items": []})
-        assert resp.status_code == 400
-
-    def test_bulk_ingest_skips_invalid_items(self, web_client):
-        """没 title 或 company 的 item → 跳过, 但不让整批失败."""
-        client, _ = web_client
-        resp = client.post("/api/extension/bulk_ingest", json={
-            "items": [
-                {"title": "好的岗位", "company": "公司 A"},
-                {"title": "", "company": "公司 B"},  # missing title
-                {"title": "缺公司", "company": ""},  # missing company
-                {"title": "好的岗位 2", "company": "公司 C"},
-            ],
-        })
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["total"] == 4
-        assert data["inserted"] == 2
-        assert len(data["skipped_reasons"]) >= 2
-
-    def test_bulk_ingest_fires_harness_event(self, web_client):
-        """成功 ingest 后 fire harness_event, agent 下次 wake 能看到."""
-        client, store = web_client
-        client.post("/api/extension/bulk_ingest", json={
-            "items": [{"title": "测试岗", "company": "测试公司",
-                       "url": "https://www.zhipin.com/job_detail/xxx.html"}],
-        })
-        # 应该有一条 harness_events
-        with store.connect() as conn:
-            row = conn.execute(
-                "SELECT kind, source, note FROM harness_events "
-                "ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        assert row is not None
-        assert row[0] == "user_paste_jd"  # 借用现有 event kind
-        assert row[1] == "user"
-        assert "BOSS" in (row[2] or "")
+        assert "修改当前岗位简历" in resp.text
+        assert 'href="/tailor"' not in resp.text
 
     # ── W15.19: /metrics dogfood dashboard
     def test_metrics_page_renders_empty(self, web_client):
@@ -1973,283 +1745,27 @@ class TestReviewFixes:
             conn.execute(
                 "INSERT INTO skill_runs(skill_name, skill_version, input_hash, "
                 "  input_json, output_json, cost_usd, latency_ms) "
-                "VALUES ('score_match', 'v1', 'h', '{}', '{}', 0.0123, 100)"
+                "VALUES ('example_skill', 'v1', 'h', '{}', '{}', 0.0123, 100)"
             )
         resp = client.get("/metrics")
         assert resp.status_code == 200
         # Should show the application in funnel
         assert "已投" in resp.text
         # Should include the skill in leaderboard
-        assert "score_match" in resp.text
+        assert "example_skill" in resp.text
 
-    def test_resume_pitch_kit_doc_exists(self):
-        """Ensure the pitch kit doc is committed (referenced by README)."""
+    def test_project_description_matches_the_three_stage_product(self):
+        """项目说明应描述真实主流程，而不是旧的面试包装目标。"""
         from pathlib import Path
-        kit = Path(__file__).parent.parent / "docs/resume_pitch_kit.md"
-        assert kit.exists(), "docs/resume_pitch_kit.md missing — README links it"
-        text = kit.read_text(encoding="utf-8")
-        # Sanity: must include the 5 interview wedges + dogfood template
-        assert "面试" in text
-        assert "LangChain" in text
-        assert "Dogfood Log" in text or "dogfood" in text.lower()
 
-    # ── W15.20: 半自动 BOSS — content script 内联评分 + 一键开场白
-    def test_score_inline_no_resume_returns_400(self, web_client):
-        """No profile configured → 400 with actionable message, not 500."""
-        client, _ = web_client
-        resp = client.post("/api/extension/score_inline", json={
-            "url": "https://www.zhipin.com/job_detail/abc.html",
-            "title": "AI Agent 实习",
-            "company": "字节",
-            "description": "x" * 300,
-            "tags": [],
-        })
-        # web_client fixture has no profile + no API key → either 400 is fine
-        assert resp.status_code == 400
-        assert "key" in resp.text.lower() or "简历" in resp.text
-
-    def test_score_inline_empty_description_400(self, web_client):
-        client, _ = web_client
-        resp = client.post("/api/extension/score_inline", json={
-            "title": "x", "description": "  ", "tags": [],
-        })
-        assert resp.status_code == 400
-
-    def test_greeting_no_resume_returns_400(self, web_client):
-        client, _ = web_client
-        resp = client.post("/api/extension/greeting", json={
-            "jd_text": "Some long job description text here, etc.",
-            "title": "AI Agent 实习", "company": "字节",
-        })
-        assert resp.status_code == 400
-
-    def test_greeting_unknown_job_id_404(self, web_client):
-        """Even with profile/key issues, unknown job_id should be a clear case."""
-        client, _ = web_client
-        # When we have no key, we get "需要 LLM key" first — that's fine; this
-        # test just ensures the request shape validates and doesn't 500.
-        resp = client.post("/api/extension/greeting", json={"job_id": 999_999})
-        assert resp.status_code in (400, 404)
-
-    # ── W15.21: ranked recommendations + DOM probe + chat content_script
-    def test_recommended_page_renders_empty(self, web_client):
-        client, _ = web_client
-        resp = client.get("/recommended")
-        assert resp.status_code == 200
-        assert "Pipeline · 推荐池" in resp.text
-        assert "BOSS 沟通" in resp.text  # daily budget bar
-        assert "还没评估过任何岗位" in resp.text
-
-    def test_recommended_page_with_jobs_no_score(self, web_client):
-        client, store = web_client
-        # Insert 2 jobs without score_match runs
-        with store.connect() as conn:
-            for i, (t, c) in enumerate([("AI 实习", "字节"), ("NLP 实习", "阿里")]):
-                conn.execute(
-                    "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    ("manual", t, c, "x" * 200, f"hash_rec_{i}"),
-                )
-            conn.commit()
-        resp = client.get("/recommended")
-        assert resp.status_code == 200
-        assert "AI 实习" in resp.text
-        assert "NLP 实习" in resp.text
-        # Should appear in the "未评分" group
-        assert "未评分" in resp.text or "还没评分" in resp.text
-
-    def test_recommended_hides_zerovoice_article_links(self, web_client):
-        client, store = web_client
-        with store.connect() as conn:
-            conn.execute(
-                "INSERT INTO jobs (source, title, company, url, raw_text, extras_json, content_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    "zerovoice_repo",
-                    "公众号汇总岗",
-                    "某公司",
-                    "https://mp.weixin.qq.com/s?__biz=test",
-                    "x" * 200,
-                    _json.dumps({"link_type": "wechat_article"}, ensure_ascii=False),
-                    "hash_zv_wechat",
-                ),
-            )
-            conn.execute(
-                "INSERT INTO jobs (source, title, company, url, raw_text, extras_json, content_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    "zerovoice_repo",
-                    "官方直链岗",
-                    "某公司",
-                    "https://campus-talent.alibaba.com/campus/position/1",
-                    "x" * 200,
-                    _json.dumps({"link_type": "official_ats"}, ensure_ascii=False),
-                    "hash_zv_ats",
-                ),
-            )
-            conn.commit()
-
-        resp = client.get("/recommended?type=all")
-        assert resp.status_code == 200
-        assert "官方直链岗" in resp.text
-        assert "公众号汇总岗" not in resp.text
-
-    def test_home_recent_jobs_hide_dead_zerovoice_article_links(self, web_client):
-        client, store = web_client
-        with store.connect() as conn:
-            conn.execute(
-                "INSERT INTO jobs (source, title, company, url, raw_text, extras_json, content_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    "zerovoice_repo",
-                    "首页不该露出的公众号岗",
-                    "某公司",
-                    "https://mp.weixin.qq.com/s?__biz=test",
-                    "x" * 200,
-                    _json.dumps({"link_type": "wechat_article"}, ensure_ascii=False),
-                    "hash_home_zv_wechat",
-                ),
-            )
-            conn.execute(
-                "INSERT INTO jobs (source, title, company, url, raw_text, extras_json, content_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    "zerovoice_repo",
-                    "首页可以露出的官方岗",
-                    "某公司",
-                    "https://campus-talent.alibaba.com/campus/position/1",
-                    "x" * 200,
-                    _json.dumps({"link_type": "official_ats"}, ensure_ascii=False),
-                    "hash_home_zv_ats",
-                ),
-            )
-            conn.commit()
-
-        resp = client.get("/")
-        assert resp.status_code == 200
-        assert "首页可以露出的官方岗" in resp.text
-        assert "首页不该露出的公众号岗" not in resp.text
-
-    def test_recommended_orders_by_score_desc(self, web_client):
-        client, store = web_client
-        from offerguide.agent_runtime import _schema as hs
-        hs.init_agent_runtime_schema(store)
-        # Insert 3 jobs + 3 harness_events of kind='scored' (W15.22 path:
-        # score is recorded as a harness_event after score_match runs, since
-        # SKILL input_json doesn't contain job_id).
-        with store.connect() as conn:
-            for i, (t, c, prob) in enumerate([
-                ("低分岗", "公司C", 0.10),
-                ("高分岗", "公司A", 0.45),
-                ("中分岗", "公司B", 0.22),
-            ]):
-                conn.execute(
-                    "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    ("manual", t, c, "x" * 200, f"hash_ord_{i}"),
-                )
-                jid = conn.execute(
-                    "SELECT id FROM jobs WHERE title=?", (t,),
-                ).fetchone()[0]
-                conn.execute(
-                    "INSERT INTO harness_events (kind, job_id, note, source) "
-                    "VALUES (?, ?, ?, ?)",
-                    (
-                        "scored", jid,
-                        _json.dumps({
-                            "probability": prob, "skill_run_id": 100 + i,
-                            "deal_breakers": [],
-                        }),
-                        "agent",
-                    ),
-                )
-            conn.commit()
-        # W17 — default filter is ?type=intern; bare 'manual' jobs without
-        # recruit_type signals classify as 'unknown' and get filtered out.
-        # Use ?type=all to assert ordering across the full pool.
-        resp = client.get("/recommended?type=all")
-        assert resp.status_code == 200
-        text = resp.text
-        idx_high = text.find("高分岗")
-        idx_mid = text.find("中分岗")
-        idx_low = text.find("低分岗")
-        assert idx_high > 0 and idx_mid > 0 and idx_low > 0
-        assert idx_high < idx_mid < idx_low, "高分应该排在最前面"
-        # New thresholds: ≥30% green, 15-30% yellow, <15% red
-        assert "值得投" in text  # 高分岗 (45%)
-        assert "可以试" in text  # 中分岗 (22%)
-        assert "性价比低" in text  # 低分岗 (10%)
-
-    def test_recommended_excludes_already_applied(self, web_client):
-        """已 'applied' 的岗位不出现在推荐池."""
-        client, store = web_client
-        with store.connect() as conn:
-            conn.execute(
-                "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ("manual", "已投岗位", "已投公司", "x" * 200, "hash_applied_1"),
-            )
-            job_id = conn.execute(
-                "SELECT id FROM jobs WHERE title = '已投岗位'"
-            ).fetchone()[0]
-            conn.execute(
-                "INSERT INTO applications (job_id, status, applied_at) "
-                "VALUES (?, 'applied', julianday('now'))",
-                (job_id,),
-            )
-            conn.commit()
-        resp = client.get("/recommended")
-        assert resp.status_code == 200
-        assert "已投岗位" not in resp.text
-
-    def test_recommended_daily_budget_shows(self, web_client):
-        client, store = web_client
-        from offerguide.agent_runtime import _schema as hs
-        hs.init_agent_runtime_schema(store)
-        # Insert 5 greeting_drafted events today
-        with store.connect() as conn:
-            for _ in range(5):
-                conn.execute(
-                    "INSERT INTO harness_events (kind, note, source) "
-                    "VALUES ('greeting_drafted', 'test', 'extension')"
-                )
-            conn.commit()
-        resp = client.get("/recommended")
-        assert resp.status_code == 200
-        # Should show "5 / 80"
-        assert "5 / 80" in resp.text or "5/80" in resp.text.replace(" ", "")
-
-    def test_probe_dom_endpoint_saves_file(self, web_client, tmp_path):
-        import os
-        client, _ = web_client
-        # Run from a tmp cwd so .offerguide/probes/ goes there
-        old_cwd = os.getcwd()
-        os.chdir(tmp_path)
-        try:
-            resp = client.post("/api/extension/probe_dom", json={
-                "url": "https://www.zhipin.com/web/chat/123",
-                "snippet_kind": "chat_box",
-                "outer_html": "<div class='chat-im-wrap'><textarea/><button>发送</button></div>",
-                "captured_at": "2026-05-10T10:00:00Z",
-            })
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["bytes"] > 10
-            assert "saved_as" in data
-            saved = tmp_path / ".offerguide/probes" / data["saved_as"]
-            assert saved.exists()
-            content = saved.read_text(encoding="utf-8")
-            assert "chat-im-wrap" in content
-            assert "captured_at" in content  # header
-        finally:
-            os.chdir(old_cwd)
-
-    def test_probe_dom_empty_html_400(self, web_client):
-        client, _ = web_client
-        resp = client.post("/api/extension/probe_dom", json={
-            "url": "https://www.zhipin.com/web/chat/x", "outer_html": "",
-        })
-        assert resp.status_code == 400
+        root = Path(__file__).parent.parent
+        description = root / "求职Agent项目说明.md"
+        assert description.exists()
+        text = description.read_text(encoding="utf-8")
+        assert "投递前" in text
+        assert "投递中" in text
+        assert "投递后" in text
+        assert "自进化" not in text
 
     def test_navbar_includes_recommended_link(self, web_client):
         client, _ = web_client
@@ -2257,173 +1773,6 @@ class TestReviewFixes:
         assert resp.status_code == 200
         assert "/pipeline" in resp.text
         assert "Pipeline" in resp.text
-
-    # ── W15.22: SKILL field-name regression net
-    # Pre-W15.22 every score_match / tailor / interview_prep / reflect call
-    # raised ValueError in SkillRuntime canonicalize because we passed wrong
-    # input keys (job_title/jd_text/candidate_resume vs declared job_text/
-    # user_profile). Silently swallowed → no scores ever recorded since W14.
-    # This test lights up if a future call site reverts.
-
-    def test_skill_inputs_match_call_sites(self):
-        """For each SKILL we invoke from production, the input dict we build
-        must canonicalize without ValueError against the SKILL.md declaration.
-
-        Catches the W15.22 root bug: input field names drifting from SKILL.md.
-        """
-        from pathlib import Path
-
-        from offerguide.skills import discover_skills
-        from offerguide.skills._runtime import _canonicalize_inputs
-
-        skills_root = Path(__file__).parent.parent / "src/offerguide/skills"
-        skills_by_name = {s.name: s for s in discover_skills(skills_root)}
-
-        # Each entry: (SKILL name, sample inputs we'd pass at call site).
-        # Keep this list in sync with src/offerguide/agent_runtime/{tools,evaluate}.py
-        # and src/offerguide/ui/web.py extension/score_inline.
-        call_sites = [
-            ("score_match", {"job_text": "x" * 100, "user_profile": "y" * 100}),
-            ("tailor_resume", {
-                "master_resume": "x" * 100, "job_text": "y" * 100,
-                "company": "字节", "successful_profile_json": "{}",
-            }),
-            ("prepare_interview", {
-                "company": "字节", "job_text": "x" * 100,
-                "user_profile": "y" * 100, "past_experiences": "(无)",
-            }),
-            ("post_interview_reflection", {
-                "company": "字节", "prep_questions_json": "[]",
-                "actual_transcript": "面试结果: passed",
-            }),
-        ]
-
-        for skill_name, inputs in call_sites:
-            spec = skills_by_name.get(skill_name)
-            assert spec is not None, f"SKILL {skill_name} 没找到"
-            # Should NOT raise — if it does, a call site uses wrong keys
-            canon = _canonicalize_inputs(spec, inputs, strict=True)
-            assert set(canon.keys()) == set(spec.inputs), (
-                f"{skill_name}: canonicalize 没返回 declared 全集 — "
-                f"declared={spec.inputs}, got={list(canon.keys())}"
-            )
-
-    def test_score_match_records_scored_event(self, tmp_store, tmp_worldview):
-        """A successful score_match call should record a harness_events row of
-        kind='scored' with probability + skill_run_id in the JSON note. This is
-        what /recommended ranks by."""
-        from pathlib import Path
-
-        from offerguide.agent_runtime.tools import _exec_score_match
-        from offerguide.skills import discover_skills
-        from offerguide.skills._runtime import SkillRuntime
-
-        # Need a stub LLM that returns valid score_match JSON
-        skills_root = Path(__file__).parent.parent / "src/offerguide/skills"
-        skills = discover_skills(skills_root)
-
-        class FakeLLM:
-            def chat(self, messages, **kw):
-                from offerguide.llm import LLMResponse
-                return LLMResponse(
-                    content=_json.dumps({
-                        "probability": 0.42, "reasoning": "decent fit",
-                        "dimensions": {"tech": 0.6, "exp": 0.5, "company_tier": 0.4},
-                        "deal_breakers": [],
-                    }),
-                    model="stub", prompt_tokens=10, completion_tokens=10,
-                    cost_usd=0.0001,
-                )
-
-        runtime = SkillRuntime(llm=FakeLLM(), store=tmp_store)  # type: ignore[arg-type]
-
-        # Insert a job to score
-        with tmp_store.connect() as conn:
-            conn.execute(
-                "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
-                "VALUES ('manual', '测试岗', '测试公司', ?, 'h_score_evt')",
-                ("x" * 300,),
-            )
-            job_id = conn.execute(
-                "SELECT id FROM jobs WHERE title='测试岗'"
-            ).fetchone()[0]
-
-        deps = AgentRuntimeDeps(
-            settings=Settings(deepseek_api_key="x", default_model="stub"),
-            store=tmp_store,
-            memory_store=MemoryStore(root=tmp_worldview),
-            llm=FakeLLM(),  # type: ignore[arg-type]
-            runtime=runtime, skills=skills,
-            user_profile_text="resume content " * 50,
-        )
-
-        msg = _exec_score_match({"job_id": job_id}, deps)
-        assert "OK score_match" in msg, f"score_match returned: {msg}"
-        assert "0.42" in msg, "should mention probability 0.42"
-
-        # Should have recorded a 'scored' event
-        with tmp_store.connect() as conn:
-            ev = conn.execute(
-                "SELECT job_id, kind, note FROM harness_events "
-                "WHERE kind = 'scored' AND job_id = ?",
-                (job_id,),
-            ).fetchone()
-        assert ev is not None, "no harness_events row of kind='scored' recorded"
-        note = _json.loads(ev[2])
-        assert note["probability"] == 0.42
-        assert note["skill_run_id"] is not None
-
-    def test_extension_manifest_v030_has_content_script(self):
-        """Manifest 0.3.0 wires content_script_jd.js for JD detail pages."""
-        import json
-        from pathlib import Path
-        manifest_path = Path(__file__).parent.parent / "browser_extension/manifest.json"
-        m = json.loads(manifest_path.read_text(encoding="utf-8"))
-        assert m["version"].startswith("0.3")
-        assert "clipboardWrite" in m["permissions"]
-        cs = m.get("content_scripts", [])
-        assert len(cs) >= 1
-        jd_cs = cs[0]
-        assert any("job_detail" in p for p in jd_cs["matches"])
-        assert "content_script_jd.js" in jd_cs["js"]
-        # 文件存在
-        cs_file = Path(__file__).parent.parent / "browser_extension/content_script_jd.js"
-        assert cs_file.exists()
-        body = cs_file.read_text(encoding="utf-8")
-        assert "/api/extension/score_inline" in body
-        assert "/api/extension/greeting" in body
-        assert "navigator.clipboard" in body
-
-    # ── W15.23: ambient discovery + apply-pack + post-apply-pack
-    def test_ambient_discovery_loop_imports_clean(self):
-        """The ambient loop module loads without side-effects."""
-        from offerguide.workers import ambient
-        assert hasattr(ambient, "_ambient_discovery_loop")
-        assert hasattr(ambient, "DEFAULT_CYCLE_INTERVAL_SECONDS")
-        assert ambient.DEFAULT_CYCLE_INTERVAL_SECONDS == 6 * 60 * 60
-
-    def test_ambient_unscored_picks_only_unscored_nowcoder_jobs(self, tmp_store):
-        """_load_unscored_nowcoder_ids excludes jobs with a 'scored' event."""
-        from offerguide.workers.ambient import _load_unscored_nowcoder_ids
-        with tmp_store.connect() as conn:
-            for i, src in enumerate(["nowcoder", "nowcoder", "manual"]):
-                conn.execute(
-                    "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (src, f"job_{i}", "公司", "x" * 200, f"h_amb_{i}"),
-                )
-            # Mark job 1 (nowcoder) as already scored
-            conn.execute(
-                "INSERT INTO harness_events (kind, job_id, note, source) "
-                "VALUES ('scored', 1, '{}', 'agent')"
-            )
-            conn.commit()
-        ids = _load_unscored_nowcoder_ids(tmp_store)
-        # Should include nowcoder job#2 (unscored), exclude nowcoder job#1 (scored)
-        # and exclude manual job#3 (wrong source)
-        assert 2 in ids
-        assert 1 not in ids
-        assert 3 not in ids
 
     def test_apply_pack_404_for_unknown_job(self, web_client):
         client, _ = web_client
@@ -2445,16 +1794,14 @@ class TestReviewFixes:
         assert resp.status_code == 200
         # web_client fixture has no API key + no profile → some error message
         assert "投递包" in resp.text  # page header still renders
-        assert ("LLM key" in resp.text
-                or "简历" in resp.text
-                or "SkillRuntime" in resp.text)
+        assert "LLM key" in resp.text or "简历" in resp.text or "SkillRuntime" in resp.text
 
     def test_post_apply_pack_404_for_unknown_job(self, web_client):
         client, _ = web_client
         resp = client.get("/jobs/999999/post-apply-pack")
         assert resp.status_code == 404
 
-    def test_post_apply_pack_renders_no_llm_key(self, web_client):
+    def test_post_apply_pack_requires_a_frozen_submitted_package(self, web_client):
         client, store = web_client
         with store.connect() as conn:
             conn.execute(
@@ -2464,35 +1811,17 @@ class TestReviewFixes:
             )
             conn.commit()
         resp = client.get("/jobs/1/post-apply-pack")
-        assert resp.status_code == 200
-        assert "投后备战包" in resp.text
-        assert "过往面经材料" in resp.text or "LLM key" in resp.text or "简历" in resp.text
-
-    def test_recommended_card_links_to_apply_pack(self, web_client):
-        """W15.23: '准备投递' button on /recommended cards links to apply-pack."""
-        client, store = web_client
-        with store.connect() as conn:
-            conn.execute(
-                "INSERT INTO jobs (source, title, company, raw_text, content_hash) "
-                "VALUES ('manual', 'AI 实习', '字节', ?, 'h_rec_link')",
-                ("x" * 200,),
-            )
-            conn.commit()
-        resp = client.get("/recommended")
-        assert resp.status_code == 200
-        assert "/apply-pack" in resp.text
-        assert "准备投递" in resp.text
+        assert resp.status_code == 409
+        assert "真实投递记录" in resp.text
 
     # ── Smell 6: dead code removed (no `_ = tools` statement at top level)
     def test_loop_module_no_dead_imports(self):
         from offerguide.agent_runtime import loop as loop_mod
+
         src = Path(loop_mod.__file__).read_text(encoding="utf-8")
         # Check non-comment lines only — the comment explaining the fix
         # legitimately mentions the old code.
-        non_comment_lines = [
-            ln for ln in src.splitlines()
-            if not ln.lstrip().startswith("#")
-        ]
+        non_comment_lines = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
         body = "\n".join(non_comment_lines)
         assert "_ = tools" not in body
         assert "_ = _dt" not in body

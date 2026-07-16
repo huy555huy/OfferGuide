@@ -10,11 +10,10 @@ Why this matters:
 - Adding ``reflection`` to STAR (= STAR+R) makes answers stickier and
   more memorable, per the Career-Ops methodology
 
-Stories are tagged by theme — ``prepare_interview`` and
-``deep_project_prep`` SKILLs query by tag at retrieval time so the
-generated questions can reference EXACTLY the user's pre-prepped
-materials. Each retrieval bumps ``used_count`` so the dashboard
-surfaces stale stories that haven't been used in a while.
+Stories are tagged by theme so interview preparation can retrieve the user's
+actual rehearsed material instead of inventing generic behavioral examples.
+Each retrieval bumps ``used_count`` so the UI can surface stories that have
+not been practiced recently.
 """
 
 from __future__ import annotations
@@ -129,7 +128,7 @@ def list_all(store: Store, *, limit: int = 100) -> list[Story]:
 
 
 def search_by_tag(store: Store, tag: str, *, limit: int = 5) -> list[Story]:
-    """Return stories whose tags include ``tag`` — for SKILL retrieval.
+    """Return stories whose tags include ``tag`` for interview preparation.
 
     Bumps ``used_count`` on each returned story so the dashboard can
     show stale/under-used ones.
@@ -177,12 +176,10 @@ def delete(store: Store, story_id: int) -> bool:
 
 
 def render_for_skill(stories: list[Story], *, max_chars: int = 3000) -> str:
-    """Render stories into a single labelled blob suitable for SKILL prompts.
+    """Render stories as labelled context for an interview model.
 
-    Used by ``prepare_interview`` / ``deep_project_prep`` when building
-    behavioral_questions_tailored — the SKILL sees the user's actual
-    rehearsed material and can write per-question ``answer_outline`` that
-    reference these stories instead of generic advice.
+    This keeps answer preparation grounded in the user's rehearsed examples
+    instead of generic advice.
     """
     if not stories:
         return ""

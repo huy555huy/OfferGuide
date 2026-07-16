@@ -44,9 +44,9 @@
             <form hx-post="/inbox/{{ it.id }}/decide"
                   hx-target="#inbox-row-{{ it.id }}" hx-swap="outerHTML"
                   style="display:inline-flex; gap:0.25rem;">
-                <button name="decision" value="approved" title="批准 (会作为 +1 thumbs 反馈到 evolution)">👍</button>
-                <button name="decision" value="rejected" class="secondary" title="拒绝 (会作为 -1 thumbs 反馈)">👎</button>
-                <button name="decision" value="dismissed" class="ghost" title="忽略 (不算反馈, 只是关掉)">—</button>
+                <button name="decision" value="approved" title="批准并执行建议">👍</button>
+                <button name="decision" value="rejected" class="secondary" title="拒绝这条建议">👎</button>
+                <button name="decision" value="dismissed" class="ghost" title="忽略并关闭">—</button>
             </form>
             {% else %}
             <span class="muted small">{{ it.decision_note or '已决策' }}</span>
@@ -61,8 +61,8 @@
     <div class="empty-title">暂无 inbox 项</div>
     <div class="empty-hint">
         agent 看到值得让你知道的事会主动写到这里——例如:<br>
-        <em>"建议给字节 AI Agent tailor 简历 (score 0.85)"</em><br>
-        <em>"你那个腾讯申请已 silent 14 天, 建议最后 follow up 一次"</em>
+        <em>"建议打开字节 AI Agent 岗位投递包并修改当前简历 (score 0.85)"</em><br>
+        <em>"明天有腾讯面试，冻结材料里还有两个项目追问没有准备"</em>
     </div>
     <div class="empty-action">
         <a href="/agent" class="btn">▶ 跑一次 agent 让它看现状</a>

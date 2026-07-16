@@ -5,18 +5,21 @@ from pathlib import Path
 from offerguide.agent_runtime.context import EVIDENCE_FIRST_POLICY
 from offerguide.agent_runtime.tools import ALL_TOOL_SCHEMAS
 
-
 ROOT = Path(__file__).parent.parent
 
 
-def test_harness_instructions_make_goal_and_user_state_unknown_until_evidenced():
+def test_runtime_instructions_center_the_three_real_job_search_tasks():
     instructions = (ROOT / "src/offerguide/agent_runtime/instructions.md").read_text(
         encoding="utf-8"
     )
     assert "## 证据优先" in instructions
     assert "运行时会注入共享的证据政策" in instructions
-    assert "事实、推断、未知分开" in instructions
-    assert "帮用户拿到 2026 暑期 AI Agent / LLM 应用岗 offer" not in instructions
+    assert "事实、推断、未知" in instructions
+    assert "投递前：找到值得投的岗位" in instructions
+    assert "投递中：完成一份可用的投递包" in instructions
+    assert "投递后：查找真实面经并回答原题" in instructions
+    assert "不生成替代题、预测题或泛化准备内容" in instructions
+    assert "内容取舍、展开程度和篇幅服从当前 JD" in instructions
 
 
 def test_shared_evidence_policy_is_injected_into_runtime_prompts():
@@ -25,51 +28,42 @@ def test_shared_evidence_policy_is_injected_into_runtime_prompts():
     assert "不能驱动批量投递" in EVIDENCE_FIRST_POLICY
 
 
-def test_harness_tool_descriptions_require_grounded_actions():
+def test_main_tools_stay_on_job_search_instead_of_self_evolution():
     schemas = {s["function"]["name"]: s["function"] for s in ALL_TOOL_SCHEMAS}
 
-    discover = schemas["discover_jobs"]
-    discover_text = (
-        discover["description"]
+    research_jobs = schemas["research_jobs"]
+    research_text = (
+        research_jobs["description"]
         + " "
-        + discover["parameters"]["properties"]["criteria"]["description"]
+        + research_jobs["parameters"]["properties"]["intent"]["description"]
     )
-    assert "explicit evidence" in discover_text
-    assert "Do not invent missing preferences" in discover_text
+    assert "sole JobDiscoveryAgent" in research_text
+    assert "Do not turn assumptions" in research_text
 
-    schedule = schemas["schedule_next_wake"]["description"]
-    assert "concrete event" in schedule
-    assert "guessed user state" in schedule
-
-    assert "capture_project" in schemas
-    assert "save_project_record" in schemas
+    assert "research_interview" in schemas
+    assert "prepare_application" in schemas
+    assert "revise_application" in schemas
+    assert "rerender_application" in schemas
     assert "read_artifact" in schemas
-    save_project = schemas["save_project_record"]["description"]
-    assert "Do not invent missing metrics" in save_project
-    read_artifact = schemas["read_artifact"]["description"]
-    assert "without sending the user to hunt through pages" in read_artifact
+    assert "detect_evolution_candidates" not in schemas
+    assert "evolve_skill" not in schemas
+    assert "run_release_cycle" not in schemas
 
 
 def test_goal_progress_does_not_treat_silence_as_rejection():
     goals_source = (ROOT / "src/offerguide/goals.py").read_text(encoding="utf-8")
-    assert "未记录新进展" in goals_source
+    assert "apps_silent_7d" not in goals_source
+    assert "apps_silent_14d" not in goals_source
     assert "大概率挂" not in goals_source
 
 
-def test_harness_instructions_use_agent_decision_contract():
+def test_runtime_instructions_do_not_turn_internal_state_into_the_goal():
     instructions = (ROOT / "src/offerguide/agent_runtime/instructions.md").read_text(
         encoding="utf-8"
     )
-    assert "主入口是 Agent Chat" in instructions
-    assert "页面只是观察窗口" in instructions
-    assert "状态切面" in instructions
-    assert "每次 wake 的决策契约" in instructions
-    assert "Observe" in instructions
-    assert "Agenda" in instructions
-    assert "act / ask / notify / sleep" in instructions
-    assert "不是把一句用户输入映射成一条固定工具链" in instructions
-    assert "agenda.md" in instructions
-    assert "capture_project" in instructions
-    assert "save_project_record" in instructions
-    assert "read_artifact" in instructions
-    assert "skill_run_id" in instructions
+    assert (
+        "worldview、goals、work items 和 events 是可选的持久化手段，不是目标"
+    ) in instructions
+    assert "不要求每次结束写 reflection" in instructions
+    assert "用户当前明确请求优先于过期的 agenda" in instructions
+    assert "不要主动运行 Skill 自进化" in instructions

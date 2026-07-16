@@ -1,4 +1,4 @@
-"""W15 application agent loop — chat/tools/memory/scheduled wakes.
+"""In-product conversation agent loop.
 
 Structure:
 - ``instructions.md`` — agent's "soul" prompt (loaded by context.py)
@@ -6,15 +6,12 @@ Structure:
 - ``context.py`` — context assembly + self-implemented compaction & clearing
 - ``tools.py`` — job-hunt tool schemas + dispatch
 - ``loop.py`` — single-threaded master loop (the heart)
-- ``triggers.py`` — event-driven primary path + cron fallback
+- ``triggers.py`` — synchronous user-message framing
 - ``feedback.py`` — bridge user reactions → GEPA evolution signals
-- ``_schema.py`` — loop-owned DB tables (runs / events / scheduled wakes)
+- ``_schema.py`` — loop-owned DB tables (runs / events / work items)
 
 Boundary note:
-- This package is OfferGuide's in-product agent loop. It is not the whole
-  Anthropic long-running harness primitive set. The repo-root `.claude/`,
-  `PROGRESS.md`, and `test-results.json` files carry the default-fail
-  contract / fresh evaluator / handoff harness.
+- This package is OfferGuide's in-product agent loop.
 - **The loop is dumb on purpose.** It coordinates model decisions; it doesn't
   make them.
 - **Agency is in-context.** Planning, reflection, communication judgment,
@@ -29,7 +26,7 @@ Boundary note:
 Entry points:
 - ``agent_runtime.run_one(trigger, ...)`` — fire one loop with ready-built deps
 - ``agent_runtime.build_deps(...)`` — build AgentRuntimeDeps for embedding contexts
-- ``agent_runtime.fire_event(...)`` — record a lifecycle event (triggers next wake)
+- ``agent_runtime.make_user_input_trigger(...)`` — frame one synchronous user request
 """
 
 from __future__ import annotations
@@ -45,14 +42,7 @@ from .context import SystemFacts, load_instructions
 from .loop import RunResult, TriggerEvent, run
 from .memory import MemoryStore
 from .tools import AgentRuntimeDeps
-from .triggers import (
-    USER_LIFECYCLE_EVENTS,
-    PendingTrigger,
-    fire_event,
-    make_cron_heartbeat,
-    make_user_input_trigger,
-    poll_pending,
-)
+from .triggers import make_user_input_trigger
 
 _log = logging.getLogger(__name__)
 
@@ -126,32 +116,29 @@ def build_deps(
             _log.warning("agent_runtime.build_deps: skill discovery failed: %s", e)
             skills = []
 
-    # Ensure W21 ToolRegistry is populated. The main runtime agent uses its
-    # own ALL_TOOL_SCHEMAS + dispatch table (defined in agent_runtime/tools.py)
-    # — that's the "main" capability set the user surfaces in
-    # instructions.md. The W21 registry is for sub-agents (Discovery /
-    # Evaluation): when discover_jobs spawns DiscoverySubAgent, the
-    # sub-agent reads its tool subset from the registry. Loading at
-    # build_deps time guarantees the registry is ready before any
-    # sub-agent fires.
-    try:
-        from ..agents.base import register_universal_tools
-        from ..tools import load_all_tools, registry as _tool_registry
-        load_all_tools()
-        register_universal_tools(_tool_registry)
-    except Exception as e:
-        _log.warning("agent_runtime.build_deps: tool registry load failed: %s", e)
+    research_agents = None
+    if llm is not None:
+        try:
+            from ..research_agents.service import ResearchAgentService
 
-    profile_text: str | None = None
+            research_agents = ResearchAgentService(
+                settings=settings,
+                store=store,
+                llm=llm,
+            )
+        except Exception as e:
+            _log.warning("agent_runtime.build_deps: research agents init failed: %s", e)
+
+    master_text: str | None = None
     resume_path = getattr(settings, "resume_pdf", None)
     if resume_path:
         try:
-            from ..profile import load_resume_pdf
-            prof = load_resume_pdf(resume_path)
-            profile_text = prof.raw_resume_text
+            from ..resume import ResumeWorkspaceRepository, load_resume_pdf
+            master_source = load_resume_pdf(resume_path)
+            master_text = ResumeWorkspaceRepository(store).effective_master_text(master_source)
         except Exception as e:
             _log.warning("agent_runtime.build_deps: resume load failed: %s", e)
-            profile_text = None
+            master_text = None
 
     notifier = None
     try:
@@ -168,7 +155,8 @@ def build_deps(
         skills=skills,
         search=search,
         notifier=notifier,
-        user_profile_text=profile_text,
+        user_profile_text=master_text,
+        research_agents=research_agents,
     )
 
 
@@ -181,17 +169,14 @@ def run_one(
     system_facts: SystemFacts | None = None,
     temperature: float | None = None,
 ) -> RunResult:
-    """Convenience: build deps + run one loop. For CLI / cron / triggers.
+    """Convenience: build dependencies and run one conversation-agent turn.
 
     Pass ``deps=`` if you've already built them (e.g. long-running
     process). Otherwise we build fresh per call (cheap enough; LLMClient
     is just an httpx wrapper).
 
     Args:
-        temperature: optional override of loop default. Pass higher
-            (e.g. 0.5) for chat triggers where you want creative interpretation
-            of user intent; lower (e.g. 0.3) for cron heartbeats where you
-            want deterministic decisions.
+        temperature: optional override of the loop default.
     """
     deps = deps or build_deps(settings=settings)
     kwargs: dict[str, Any] = {
@@ -205,10 +190,8 @@ def run_one(
 
 
 __all__ = [
-    "USER_LIFECYCLE_EVENTS",
     "AgentRuntimeDeps",
     "MemoryStore",
-    "PendingTrigger",
     "RunResult",
     "SystemFacts",
     "TriggerEvent",
@@ -216,13 +199,10 @@ __all__ = [
     "context",
     "default_worldview_dir",
     "feedback",
-    "fire_event",
     "load_instructions",
     "loop",
-    "make_cron_heartbeat",
     "make_user_input_trigger",
     "memory",
-    "poll_pending",
     "run",
     "run_one",
     "tools",

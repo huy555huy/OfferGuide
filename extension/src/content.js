@@ -1,9 +1,9 @@
-/* OfferGuide Helper — content script (W13.8)
+/* OfferGuide Helper — content script
  *
  * Injected into Boss直聘 / 牛客 pages. Inserts a small floating panel that:
  *   1. Detects which company the page is about (from page title / URL)
  *   2. Asks the OfferGuide backend (via background.js) for an apply package
- *   3. Renders ONE button per package piece (self-intro, each Q/A) — each
+ *   3. Renders one button for the message and each form answer; each
  *      button only writes to clipboard, NEVER touches platform DOM
  *
  * Anti-ban design:
@@ -11,9 +11,7 @@
  *     (page title for company sniffing). No mutation observers, no event
  *     dispatch, no programmatic clicks.
  *   - Every "copy" is user-triggered (real mousedown on our button)
- *   - Background rate-limits 5 copies/min / 30/hour
- *   - Floating panel is visually obvious (orange 🛠 icon) so users can
- *     dismiss / hide it. Not stealthy.
+ *   - The floating panel is visible and can be collapsed by the user.
  */
 
 (function() {
@@ -52,7 +50,7 @@
         <div class="og-content"></div>
       </div>
       <div class="og-footer">
-        🔒 仅复制到剪贴板, 永不替你点提交 · <span class="og-rate"></span>
+        仅复制到剪贴板；发送或提交前由你检查并确认
       </div>
     `;
     document.documentElement.appendChild(panel);
@@ -71,30 +69,10 @@
     if (hint) btn.title = hint;
 
     btn.addEventListener("click", async () => {
-      // Check rate limit BEFORE writing
-      const rate = await new Promise(r => chrome.runtime.sendMessage({kind: "check_rate"}, r));
-      if (!rate.ok) {
-        btn.querySelector(".og-copy-action").textContent = "⚠ 太快";
-        btn.title = `节流: ${rate.reason}. 慢一点, 平台风控敏感。`;
-        setTimeout(() => {
-          btn.querySelector(".og-copy-action").textContent = "复制";
-          btn.title = hint || "";
-        }, 3000);
-        return;
-      }
-
       try {
         await navigator.clipboard.writeText(text);
-        chrome.runtime.sendMessage({kind: "record_copy"});
         btn.classList.add("og-copied");
         btn.querySelector(".og-copy-action").textContent = "✓ 已复制";
-        // Refresh rate counter shown in footer
-        chrome.runtime.sendMessage({kind: "get_recent_count"}, (r) => {
-          const rateEl = document.querySelector(".og-rate");
-          if (rateEl && r) {
-            rateEl.textContent = `本小时 ${r.lastHour} 次复制`;
-          }
-        });
         setTimeout(() => {
           btn.classList.remove("og-copied");
           btn.querySelector(".og-copy-action").textContent = "复制";
@@ -112,49 +90,42 @@
     const body = panel.querySelector(".og-content");
     body.innerHTML = "";
 
-    if (pkg.skip_reasons && pkg.skip_reasons.length > 0) {
-      const warn = document.createElement("div");
-      warn.className = "og-skip-warn";
-      warn.innerHTML = `⚠ 不建议投: ${pkg.skip_reasons.join(" · ")}`;
-      body.appendChild(warn);
-    }
-
-    // Self intro
-    if (pkg.self_intro_snippet?.text) {
+    if (pkg.message) {
       body.appendChild(makeSection("📨 第一句话",
-        [makeCopyBtn("自我介绍", pkg.self_intro_snippet.text, pkg.self_intro_snippet.rationale)]
+        [makeCopyBtn("沟通话术", pkg.message, "当前岗位投递包中的沟通文案")]
       ));
     }
 
-    // Q/A
-    if (pkg.qa_templates?.length) {
-      const qaButtons = pkg.qa_templates.map((qa, i) =>
-        makeCopyBtn(`Q${i + 1}: ${qa.question.slice(0, 30)}`, qa.answer,
-                    `category=${qa.category} · 个性化 ${qa.personalization_score}`)
+    if (pkg.form_answers?.length) {
+      const qaButtons = pkg.form_answers.map((qa, i) =>
+        makeCopyBtn(`Q${i + 1}: ${qa.question.slice(0, 30)}`, qa.answer, qa.question)
       );
       body.appendChild(makeSection("📝 表单问答", qaButtons));
     }
 
-    // Strategy reminders (text only, no copy needed)
-    if (pkg.submission_strategy) {
-      const s = pkg.submission_strategy;
-      const stratDiv = document.createElement("div");
-      stratDiv.className = "og-strategy";
-      stratDiv.innerHTML = `
-        <div class="og-section-title">🎯 投递策略</div>
-        <div class="og-strat-item">最佳时间: ${s.best_time_window || "—"}</div>
-        <div class="og-strat-item">预期回复: ${s.expected_response_window_days || "?"} 天</div>
-      `;
-      body.appendChild(stratDiv);
+    if (pkg.pre_submit_checks?.length) {
+      const checks = document.createElement("div");
+      checks.className = "og-strategy";
+      const title = document.createElement("div");
+      title.className = "og-section-title";
+      title.textContent = "提交前检查";
+      checks.appendChild(title);
+      pkg.pre_submit_checks.forEach((item) => {
+        const row = document.createElement("div");
+        row.className = "og-strat-item";
+        row.textContent = item;
+        checks.appendChild(row);
+      });
+      body.appendChild(checks);
     }
 
     // Job tracking link back to OfferGuide
     if (jobId) {
       const link = document.createElement("a");
       link.className = "og-track-link";
-      link.href = `http://localhost:8000/apply/${jobId}`;
+      link.href = `http://localhost:8000/jobs/${jobId}/apply-pack`;
       link.target = "_blank";
-      link.textContent = `→ 在 OfferGuide 标记投递状态 (job#${jobId})`;
+      link.textContent = `→ 查看 OfferGuide 投递包 (job#${jobId})`;
       body.appendChild(link);
     }
   }
@@ -170,6 +141,41 @@
     return sec;
   }
 
+  function fetchPackage(company, jobId, callback) {
+    chrome.runtime.sendMessage(
+      {kind: "fetch_package_for_company", company, job_id: jobId || null},
+      callback,
+    );
+  }
+
+  function renderWorkspaceChoices(panel, company, matches) {
+    const body = panel.querySelector(".og-content");
+    body.innerHTML = "";
+    const buttons = matches.map((match) => {
+      const button = document.createElement("button");
+      button.className = "og-copy-btn";
+      const label = document.createElement("span");
+      label.className = "og-copy-label";
+      label.textContent = match.title;
+      const action = document.createElement("span");
+      action.className = "og-copy-action";
+      action.textContent = "选择";
+      button.append(label, action);
+      button.addEventListener("click", () => {
+        fetchPackage(company, match.job_id, (response) => {
+          if (!response?.ok) {
+            panel.querySelector(".og-status").textContent = response?.error || "投递包读取失败";
+            return;
+          }
+          panel.querySelector(".og-status").textContent = `${company} · ${match.title}`;
+          renderPackage(panel, response.package, response.job_id);
+        });
+      });
+      return button;
+    });
+    body.appendChild(makeSection("选择当前岗位", buttons));
+  }
+
   // ────────── Main ──────────
   function main() {
     const company = sniffCompany();
@@ -182,18 +188,20 @@
     }
     status.innerHTML = `检测到: <strong>${company}</strong> · 拉取投递包...`;
 
-    chrome.runtime.sendMessage(
-      {kind: "fetch_package_for_company", company},
-      (resp) => {
+    fetchPackage(company, null, (resp) => {
+        if (resp?.status === 409 && resp.matches?.length) {
+          status.textContent = `${company}: 请选择当前岗位`;
+          renderWorkspaceChoices(panel, company, resp.matches);
+          return;
+        }
         if (!resp || !resp.ok) {
-          status.innerHTML = `${company}: 没找到投递包<br>
-            <span class="og-hint">先去 <a href="http://localhost:8000/agent" target="_blank">OfferGuide /agent</a> 跑 apply_assistant 准备一份</span>`;
+          status.innerHTML = `${company}: 没找到当前投递包<br>
+            <span class="og-hint">先去 <a href="http://localhost:8000/pipeline" target="_blank">OfferGuide Pipeline</a> 选择这个岗位并打开投递包</span>`;
           return;
         }
         status.innerHTML = `<strong>${company}</strong> 投递包已就绪`;
         renderPackage(panel, resp.package, resp.job_id);
-      },
-    );
+      });
   }
 
   // Run after page settles

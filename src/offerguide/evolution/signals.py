@@ -83,7 +83,7 @@ def record_critic_signal(
     skill_name: str,
     skill_version: str,
     skill_run_id: int | None,
-    score: float,
+    score: float | None,
     notes: str | None = None,
 ) -> int | None:
     """Record an external critic score (0..1) for one SKILL invocation.

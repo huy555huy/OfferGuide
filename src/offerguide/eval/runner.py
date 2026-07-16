@@ -20,7 +20,7 @@ Eval shape (one JSON file per SKILL, in evals/datasets/<skill_name>.json):
 Run with::
 
     python -m offerguide.eval                # all SKILLs, all cases
-    python -m offerguide.eval score_match    # one SKILL
+    python -m offerguide.eval apply_assistant    # one SKILL
     python -m offerguide.eval --help
 
 The runner is **deliberately not** a full DeepEval clone — we only check

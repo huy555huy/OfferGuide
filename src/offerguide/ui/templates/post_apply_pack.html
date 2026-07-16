@@ -1,151 +1,331 @@
 {% extends "base.html" %}
-{% block title %}投后备战 · {{ job.title }} @ {{ job.company }}{% endblock %}
-{% block crumb %}Interview{% endblock %}
+{% block title %}真实面经问答 · {{ job.title }}{% endblock %}
+{% block crumb %}真实面经问答{% endblock %}
 {% block topbar_tags %}
-<span class="bracket-tag dim"><span>job#{{ job.id }}</span></span>
-<span class="bracket-tag signal"><span>prep pack</span></span>
+<span class="bracket-tag dim"><span>提交版本 {{ submitted_workspace.id }}</span></span>
+{% if material.status == 'answered' %}<span class="bracket-tag signal"><span>{{ material.answers | length }} 道原题</span></span>{% endif %}
 {% endblock %}
 {% block content %}
 
 <style>
-.q-card {
-    background: var(--bg-elev);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 0.875rem 1rem;
-    margin-bottom: 0.625rem;
+.interview-shell { max-width: 1080px; margin: 0 auto; }
+.submission-head { padding: 0.15rem 0 1rem; border-bottom: 1px solid var(--border); }
+.submission-head h1 {
+    margin: 0 0 0.35rem; font-size: 1.45rem; line-height: 1.3;
+    overflow-wrap: anywhere;
 }
-.q-card .head {
-    display: flex; align-items: baseline; gap: 0.5rem;
-    margin-bottom: 0.375rem;
+.submission-meta { color: var(--text-muted); font-size: 0.82rem; line-height: 1.55; }
+.submission-links, .source-links, .page-actions {
+    display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
 }
-.q-card .question {
-    font-weight: 600; flex: 1;
+.submission-links { margin-top: 0.65rem; }
+.submission-links a, .source-links a {
+    color: var(--primary); font-size: 0.78rem; text-decoration: none;
 }
-.q-card .likelihood {
-    font-family: var(--font-mono); font-weight: 700; font-size: 1rem;
+.research-toolbar {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 0.75rem; padding: 0.85rem 0; border-bottom: 1px solid var(--border-soft);
 }
-.q-card .likelihood.high   { color: var(--danger); }
-.q-card .likelihood.mid    { color: var(--warning); }
-.q-card .likelihood.low    { color: var(--text-muted); }
-.q-card .cat {
-    display: inline-block;
-    font-size: 0.7rem; padding: 1px 6px;
-    border-radius: 3px;
-    background: var(--bg-subtle);
-    color: var(--text-muted);
-    text-transform: uppercase;
+.research-toolbar > div { display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap; }
+.research-toolbar form { margin: 0; }
+.command-button, .source-add > summary {
+    min-height: 38px; box-sizing: border-box; border: 1px solid var(--border);
+    border-radius: 5px; background: var(--bg-elev); color: var(--text);
+    padding: 0.5rem 0.78rem; font: inherit; font-size: 0.8rem; cursor: pointer;
 }
-.q-card .rationale {
-    color: var(--text-muted); font-size: 0.82rem;
-    margin-top: 0.25rem; line-height: 1.45;
+.command-button { display: inline-flex; align-items: center; }
+.command-button.primary { border-color: var(--primary); background: var(--primary); color: #fff; }
+.command-button:disabled { opacity: 0.5; cursor: default; }
+.source-add { position: relative; }
+.source-add > summary { display: flex; align-items: center; list-style: none; }
+.source-add > summary::-webkit-details-marker { display: none; }
+.source-form {
+    position: absolute; z-index: 5; right: 0; top: calc(100% + 0.45rem);
+    width: min(520px, calc(100vw - 2rem)); display: grid; gap: 0.65rem;
+    padding: 0.85rem; border: 1px solid var(--border); border-radius: 7px;
+    background: var(--bg-elev); box-shadow: 0 10px 30px rgba(15, 20, 25, 0.12);
 }
-.section-card {
-    background: var(--bg-elev);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 1rem 1.25rem;
-    margin-bottom: 0.875rem;
+.source-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem; }
+.source-form input, .source-form textarea {
+    width: 100%; box-sizing: border-box; border: 1px solid var(--border);
+    border-radius: 5px; background: var(--bg-elev); color: var(--text);
+    padding: 0.65rem 0.72rem; font: inherit;
 }
-.section-card h2 {
-    font-family: var(--font-serif); font-size: 1.05rem; margin: 0 0 0.5rem;
+.source-form textarea { min-height: 150px; resize: vertical; line-height: 1.55; }
+.run-state {
+    display: flex; justify-content: space-between; gap: 1rem; align-items: center;
+    padding: 0.7rem 0; border-bottom: 1px solid var(--border-soft);
+    color: var(--text-secondary); font-size: 0.8rem;
 }
-.weak-list, .focus-list {
-    margin: 0; padding-left: 1.25rem;
+.run-state strong { color: var(--text); }
+.run-state .warning { color: var(--warning); }
+.run-state .error { color: var(--danger); }
+.result-summary {
+    display: flex; justify-content: space-between; gap: 1rem; align-items: baseline;
+    padding: 1.25rem 0 0.7rem; border-bottom: 1px solid var(--border);
 }
-.weak-list li { color: var(--danger); margin: 0.25rem 0; }
-.focus-list li { margin: 0.25rem 0; }
-.confidence-bar {
-    display: flex; align-items: center; gap: 0.5rem;
-    font-size: 0.78rem; color: var(--text-muted);
-    margin-top: 0.5rem;
+.result-summary h2 { margin: 0; font-size: 1rem; }
+.result-summary span { color: var(--text-muted); font-size: 0.74rem; }
+.answer-layout {
+    display: grid; grid-template-columns: minmax(0, 1fr) 260px;
+    gap: 1.5rem; align-items: start;
+}
+.qa-item { padding: 1.2rem 0 1.35rem; border-bottom: 1px solid var(--border); }
+.question-meta { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.45rem; }
+.question-number {
+    display: inline-flex; width: 1.55rem; height: 1.55rem; flex: 0 0 1.55rem;
+    align-items: center; justify-content: center; border: 1px solid var(--border);
+    border-radius: 50%; color: var(--text-muted); font-size: 0.72rem;
+}
+.qa-item h3 {
+    margin: 0; color: var(--text); font-size: 1.06rem; line-height: 1.52;
+    overflow-wrap: anywhere;
+}
+.answer-label, .evidence-heading {
+    margin-top: 1rem; color: var(--text-muted); font-size: 0.7rem;
+}
+.answer-body {
+    margin-top: 0.35rem; color: var(--text-secondary); font-size: 0.9rem;
+    line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.citation-list { display: grid; gap: 0.65rem; margin-top: 0.45rem; }
+.citation {
+    padding-left: 0.75rem; border-left: 2px solid var(--border);
+    color: var(--text-muted); font-size: 0.76rem; line-height: 1.55;
+}
+.citation blockquote { margin: 0 0 0.25rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.grounding-list { display: grid; gap: 0.3rem; margin-top: 0.45rem; }
+.grounding-item { color: var(--text-muted); font-size: 0.74rem; line-height: 1.5; }
+.grounding-item strong { color: var(--text-secondary); font-weight: 600; }
+.source-panel {
+    position: sticky; top: 1rem; margin-top: 1.2rem;
+    padding-left: 1rem; border-left: 1px solid var(--border);
+}
+.source-panel h2 { margin: 0 0 0.5rem; font-size: 0.88rem; }
+.source-item { padding: 0.65rem 0; border-bottom: 1px solid var(--border-soft); }
+.source-title { color: var(--text); font-size: 0.8rem; line-height: 1.45; overflow-wrap: anywhere; }
+.source-rationale {
+    margin-top: 0.25rem; color: var(--text-muted); font-size: 0.72rem;
+    line-height: 1.5; overflow-wrap: anywhere;
+}
+.empty-result { padding: 2.6rem 0; border-bottom: 1px solid var(--border); }
+.empty-result h2 { margin: 0 0 0.45rem; font-size: 1.05rem; }
+.empty-result p { margin: 0; color: var(--text-muted); font-size: 0.84rem; line-height: 1.6; }
+.page-actions { margin-top: 1rem; }
+.page-actions a {
+    border-bottom: 1px solid var(--border); color: var(--text-secondary);
+    font-size: 0.78rem; text-decoration: none; padding-bottom: 1px;
+}
+@media (max-width: 820px) {
+    .research-toolbar, .run-state, .result-summary { align-items: flex-start; flex-direction: column; }
+    .answer-layout { grid-template-columns: 1fr; gap: 0; }
+    .source-panel { position: static; margin-top: 0; padding: 1rem 0 0; border-left: 0; border-top: 1px solid var(--border); }
+    .source-form-row { grid-template-columns: 1fr; }
 }
 </style>
 
-<div class="card">
-    <h1 style="font-family: var(--font-serif); margin: 0 0 0.375rem;">投后备战包: {{ job.title }}</h1>
-    <div class="muted small">
-        <strong>{{ job.company }}</strong>
-        {% if job.location %} · {{ job.location }}{% endif %}
-        · 已投 → 接下来等 HR 筛简历, 同时准备这家的面试.
-    </div>
-</div>
-
-{% if error %}
-<div class="card" style="background: #fce8e6; border-color: var(--danger);">
-    <strong>{{ error }}</strong>
-    {% if raw %}
-    <div style="background: var(--bg-subtle); padding: 0.625rem; margin-top: 0.5rem; border-radius: 4px; white-space: pre-wrap; font-size: 0.82rem;">{{ raw }}</div>
-    {% endif %}
-</div>
-{% elif pack %}
-
-<div class="section-card">
-    <h2>公司画像</h2>
-    <div style="line-height: 1.65;">{{ pack.company_snapshot }}</div>
-    <div class="confidence-bar">
-        过往面经材料: {{ past_experiences_chars }} 字
-        {% if past_experiences_chars == 0 %}<em>(没抓过面经, agent 用 JD + 公司常识猜的)</em>{% endif %}
-    </div>
-</div>
-
-{% if pack.expected_questions %}
-<div class="section-card">
-    <h2>高频题预测 ({{ pack.expected_questions | length }} 题, 按概率排序)</h2>
-    {% for q in pack.expected_questions | sort(attribute='likelihood', reverse=true) %}
-    {% set lik_pct = (q.likelihood * 100) | round(0, 'common') | int %}
-    {% set lik_class = 'high' if q.likelihood >= 0.6 else ('mid' if q.likelihood >= 0.3 else 'low') %}
-    <div class="q-card">
-        <div class="head">
-            <span class="question">{{ q.question }}</span>
-            <span class="likelihood {{ lik_class }}">{{ lik_pct }}%</span>
+<div class="interview-shell">
+    <section class="submission-head">
+        <h1>{{ job.title }}</h1>
+        <div class="submission-meta">
+            {{ job.company }}{% if job.location %} · {{ job.location }}{% endif %}
+            · 已提交版本{% if submitted_at_label %} · {{ submitted_at_label }}{% endif %}
         </div>
-        <span class="cat">{{ q.category }}</span>
-        <div class="rationale">{{ q.rationale }}</div>
+        <div class="submission-links">
+            <a href="/jobs/{{ job.id }}/apply-pack">查看冻结简历与 JD</a>
+            {% if job.url %}<a href="{{ job.url }}" target="_blank" rel="noopener noreferrer">打开岗位来源</a>{% endif %}
+        </div>
+    </section>
+
+    <div class="research-toolbar">
+        <div>
+            <form method="post" action="/interview-research/{{ application_id }}/refresh">
+                <button class="command-button primary" type="submit" {% if not agent_ready %}disabled{% endif %}>重新搜索面经</button>
+            </form>
+            <details class="source-add">
+                <summary>添加面经原文</summary>
+                <form class="source-form" method="post" action="/interview-research/{{ application_id }}/sources">
+                    <div class="source-form-row">
+                        <input name="title" placeholder="来源标题">
+                        <input name="source_url" type="url" placeholder="原帖链接（可选）">
+                    </div>
+                    <textarea name="text" placeholder="面经原文" required></textarea>
+                    <div><button class="command-button primary" type="submit" {% if not agent_ready %}disabled{% endif %}>保存并提取原题</button></div>
+                </form>
+            </details>
+        </div>
     </div>
-    {% endfor %}
-</div>
-{% endif %}
 
-{% if pack.prep_focus_areas %}
-<div class="section-card">
-    <h2>备战重点</h2>
-    <ul class="focus-list">
-        {% for f in pack.prep_focus_areas %}<li>{{ f }}</li>{% endfor %}
-    </ul>
-</div>
-{% endif %}
-
-{% if pack.weak_spots %}
-<div class="section-card">
-    <h2>你针对这岗的弱点 (诚实清单)</h2>
-    <ul class="weak-list">
-        {% for w in pack.weak_spots %}<li>{{ w }}</li>{% endfor %}
-    </ul>
-    <div class="muted small" style="margin-top: 0.5rem;">
-        别假装没问题 — HR 一问就露馅. 看哪条能 1-2 天补就补, 补不了的准备好"我现在没有但我打算如何补"的回答.
+    {% if agent_run %}
+    <div
+        class="run-state"
+        id="agent-run-state"
+        data-invocation-id="{{ agent_run.id }}"
+        data-invocation-status="{{ agent_run.status }}"
+        data-poll-url="/api/research-agent-invocations/{{ agent_run.id }}"
+        data-poll-state="{% if agent_run.status in ('queued', 'running') %}active{% else %}complete{% endif %}"
+        role="status"
+        aria-live="polite"
+        aria-busy="{% if agent_run.status in ('queued', 'running') %}true{% else %}false{% endif %}"
+    >
+        <div>
+            <strong id="agent-run-status-label">{{ agent_run.status_label }}</strong>
+            <span id="agent-run-message" {% if not agent_run.message %}hidden{% endif %}>{% if agent_run.message %} · {{ agent_run.message }}{% endif %}</span>
+            {% if material_is_stale %}<span class="warning"> · 当前问答正在更新</span>{% endif %}
+            <span id="agent-run-error" class="error" {% if not agent_run.error %}hidden{% endif %}>{% if agent_run.error %} · 本轮搜索未完成，请重试{% endif %}</span>
+        </div>
+        <span id="agent-run-updated-at" {% if not agent_run.updated_at %}hidden{% endif %}>{{ agent_run.updated_at }}</span>
     </div>
-</div>
-{% endif %}
+    {% elif not agent_ready %}
+    <div class="run-state"><span class="error">面经搜索 Agent 尚未配置</span></div>
+    {% endif %}
 
-<div class="confidence-bar">
-    {% if duration_ms %}用时 {{ "%.1f"|format(duration_ms / 1000) }}s{% endif %}
-    {% if cost_usd %}· cost ${{ "%.4f"|format(cost_usd) }}{% endif %}
-    {% if skill_run_id %}· skill_run_id {{ skill_run_id }}{% endif %}
+    {% if material.status == 'answered' %}
+    <section class="result-summary">
+        <h2>真实面经原题与回答</h2>
+        <span>{{ material.answers | length }} 道原题{% if material.updated_at %} · 更新于 {{ material.updated_at }}{% endif %}</span>
+    </section>
+    <div class="answer-layout">
+        <main>
+            {% for item in material.answers %}
+            <article class="qa-item">
+                <div class="question-meta">
+                    <span class="question-number">{{ item.number }}</span>
+                </div>
+                <h3>{{ item.question }}</h3>
+                <div class="answer-label">针对当前投递的回答</div>
+                <div class="answer-body">{{ item.answer }}</div>
+
+                <div class="evidence-heading">原题证据</div>
+                <div class="citation-list">
+                    {% for citation in item.citations %}
+                    <div class="citation">
+                        <blockquote>“{{ citation.quote }}”</blockquote>
+                        <div class="source-links">
+                            {% if citation.saved_url %}<a href="{{ citation.saved_url }}">{{ citation.label }}</a>{% else %}<span>{{ citation.label }}</span>{% endif %}
+                            {% if citation.external_url %}<a href="{{ citation.external_url }}" target="_blank" rel="noopener noreferrer">打开原帖</a>{% endif %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+
+                {% if item.grounding %}
+                <div class="evidence-heading">回答依据</div>
+                <div class="grounding-list">
+                    {% for grounding in item.grounding %}
+                    <div class="grounding-item"><strong>{{ grounding.label }}</strong> · {{ grounding.quote }}</div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </article>
+            {% endfor %}
+        </main>
+
+        <aside class="source-panel">
+            <h2>本次采用的真实面经</h2>
+            {% for source in material.sources %}
+            <div class="source-item">
+                <div class="source-title">{{ source.title }}</div>
+                {% if source.rationale %}<div class="source-rationale">{{ source.rationale }}</div>{% endif %}
+                <div class="source-links">
+                    {% if source.saved_url %}<a href="{{ source.saved_url }}">查看保存正文</a>{% endif %}
+                    {% if source.external_url %}<a href="{{ source.external_url }}" target="_blank" rel="noopener noreferrer">打开原帖</a>{% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </aside>
+    </div>
+    {% elif material.status == 'not_found' %}
+    <section class="empty-result">
+        <h2>未找到可读取的真实相似岗位面经</h2>
+    </section>
+    {% elif agent_run and agent_run.status in ('queued', 'running') %}
+    <section class="empty-result">
+        <h2>正在查找真实面经</h2>
+        <p>取得可验证的原帖并提取其中实际出现的问题后，问答会显示在这里。</p>
+    </section>
+    {% else %}
+    <section class="empty-result">
+        <h2>还没有当前面经问答</h2>
+        <p>开始搜索后，页面只会收录可追溯原帖中实际出现的问题。</p>
+    </section>
+    {% endif %}
+
+    <div class="page-actions"><a href="/pipeline">返回投递进度</a></div>
 </div>
 
-<div style="margin-top: 1rem; display: flex; gap: 0.625rem;">
-    <a href="/interviews?company={{ job.company | urlencode }}" style="padding: 0.625rem 1rem; border-radius: 5px; background: var(--primary); color: #fff; text-decoration: none;">
-        进入面试工作台
-    </a>
-    <a href="/interviews?company={{ job.company | urlencode }}" style="padding: 0.625rem 1rem; border-radius: 5px; border: 1px solid var(--border); text-decoration: none; color: var(--text);">
-        查面经库
-    </a>
-    <a href="/pipeline" style="padding: 0.625rem 1rem; text-decoration: none; color: var(--text);">
-        回 Pipeline
-    </a>
-</div>
+{% if agent_run and agent_run.status in ('queued', 'running') %}
+<noscript><p class="empty-result" role="status">Agent 会在后台继续运行；请稍后手动刷新页面查看面经问答。</p></noscript>
+<script>
+(() => {
+    "use strict";
 
+    const state = document.getElementById("agent-run-state");
+    if (!state) return;
+
+    const statusLabel = document.getElementById("agent-run-status-label");
+    const message = document.getElementById("agent-run-message");
+    const error = document.getElementById("agent-run-error");
+    const updatedAt = document.getElementById("agent-run-updated-at");
+    let delay = 2500;
+    let timerId;
+    let stopped = false;
+
+    const setOptionalText = (element, value, prefix = "") => {
+        if (!element) return;
+        const text = typeof value === "string" ? value.trim() : "";
+        element.textContent = text ? `${prefix}${text}` : "";
+        element.hidden = !text;
+    };
+
+    const updateState = (payload) => {
+        if (statusLabel && payload.status_label) {
+            statusLabel.textContent = payload.status_label;
+        }
+        setOptionalText(message, payload.message, " · ");
+        setOptionalText(error, payload.error, " · ");
+        setOptionalText(updatedAt, payload.updated_at);
+        if (payload.status) state.dataset.invocationStatus = payload.status;
+        state.setAttribute("aria-busy", payload.terminal ? "false" : "true");
+    };
+
+    const poll = async () => {
+        if (stopped) return;
+        try {
+            const response = await fetch(state.dataset.pollUrl, {
+                headers: {"Accept": "application/json"},
+                cache: "no-store",
+            });
+            if (!response.ok) throw new Error(`poll failed: ${response.status}`);
+
+            const payload = await response.json();
+            delay = 2500;
+            updateState(payload);
+            if (payload.terminal) {
+                stopped = true;
+                state.dataset.pollState = "complete";
+                if (payload.result_changed === true) {
+                    state.dataset.pollState = "reloading";
+                    window.location.reload();
+                }
+                return;
+            }
+            state.dataset.pollState = "active";
+        } catch (_error) {
+            // Keep the current page stable while a temporary network failure clears.
+            delay = Math.min(delay * 2, 30000);
+            state.dataset.pollState = "retrying";
+        }
+        if (!stopped) timerId = window.setTimeout(poll, delay);
+    };
+
+    timerId = window.setTimeout(poll, 1200);
+    window.addEventListener("pagehide", () => {
+        stopped = true;
+        window.clearTimeout(timerId);
+    }, {once: true});
+})();
+</script>
 {% endif %}
 
 {% endblock %}

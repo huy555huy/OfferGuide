@@ -22,10 +22,7 @@ DeepSeek doesn't do them server-side):
 Plus persistence:
 - Insert harness_runs row at start, update at end (id flows into deps so
   tools can record references)
-- Track tool calls + cost (including sub-agent costs) for /debug telemetry
-
-The Anthropic long-running harness primitives live at repo root in `.claude/`,
-`PROGRESS.md`, and `test-results.json`.
+- Track tool calls and supporting-tool cost for /debug telemetry
 """
 
 from __future__ import annotations
@@ -33,12 +30,11 @@ from __future__ import annotations
 import json as _json
 import logging
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..llm import BudgetExceeded, LLMError, enforce_daily_budget
-from collections.abc import Callable, Mapping
-
 from . import _schema
 from .context import ContextManager, SystemFacts
 from .tools import ALL_TOOL_SCHEMAS, AgentRuntimeDeps, dispatch
@@ -67,35 +63,16 @@ STATUS_TRUNCATED = "truncated"
 
 @dataclass
 class TriggerEvent:
-    """Why the loop is being invoked. Consumed by the loop to build the
-    initial user message that frames this wake."""
+    """Input that frames one conversation-agent run."""
 
     kind: str
-    """'cron' | 'event' | 'user_input' | 'scheduled'"""
+    """Production requests use ``user_input``; tests may use another label."""
 
     detail: dict[str, Any] = field(default_factory=dict)
-    """Arbitrary JSON. E.g. {'event': 'user_paste_jd', 'job_id': 42} or
-    {'message': 'find me some jobs'} or {'wake_id': 7, 'reason': '...'}."""
+    """Arbitrary structured context, normally including ``message``."""
 
     def render_initial_user_message(self) -> str:
         """One sentence the loop puts as the first user message of the run."""
-        if self.kind == "cron":
-            return (
-                "心跳 wake 触发. 看下你的 worldview 和 inbox 状态, 自己决定要不要做事. "
-                "什么都不做也是 OK 的 — 真没事就 done."
-            )
-        if self.kind == "scheduled":
-            reason = self.detail.get("reason", "(no reason recorded)")
-            return (
-                f"你之前 schedule 的 wake 到了. Reason: {reason!r}. "
-                "看 worldview 看具体上下文, 决定要不要执行."
-            )
-        if self.kind == "event":
-            event_kind = self.detail.get("event", "unknown")
-            return (
-                f"事件触发: {event_kind}. 详情: {_json.dumps(self.detail, ensure_ascii=False)[:500]}. "
-                "决定下一步."
-            )
         if self.kind == "user_input":
             msg = self.detail.get("message", "")
             return f"用户消息: {msg}"
@@ -136,8 +113,7 @@ def run(
     max_iterations.
 
     Side effects: inserts harness_runs row; writes tool results to
-    domain tables via dispatched tools; may call schedule_next_wake →
-    inserts into harness_scheduled_wakes.
+    domain tables via dispatched tools.
 
     Guarantees (W15.12 review fixes):
     - try/finally around the loop ensures ``_end_run`` ALWAYS commits a
@@ -147,13 +123,11 @@ def run(
       end_turn → 'ok', max_iterations → 'truncated', llm_error/crash → 'error'
     - ``final_text`` accumulates ``resp.content`` from EVERY iteration
       (Bug 2), so reasoning produced alongside tool_calls isn't lost.
-    - sub-agent cost (e.g. discover_jobs) flows back via ``deps.extra_cost_usd``
-      and is added to harness_runs.cost_usd (Bug 5).
+    - supporting-tool cost accumulated in ``deps.extra_cost_usd`` is added to
+      harness_runs.cost_usd.
 
     Args:
-        temperature: LLM sampling temperature (W15.13 Q1). 0.4 default;
-            chat endpoint may pass higher (creativity), scheduled wakes
-            may pass lower (determinism).
+        temperature: LLM sampling temperature. Defaults to 0.4.
     """
     if deps.llm is None:
         return RunResult(
@@ -334,7 +308,7 @@ def run(
         crash_text = f"{type(e).__name__}: {e}"
         finish_reason = "loop_crash"
 
-    # Bug 5 fix: pick up sub-agent cost accumulated by tools (e.g. discover_jobs)
+    # Pick up supporting-tool cost accumulated by tools.
     sub_agent_cost = float(deps.extra_cost_usd or 0.0)
     total_cost_usd += sub_agent_cost
 
@@ -402,10 +376,9 @@ def _end_run(
 ) -> None:
     """Commit terminal state to harness_runs.
 
-    Bug 5 fix: ``sub_agent_cost_usd`` (e.g. DiscoverySubAgent's internal
-    LLM calls during discover_jobs) is **already** included in
-    ``cost_usd`` by the caller — but we also store it as a JSON field in
-    tool_calls_json for /debug visibility ("how much of total was sub-agent").
+    ``sub_agent_cost_usd`` is a historical storage key. Supporting-tool LLM
+    cost is already included in ``cost_usd`` by the caller; the JSON field
+    preserves the existing telemetry schema.
     """
     with deps.store.connect() as conn:
         # Pack tool_calls + sub_agent breakdown into one JSON blob

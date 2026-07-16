@@ -101,20 +101,18 @@ def test_silence_age_days_against_known_now(tmp_path: Path) -> None:
     assert age == pytest.approx(14.0, abs=1e-6)
 
 
-def test_silence_age_ignores_inferred_synthetic_events(tmp_path: Path) -> None:
-    """A 'silent_check' synthetic event must NOT be counted as recent activity."""
+def test_silence_age_ignores_inferred_events(tmp_path: Path) -> None:
+    """An inferred event must not replace the latest confirmed activity."""
     store, app_id = _store_with_application(tmp_path)
     ae.record(store, application_id=app_id, kind="submitted", occurred_at=2460000.0)
-    # Cron job writes a silence check 14 days later
     ae.record(
         store,
         application_id=app_id,
-        kind="silent_check",
+        kind="viewed",
         source="inferred",
         occurred_at=2460014.0,
     )
-    # Asking again at day 20: silence age should still be 20 (since the original
-    # submitted event), not 6 (since the synthetic silence_check)
+    # Elapsed time still uses the original submitted event.
     age = ae.silence_age_days(store, app_id, now=2460020.0)
     assert age == pytest.approx(20.0, abs=1e-6)
 

@@ -4,49 +4,80 @@
      stage_key      — current stage (string)
      transition_options(stage_key) — list[(kind, label)]
      render_age(silence_days)      — string formatter
+     pipeline_apply_urls           — job id -> current selection apply-pack URL
+     pipeline_application_resources — application id -> durable result links
 #}
 {% set is_scanned = stage_key == 'scanned' %}
 {% set is_terminal = stage_key == 'terminal' %}
-{% set urgent = (card.silence_days is not none and card.silence_days >= 14 and not is_terminal) %}
+{% set scanned_apply_pack_url = pipeline_apply_urls.get(card.job_id) if is_scanned and pipeline_apply_urls is defined else none %}
+{% set application_resources = pipeline_application_resources.get(card.application_id, {}) if card.application_id is not none and pipeline_application_resources is defined else {} %}
+{% set application_apply_pack_url = application_resources.get('apply_pack_url') %}
+{% set interview_url = application_resources.get('interview_url') %}
+{% set primary_url = application_apply_pack_url if application_apply_pack_url else scanned_apply_pack_url %}
 
 <div class="kcard {% if card.application_id is none %}no-events{% endif %}"
      id="card-{% if card.application_id %}app-{{ card.application_id }}{% else %}job-{{ card.job_id }}{% endif %}">
 
+    {% if is_scanned and primary_url %}
+    <a class="card-primary-hit"
+       href="{{ primary_url }}"
+       aria-label="准备投递：{{ card.company }} · {{ card.title }}">
+    {% else %}
+    <div class="card-heading">
+    {% endif %}
     <div class="company">{{ card.company }}</div>
     <div class="title">{{ card.title }}</div>
+    {% if is_scanned and primary_url %}
+    </a>
+    {% else %}
+    </div>
+    {% endif %}
 
     <div class="badges">
         {% if card.location %}
         <span class="pill" style="font-size: 0.65rem;">{{ card.location|truncate(8) }}</span>
         {% endif %}
-        {% if not card.has_score and not is_terminal %}
-        <span class="pill medium" title="未跑过 score_match">未评估</span>
-        {% endif %}
         {% if card.silence_days is not none %}
-        <span class="age {% if urgent %}urgent{% endif %}" title="自最后真实事件起">
+        <span class="age" title="自最后真实事件起">
             {{ render_age(card.silence_days) }}
         </span>
         {% endif %}
     </div>
 
-    {% if not is_terminal %}
-    <div class="menu">
-        {% if is_scanned and card.application_id is none %}
-            {# Scanned-only card: only transition is "标记已投递"
-               which creates the application row + records submitted. #}
-            <form hx-post="/api/pipeline/jobs/{{ card.job_id }}/submit"
-                  hx-target="#card-job-{{ card.job_id }}"
-                  hx-swap="outerHTML">
-                <button type="submit">标记已投递</button>
-            </form>
-            <a href="/apply/{{ card.job_id }}"
-               class="btn ghost" style="font-size: 0.7rem; padding: 0.18rem 0.45rem;">投递包</a>
-            {% if card.company %}
-            <a href="/profile/{{ card.company }}"
-               class="btn ghost" style="font-size: 0.7rem; padding: 0.18rem 0.45rem;">画像</a>
+    <div class="card-links" aria-label="岗位可用操作">
+        {% if card.application_id is none %}
+            {% if scanned_apply_pack_url %}
+            <a href="{{ scanned_apply_pack_url }}" class="btn primary resource-link">准备投递</a>
+            {% else %}
+            <span class="card-unavailable">历史线索 · 未进入当前选择集</span>
             {% endif %}
-        {% elif card.application_id is not none %}
-            {% for kind, label in transition_options(stage_key) %}
+        {% else %}
+            {% if application_apply_pack_url %}
+            <a href="{{ application_apply_pack_url }}"
+               class="btn secondary resource-link"
+               data-resource="apply-pack">查看投递材料</a>
+            {% endif %}
+            {% if interview_url %}
+            <a href="{{ interview_url }}"
+               class="btn secondary resource-link"
+               data-resource="interview">{{ application_resources.get('interview_label') or '真实面经问答' }}</a>
+            {% endif %}
+            {% if application_resources.get('interview_status') %}
+            <span class="resource-state">{{ application_resources.get('interview_status_label') }}</span>
+            {% endif %}
+            {% if not application_apply_pack_url and not interview_url and scanned_apply_pack_url %}
+            <a href="{{ scanned_apply_pack_url }}" class="btn primary resource-link">准备投递</a>
+            {% elif not application_apply_pack_url and not interview_url and not application_resources.get('interview_status') %}
+            <span class="card-unavailable">投递记录已保留 · 材料入口暂不可用</span>
+            {% endif %}
+        {% endif %}
+    </div>
+
+    {% if not is_terminal and card.application_id is not none %}
+    {% set next_actions = transition_options(stage_key) %}
+    {% if next_actions %}
+    <div class="menu transition-menu" aria-label="更新投递状态">
+            {% for kind, label in next_actions %}
             <form hx-post="/api/pipeline/applications/{{ card.application_id }}/event"
                   hx-target="#card-app-{{ card.application_id }}"
                   hx-swap="outerHTML">
@@ -57,7 +88,7 @@
                 </button>
             </form>
             {% endfor %}
-        {% endif %}
     </div>
+    {% endif %}
     {% endif %}
 </div>

@@ -90,13 +90,6 @@
   margin-left: 0.5rem;
 }
 
-#offerguide-helper-panel .og-skip-warn {
-  background: #fff4e0; border: 1px solid #c89456;
-  color: #b85f44; padding: 0.5rem 0.625rem;
-  border-radius: 6px; margin-bottom: 0.625rem;
-  font-size: 12px;
-}
-
 #offerguide-helper-panel .og-strategy {
   background: #f3efe5; padding: 0.5rem 0.625rem;
   border-radius: 6px; margin-top: 0.5rem;
@@ -120,6 +113,5 @@
   border-top: 1px solid #e8e1d2;
   border-radius: 0 0 12px 12px;
   font-size: 10px; color: #79716a;
-  display: flex; justify-content: space-between; align-items: center;
+  text-align: center;
 }
-#offerguide-helper-panel .og-rate { font-family: monospace; }

@@ -7,11 +7,12 @@ Tests:
 - Invalid kind returns 400
 - Invalid app_id returns 400 (FK constraint failure surfaces)
 - Status pill class reflects the synced state
-- Silence pill renders only when silence_days >= 7
+- Elapsed time is factual and has no reminder threshold
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,6 @@ from fastapi.testclient import TestClient
 import offerguide
 from offerguide import application_events as ae
 from offerguide.config import Settings
-from offerguide.profile import UserProfile
 from offerguide.skills import discover_skills
 from offerguide.ui.notify import ConsoleNotifier
 from offerguide.ui.web import create_app
@@ -29,15 +29,15 @@ SKILLS_ROOT = Path(__file__).parent.parent / "src/offerguide/skills"
 
 
 @pytest.fixture
-def app_setup(tmp_path: Path):
+def app_setup(tmp_path: Path, master_resume_source_factory):
     store = offerguide.Store(tmp_path / "apps.db")
     store.init_schema()
-    profile = UserProfile(raw_resume_text="x")
+    profile = master_resume_source_factory("x")
     skills = discover_skills(SKILLS_ROOT)
     app = create_app(
         settings=Settings(),
         store=store,
-        profile=profile,
+        master_source=profile,
         skills=skills,
         runtime=None,
         notifier=ConsoleNotifier(),
@@ -58,6 +58,32 @@ def _seed_app(store, *, title: str, company: str, status: str = "applied") -> in
             (title, status),
         )
         return int(cur.lastrowid or 0)
+
+
+def _seed_submitted_workspace(store, app_id: int) -> int:
+    with store.connect() as conn:
+        job_id = int(
+            conn.execute(
+                "SELECT job_id FROM applications WHERE id = ?", (app_id,)
+            ).fetchone()[0]
+        )
+        return int(
+            conn.execute(
+                "INSERT INTO resume_workspaces("
+                "application_id, status, job_snapshot_json, master_source_sha256, "
+                "context_json, resume_document_json, pdf_path, pdf_sha256, "
+                "apply_pack_json, submitted_at"
+                ") VALUES (?, 'submitted', ?, ?, '{}', '{}', ?, ?, '{}', "
+                "julianday('now')) RETURNING id",
+                (
+                    app_id,
+                    json.dumps({"job_id": job_id}),
+                    "a" * 64,
+                    f"/tmp/application-{app_id}.pdf",
+                    "b" * 64,
+                ),
+            ).fetchone()[0]
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -86,6 +112,51 @@ class TestApplicationsPage:
         assert "submitted" in resp.text
         assert "viewed" in resp.text
 
+    def test_each_application_keeps_its_apply_pack_entry(self, app_setup) -> None:
+        app, store = app_setup
+        first_id = _seed_app(store, title="Agent A", company="A")
+        second_id = _seed_app(store, title="Agent B", company="B")
+        with store.connect() as conn:
+            job_ids = {
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT job_id FROM applications WHERE id IN (?, ?)",
+                    (first_id, second_id),
+                ).fetchall()
+            }
+
+        resp = TestClient(app).get("/applications")
+
+        assert resp.text.count("查看投递材料") == 2
+        for job_id in job_ids:
+            assert f'href="/jobs/{job_id}/apply-pack"' in resp.text
+
+    def test_submitted_application_keeps_interview_entry_after_event_swap(
+        self, app_setup
+    ) -> None:
+        app, store = app_setup
+        app_id = _seed_app(store, title="Agent C", company="C")
+        _seed_submitted_workspace(store, app_id)
+        with store.connect() as conn:
+            job_id = int(
+                conn.execute(
+                    "SELECT job_id FROM applications WHERE id = ?", (app_id,)
+                ).fetchone()[0]
+            )
+        client = TestClient(app)
+
+        initial = client.get("/applications")
+        swapped = client.post(
+            f"/api/applications/{app_id}/event", data={"kind": "viewed"}
+        )
+
+        for response in (initial, swapped):
+            assert response.status_code == 200
+            assert f'href="/jobs/{job_id}/apply-pack"' in response.text
+            assert f'href="/jobs/{job_id}/post-apply-pack"' in response.text
+            assert "查看投递材料" in response.text
+            assert "data-interview-status=" in response.text
+
     def test_active_terminal_counts(self, app_setup) -> None:
         app, store = app_setup
         _seed_app(store, title="A", company="X", status="applied")
@@ -97,7 +168,7 @@ class TestApplicationsPage:
         assert "活跃 1" in resp.text
         assert "终态 2" in resp.text
 
-    def test_silence_pill_renders_when_silence_above_7d(self, app_setup) -> None:
+    def test_elapsed_time_renders_without_a_silence_verdict(self, app_setup) -> None:
         app, store = app_setup
         app_id = _seed_app(store, title="老投递", company="X")
         # Record submitted at a julianday computed by SQLite itself, minus N days
@@ -109,10 +180,9 @@ class TestApplicationsPage:
         )
 
         resp = TestClient(app).get("/applications")
-        assert "沉默" in resp.text
-        # 16 days back → silence pill rendered with digit + 'd'
+        assert "距上次进展" in resp.text
         import re as _re
-        assert _re.search(r"沉默\s*\d+d", resp.text)
+        assert _re.search(r"距上次进展\s*\d+d", resp.text)
 
 
 # ═══════════════════════════════════════════════════════════════════

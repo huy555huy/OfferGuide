@@ -29,8 +29,9 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import quote_plus, urlparse
 
 import httpx
@@ -50,8 +51,12 @@ class SearchBackend(Protocol):
     name: str
 
     def search(self, query: str, *, max_results: int = 10) -> list[SearchHit]:
-        """Run a query, return hits. Should never raise; on error return []."""
+        """Run a query; an empty result and a failed request are distinct."""
         ...
+
+
+class SearchBackendError(RuntimeError):
+    """A backend could not complete a real search request."""
 
 
 # ── DuckDuckGo HTML backend ────────────────────────────────────────
@@ -85,11 +90,13 @@ class DuckDuckGoSearch:
             resp = self._http.get(
                 f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
             )
-            if resp.status_code != 200:
-                return []
-            return _parse_ddg_html(resp.text, max_results=max_results)
-        except httpx.HTTPError:
-            return []
+        except httpx.HTTPError as exc:
+            raise SearchBackendError(f"DuckDuckGo request failed: {exc}") from exc
+        if resp.status_code != 200:
+            raise SearchBackendError(
+                f"DuckDuckGo returned HTTP {resp.status_code}"
+            )
+        return _parse_verified_ddg_html(resp.text, max_results=max_results)
 
     def close(self) -> None:
         self._http.close()
@@ -103,6 +110,15 @@ _RESULT_PATTERN = re.compile(
     flags=re.DOTALL,
 )
 _TAG_PATTERN = re.compile(r"<[^>]+>")
+_DDG_CHALLENGE_RE = re.compile(
+    r'(?:id|class)=["\'][^"\']*(?:anomaly|challenge)[^"\']*["\']'
+    r'|bots use DuckDuckGo|duckduckgo\.com/anomaly',
+    flags=re.IGNORECASE,
+)
+_DDG_NO_RESULTS_RE = re.compile(
+    r'<(?:div|span)[^>]*class=["\'][^"\']*no-results[^"\']*["\']',
+    flags=re.IGNORECASE,
+)
 
 
 def _parse_ddg_html(html: str, *, max_results: int) -> list[SearchHit]:
@@ -118,6 +134,15 @@ def _parse_ddg_html(html: str, *, max_results: int) -> list[SearchHit]:
         if title and url and url.startswith("http"):
             hits.append(SearchHit(title=title, url=url, snippet=snippet))
     return hits
+
+
+def _parse_verified_ddg_html(html: str, *, max_results: int) -> list[SearchHit]:
+    if _DDG_CHALLENGE_RE.search(html):
+        raise SearchBackendError("DuckDuckGo returned a bot/login challenge page")
+    hits = _parse_ddg_html(html, max_results=max_results)
+    if hits or _DDG_NO_RESULTS_RE.search(html):
+        return hits
+    raise SearchBackendError("DuckDuckGo returned a structurally invalid SERP")
 
 
 def _unwrap_ddg_redirect(url: str) -> str:
@@ -179,11 +204,11 @@ class BingCNSearch:
                 f"https://www.bing.com/search?q={quote_plus(query)}&mkt=zh-CN&setlang=zh",
                 follow_redirects=True,
             )
-            if resp.status_code != 200:
-                return []
-            return _parse_bing_html(resp.text, max_results=max_results)
-        except httpx.HTTPError:
-            return []
+        except httpx.HTTPError as exc:
+            raise SearchBackendError(f"Bing request failed: {exc}") from exc
+        if resp.status_code != 200:
+            raise SearchBackendError(f"Bing returned HTTP {resp.status_code}")
+        return _parse_verified_bing_html(resp.text, max_results=max_results)
 
     def close(self) -> None:
         self._http.close()
@@ -205,6 +230,17 @@ _BING_TITLE_RE = re.compile(
 _BING_SNIPPET_RE = re.compile(
     r'<p[^>]*class="[^"]*b_(?:lineclamp\d|paractl|caption)[^"]*"[^>]*>(.*?)</p>',
     flags=re.DOTALL,
+)
+_BING_CHALLENGE_RE = re.compile(
+    r'<div[^>]*class=["\'][^"\']*\bcaptcha\b[^"\']*["\']'
+    r'|/challenge/verify\?'
+    r'|captchaSuccessPostMessage'
+    r'|challenges\.cloudflare\.com/turnstile',
+    flags=re.IGNORECASE,
+)
+_BING_NO_RESULTS_RE = re.compile(
+    r'<(?:li|div)[^>]*class=["\'][^"\']*\bb_no\b[^"\']*["\']',
+    flags=re.IGNORECASE,
 )
 
 
@@ -229,6 +265,15 @@ def _parse_bing_html(html: str, *, max_results: int) -> list[SearchHit]:
     return hits
 
 
+def _parse_verified_bing_html(html: str, *, max_results: int) -> list[SearchHit]:
+    if _BING_CHALLENGE_RE.search(html):
+        raise SearchBackendError("Bing returned a CAPTCHA/challenge page")
+    hits = _parse_bing_html(html, max_results=max_results)
+    if hits or _BING_NO_RESULTS_RE.search(html):
+        return hits
+    raise SearchBackendError("Bing returned a structurally invalid SERP")
+
+
 # ── Tavily API backend (高质量, 1000 免费/月) ──────────────────────
 
 
@@ -241,8 +286,8 @@ class TavilySearch:
     - 一行 ``TAVILY_API_KEY=tvly-xxx`` 就升级
     - 国内通
 
-    错误处理: 任何 transport / API 错都 silent return [], 不影响 daemon
-    继续跑别的 job。
+    Transport, API, and response-schema failures raise ``SearchBackendError``;
+    callers persist them separately from a successful zero-result response.
     """
 
     name = "tavily"
@@ -276,16 +321,23 @@ class TavilySearch:
                     "include_raw_content": False,
                 },
             )
-        except httpx.HTTPError:
-            return []
+        except httpx.HTTPError as exc:
+            raise SearchBackendError(f"Tavily request failed: {exc}") from exc
         if resp.status_code != 200:
-            return []
+            raise SearchBackendError(f"Tavily returned HTTP {resp.status_code}")
         try:
             data = resp.json()
-        except Exception:
-            return []
+        except Exception as exc:
+            raise SearchBackendError("Tavily returned invalid JSON") from exc
+        if not isinstance(data, Mapping):
+            raise SearchBackendError("Tavily returned a structurally invalid response")
+        raw_results: Any = data.get("results")
+        if not isinstance(raw_results, list):
+            raise SearchBackendError("Tavily response is missing a results array")
         out: list[SearchHit] = []
-        for r in (data.get("results") or [])[:max_results]:
+        for r in raw_results[:max_results]:
+            if not isinstance(r, Mapping):
+                raise SearchBackendError("Tavily returned an invalid result item")
             url = r.get("url", "")
             title = (r.get("title") or "").strip()
             snippet = (r.get("content") or "")[:300].strip()
@@ -305,7 +357,8 @@ class ChainedSearch:
 
     Used as the default factory output: Bing CN (国内默认) → Tavily
     (if key) → DDG (fallback). If everything returns empty for a query,
-    callers see [] and corpus_collector skips the query gracefully.
+    callers receive an empty result and decide whether another query or source
+    is needed.
     """
 
     name = "chain"
@@ -316,14 +369,20 @@ class ChainedSearch:
         self.backends = backends
 
     def search(self, query: str, *, max_results: int = 10) -> list[SearchHit]:
+        errors: list[str] = []
+        completed = False
         for be in self.backends:
             try:
                 hits = be.search(query, max_results=max_results)
-            except Exception:
-                hits = []
+                completed = True
+            except Exception as exc:
+                errors.append(f"{getattr(be, 'name', type(be).__name__)}: {exc}")
+                continue
             if hits:
                 return hits
-        return []
+        if completed:
+            return []
+        raise SearchBackendError("all search backends failed: " + "; ".join(errors))
 
     def close(self) -> None:
         import contextlib
@@ -387,6 +446,31 @@ def build_default_search() -> SearchBackend:
         chain.append(TavilySearch())
     chain.append(DuckDuckGoSearch())
     return ChainedSearch(chain)
+
+
+def build_search_backends() -> list[SearchBackend]:
+    """Build every configured backend for evidence-driven domain agents.
+
+    The legacy ``build_default_search`` returns a first-success chain. Domain
+    research agents must see each backend's real outcome, so their shared
+    ``SearchExecutor`` receives the individual backends instead.
+    """
+
+    name = (os.environ.get("OFFERGUIDE_SEARCH_BACKEND") or "chain").lower()
+    if name == "stub":
+        return [StubSearch()]
+    if name in ("bing", "bing_cn"):
+        return [BingCNSearch()]
+    if name == "tavily":
+        return [TavilySearch()]
+    if name in ("ddg", "duckduckgo"):
+        return [DuckDuckGoSearch()]
+
+    backends: list[SearchBackend] = [BingCNSearch()]
+    if os.environ.get("TAVILY_API_KEY"):
+        backends.append(TavilySearch())
+    backends.append(DuckDuckGoSearch())
+    return backends
 
 
 # ── Health check (used by /api/search/test route) ─────────────────

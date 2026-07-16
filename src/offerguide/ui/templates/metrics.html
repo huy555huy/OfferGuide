@@ -175,7 +175,6 @@ table.skill-table {
         <strong>Reply rate: {{ "%.1f"|format(reply_rate * 100) }}%</strong>
         <span class="muted small" style="margin-left: 0.5rem;">
             ({{ apps_interview + apps_offer }} 任意回应 / {{ apps_applied }} 已投)
-            · 行业基线: 自动投递 < 2%, 精投 10-15%
         </span>
     </div>
     {% endif %}
@@ -189,7 +188,7 @@ table.skill-table {
     {% if inbox_total == 0 %}
     <div class="empty" style="padding: 1rem;">
         <div class="empty-title">Agent 还没主动推过 suggestion</div>
-        <div class="empty-hint">让 agent 跑几次 (home 顶部) 它会推 inbox 卡片. 用户接受 / 拒绝就是 GEPA 进化数据.</div>
+        <div class="empty-hint">Agent 只有在发现值得用户决定的事项时才会推送 inbox 卡片。</div>
     </div>
     {% else %}
     <div style="display: flex; gap: 1.5rem; align-items: center;">

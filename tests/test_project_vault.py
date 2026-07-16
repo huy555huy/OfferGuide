@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 import offerguide
 from offerguide.config import Settings
 from offerguide.llm import LLMResponse
-from offerguide.profile import UserProfile
 from offerguide.project_vault import (
     append_to_profile_text,
     draft_market_context,
@@ -64,14 +63,14 @@ def store(tmp_path):
 
 
 @pytest.fixture
-def app_client(store):
+def app_client(store, master_resume_source_factory):
     skills = discover_skills(SKILLS_ROOT)
     runtime = SkillRuntime(_StubLLM(), store)  # type: ignore[arg-type]
-    profile = UserProfile(raw_resume_text="简历正文", source_pdf="/tmp/x.pdf")
+    profile = master_resume_source_factory("简历正文")
     app = create_app(
         settings=Settings(deepseek_api_key="x", default_model="stub"),
         store=store,
-        profile=profile,
+        master_source=profile,
         skills=skills,
         runtime=runtime,
         notifier=ConsoleNotifier(),
@@ -119,25 +118,28 @@ def test_project_record_renders_guardrails_not_fake_metrics(store):
 
 
 def test_draft_market_context_summarizes_public_expression_without_claiming_results():
-    llm = _StubLLM(json.dumps({
-        "market_context": [
-            "同类工具通常先说明用户输入复杂问题后，系统会搜索、阅读并整理证据。",
-            "表达重点放在减少人工资料整理负担，而不是宣称替代研究判断。",
-        ],
-        "reference_sources": [
-            "OpenAI Deep Research: https://example.com/deep-research"
-        ],
-        "warnings": [
-            "不要借用公开来源的准确率、用户规模或发布时间。"
-        ],
-    }, ensure_ascii=False))
-    search = _StubSearch([
-        _Hit(
-            "OpenAI Deep Research",
-            "https://example.com/deep-research",
-            "A tool that searches, reads, and writes sourced reports.",
+    llm = _StubLLM(
+        json.dumps(
+            {
+                "market_context": [
+                    "同类工具通常先说明用户输入复杂问题后，系统会搜索、阅读并整理证据。",
+                    "表达重点放在减少人工资料整理负担，而不是宣称替代研究判断。",
+                ],
+                "reference_sources": ["OpenAI Deep Research: https://example.com/deep-research"],
+                "warnings": ["不要借用公开来源的准确率、用户规模或发布时间。"],
+            },
+            ensure_ascii=False,
         )
-    ])
+    )
+    search = _StubSearch(
+        [
+            _Hit(
+                "OpenAI Deep Research",
+                "https://example.com/deep-research",
+                "A tool that searches, reads, and writes sourced reports.",
+            )
+        ]
+    )
 
     draft = draft_market_context(
         title="Deep Research Workspace",
@@ -155,9 +157,9 @@ def test_draft_market_context_summarizes_public_expression_without_claiming_resu
 
 
 def test_draft_market_context_falls_back_to_sources_when_llm_missing():
-    search = _StubSearch([
-        _Hit("Project README", "https://example.com/readme", "Architecture overview")
-    ])
+    search = _StubSearch(
+        [_Hit("Project README", "https://example.com/readme", "Architecture overview")]
+    )
     draft = draft_market_context(
         mainstream_direction="后端系统",
         project_task="完成商品发布和检索",
@@ -201,25 +203,30 @@ def test_run_intake_agent_rejects_llm_wrapper_as_agent_without_loop():
 
 
 def test_run_intake_agent_can_call_search_when_ready_for_context():
-    llm = _StubLLM(json.dumps({
-        "is_agent_project": True,
-        "agent_reason": "有目标规划、工具调用、状态更新和观察反馈。",
-        "next_action": "research_context",
-        "agent_signals": ["目标驱动", "工具调用", "状态/记忆", "观察反馈"],
-        "non_agent_signals": [],
-        "missing_facts": [],
-        "risk_flags": [],
-        "next_questions": [],
-        "suggested_fields": {
-            "title": "Deep Research Workspace",
-            "mainstream_direction": "AI Agent",
-            "project_task": "自动搜索、阅读并生成带来源的研究报告",
-            "my_work": "实现 runtime loop 和工具路由"
-        }
-    }, ensure_ascii=False))
-    search = _StubSearch([
-        _Hit("Deep Research Product", "https://example.com/dr", "Research agent overview")
-    ])
+    llm = _StubLLM(
+        json.dumps(
+            {
+                "is_agent_project": True,
+                "agent_reason": "有目标规划、工具调用、状态更新和观察反馈。",
+                "next_action": "research_context",
+                "agent_signals": ["目标驱动", "工具调用", "状态/记忆", "观察反馈"],
+                "non_agent_signals": [],
+                "missing_facts": [],
+                "risk_flags": [],
+                "next_questions": [],
+                "suggested_fields": {
+                    "title": "Deep Research Workspace",
+                    "mainstream_direction": "AI Agent",
+                    "project_task": "自动搜索、阅读并生成带来源的研究报告",
+                    "my_work": "实现 runtime loop 和工具路由",
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    search = _StubSearch(
+        [_Hit("Deep Research Product", "https://example.com/dr", "Research agent overview")]
+    )
 
     assessment = run_intake_agent(
         raw_project_note="一个会规划、搜索、阅读、保存证据并生成报告的研究 agent。",
@@ -245,12 +252,16 @@ def test_main_agent_capture_project_tool_exposes_project_assessment(store):
         llm=None,
         search=None,
     )
-    out = dispatch("capture_project", {
-        "raw_project_note": (
-            "用户输入目标后系统多轮规划，选择搜索、抓取和 Python 工具，"
-            "保存状态并根据观察结果决定下一步。"
-        )
-    }, deps)
+    out = dispatch(
+        "capture_project",
+        {
+            "raw_project_note": (
+                "用户输入目标后系统多轮规划，选择搜索、抓取和 Python 工具，"
+                "保存状态并根据观察结果决定下一步。"
+            )
+        },
+        deps,
+    )
 
     assert out.startswith("OK capture_project assessment")
     assert "is_agent_project" in out
@@ -269,16 +280,20 @@ def test_main_agent_save_project_record_tool_persists_to_vault(store):
         llm=None,
         search=None,
     )
-    out = dispatch("save_project_record", {
-        "title": "Deep Research Workspace",
-        "mainstream_direction": "AI Agent",
-        "project_task": "自动搜索、阅读并生成带来源的研究报告",
-        "my_work": "实现 runtime loop、工具路由和 session 持久化",
-        "contribution_type": "integration",
-        "do_not_claim": "不要写 benchmark 第一；没有证据",
-        "tags": ["resume", "ai-agent"],
-        "confidence": 0.8,
-    }, deps)
+    out = dispatch(
+        "save_project_record",
+        {
+            "title": "Deep Research Workspace",
+            "mainstream_direction": "AI Agent",
+            "project_task": "自动搜索、阅读并生成带来源的研究报告",
+            "my_work": "实现 runtime loop、工具路由和 session 持久化",
+            "contribution_type": "integration",
+            "do_not_claim": "不要写 benchmark 第一；没有证据",
+            "tags": ["resume", "ai-agent"],
+            "confidence": 0.8,
+        },
+        deps,
+    )
 
     assert out.startswith("OK save_project_record stored project#")
     records = list_all(store)
@@ -307,14 +322,18 @@ def test_main_agent_read_artifact_tool_reads_latest_project(store):
         llm=None,
         search=None,
     )
-    dispatch("save_project_record", {
-        "title": "Deep Research Workspace",
-        "mainstream_direction": "AI Agent",
-        "project_task": "自动搜索、阅读并生成带来源的研究报告",
-        "my_work": "实现 runtime loop、工具路由和 session 持久化",
-        "method_route": "LLM 判断下一步，工具执行后回写状态",
-        "do_not_claim": "不要写线上用户规模",
-    }, deps)
+    dispatch(
+        "save_project_record",
+        {
+            "title": "Deep Research Workspace",
+            "mainstream_direction": "AI Agent",
+            "project_task": "自动搜索、阅读并生成带来源的研究报告",
+            "my_work": "实现 runtime loop、工具路由和 session 持久化",
+            "method_route": "LLM 判断下一步，工具执行后回写状态",
+            "do_not_claim": "不要写线上用户规模",
+        },
+        deps,
+    )
 
     out = dispatch("read_artifact", {"artifact_kind": "latest_project"}, deps)
 
@@ -380,11 +399,12 @@ def test_project_vault_market_context_endpoint_uses_search_stub(app_client, monk
             pass
 
     def fake_build_default_search():
-        return _SearchWithClose([
-            _Hit("Project README", "https://example.com/readme", "Architecture overview")
-        ])
+        return _SearchWithClose(
+            [_Hit("Project README", "https://example.com/readme", "Architecture overview")]
+        )
 
     import offerguide.agentic.search as search_mod
+
     monkeypatch.setattr(search_mod, "build_default_search", fake_build_default_search)
 
     resp = client.post(
@@ -401,122 +421,3 @@ def test_project_vault_market_context_endpoint_uses_search_stub(app_client, monk
     assert "外部表达参考" in resp.text
     assert "Project README" in resp.text
     assert "LLM 总结不可用" in resp.text
-
-
-def test_tailor_resume_tool_input_includes_project_vault(store):
-    from offerguide.tools.evaluation import _tailor_resume_handler
-
-    with store.connect() as conn:
-        conn.execute(
-            "INSERT INTO jobs(source, title, company, raw_text, content_hash) "
-            "VALUES ('manual', 'AI 实习', '字节', ?, 'h1')",
-            ("JD " * 100,),
-        )
-    insert(
-        store,
-        title="OfferGuide",
-        mainstream_direction="AI Agent",
-        project_task="构建本地求职 copilot",
-        my_work="实现 agent loop 和 SKILL 调用",
-        do_not_claim="不要写模型准确率提升",
-    )
-
-    class _Runtime:
-        def __init__(self) -> None:
-            self.inputs = None
-
-        def invoke(self, spec, inputs):
-            self.inputs = inputs
-            from offerguide.skills._runtime import SkillResult
-            payload = {
-                "company": "字节",
-                "role_focus": "AI 实习",
-                "tailored_markdown": "",
-                "change_log": [],
-                "inserted_claims": [],
-                "ats_keywords_used": [],
-                "ats_keywords_missing": [],
-                "cannot_fake_warnings": [],
-                "fit_estimate": {"before": 0.3, "after": 0.3, "rationale": "x"},
-                "suggested_filename": "x.pdf",
-            }
-            return SkillResult(
-                raw_text=json.dumps(payload, ensure_ascii=False),
-                parsed=payload,
-                skill_name=spec.name,
-                skill_version=spec.version,
-                skill_run_id=1,
-                input_hash="h",
-                cost_usd=0.0,
-                latency_ms=1,
-            )
-
-    spec = type("Spec", (), {"name": "tailor_resume", "version": "0.2.0"})()
-    runtime = _Runtime()
-    out = _tailor_resume_handler(
-        {"job_id": 1},
-        store=store,
-        runtime=runtime,
-        skills=[spec],
-        user_profile_text="原始简历",
-    )
-    assert "tailored_markdown" in out
-    assert runtime.inputs is not None
-    assert "项目事实档案" in runtime.inputs["master_resume"]
-    assert "不要写模型准确率提升" in runtime.inputs["master_resume"]
-
-
-def test_prepare_interview_tool_input_includes_project_vault(store):
-    from offerguide.tools.evaluation import _generate_interview_prep_handler
-
-    with store.connect() as conn:
-        conn.execute(
-            "INSERT INTO jobs(source, title, company, raw_text, content_hash) "
-            "VALUES ('manual', '算法实习', '腾讯', ?, 'h1')",
-            ("JD " * 100,),
-        )
-    insert(
-        store,
-        title="论文复现项目",
-        mainstream_direction="科研复现",
-        project_task="复现论文核心实验流程",
-        my_work="整理数据、跑通 baseline、记录复现偏差",
-        contribution_type="reproduction",
-    )
-
-    class _Runtime:
-        def __init__(self) -> None:
-            self.inputs = None
-
-        def invoke(self, spec, inputs):
-            self.inputs = inputs
-            from offerguide.skills._runtime import SkillResult
-            payload = {
-                "company_snapshot": "暂无面经数据，下方推断基于 JD。",
-                "expected_questions": [],
-                "prep_focus_areas": [],
-                "weak_spots": [],
-            }
-            return SkillResult(
-                raw_text=json.dumps(payload, ensure_ascii=False),
-                parsed=payload,
-                skill_name=spec.name,
-                skill_version=spec.version,
-                skill_run_id=2,
-                input_hash="h",
-                cost_usd=0.0,
-                latency_ms=1,
-            )
-
-    spec = type("Spec", (), {"name": "prepare_interview", "version": "0.1.0"})()
-    runtime = _Runtime()
-    _generate_interview_prep_handler(
-        {"job_id": 1},
-        store=store,
-        runtime=runtime,
-        skills=[spec],
-        user_profile_text="原始简历",
-    )
-    assert runtime.inputs is not None
-    assert "项目事实档案" in runtime.inputs["user_profile"]
-    assert "复现理解" in runtime.inputs["user_profile"]

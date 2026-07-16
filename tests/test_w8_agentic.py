@@ -1,10 +1,8 @@
-"""W8'''' — Agentic layer: LLM email classifier + 面经 collector + sweep.
+"""LLM email classification and reusable search backend tests.
 
 Tests:
 - LLMEmailClassifier returns structured kind/extracted via stub LLM
 - DuckDuckGo HTML parser (offline against canned HTML)
-- CorpusCollector orchestrates search + LLM + ingest with stubs
-- /api/agent/sweep endpoint composes everything
 - /api/email/classify mode=auto picks regex when no API key
 """
 
@@ -18,13 +16,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 import offerguide
-from offerguide import interview_corpus
-from offerguide.agentic.corpus_collector import CorpusCollector
 from offerguide.agentic.email_classifier_llm import (
     classify_email_batch_llm,
     classify_email_llm,
 )
-from offerguide.agentic.company_sweep import sweep_company
 from offerguide.agentic.search import (
     SearchHit,
     StubSearch,
@@ -33,7 +28,6 @@ from offerguide.agentic.search import (
     _unwrap_ddg_redirect,
 )
 from offerguide.config import Settings
-from offerguide.profile import UserProfile
 from offerguide.skills import discover_skills
 from offerguide.ui.notify import ConsoleNotifier
 from offerguide.ui.web import create_app
@@ -211,190 +205,18 @@ class TestStubSearch:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# CORPUS COLLECTOR
-# ═══════════════════════════════════════════════════════════════════
-
-
-class _RecordingFetchHTTP:
-    """Stand-in for httpx.Client used inside CorpusCollector.
-
-    Returns canned HTML per URL.
-    """
-
-    def __init__(self, content_per_url: dict[str, str]) -> None:
-        self._content = content_per_url
-
-    def get(self, url: str, *, follow_redirects: bool = False, **_):
-        if url in self._content:
-            return type(
-                "_R",
-                (),
-                {
-                    "status_code": 200,
-                    "headers": {"content-type": "text/html"},
-                    "text": self._content[url],
-                },
-            )()
-        return type(
-            "_R404",
-            (),
-            {"status_code": 404, "headers": {}, "text": ""},
-        )()
-
-    def close(self) -> None:
-        pass
-
-
-@pytest.fixture
-def corpus_setup(tmp_path: Path):
-    store = offerguide.Store(tmp_path / "corpus.db")
-    store.init_schema()
-    return store
-
-
-class TestCorpusCollector:
-    def test_collects_genuine_面经(self, corpus_setup) -> None:
-        store = corpus_setup
-        # Search backend returns 1 nowcoder hit
-        search = StubSearch({
-            "字节跳动 面经 暑期实习 2026": [
-                SearchHit(title="字节面经", url="https://www.nowcoder.com/d/123", snippet="s"),
-            ]
-        })
-        # LLM evaluator OK's it
-        llm = _StubLLM(response_per_call=[
-            json.dumps({
-                "is_genuine_interview_exp": True,
-                "company_match": True,
-                "role_hint": "AI Agent 实习",
-                "year_guess": "2026",
-                "clean_raw_text": (
-                    "字节跳动 AI Agent 实习一面 · 30 分钟 · 项目深挖。"
-                    "面试官先让我介绍 RemeDi 项目，然后问 GRPO vs PPO 区别，"
-                    "DeepSpeed ZeRO-2 vs ZeRO-3 选型理由，attention 缩放推导，"
-                    "为什么不直接用 Llama-3 base。简单 leetcode 中等题。"
-                    "整体偏基础 + 项目细节，HR 反馈 1-2 周内出结果。"
-                ),
-                "rationale": "确实是 2026 字节实习一面",
-            })
-        ])
-        collector = CorpusCollector(store=store, llm=llm, search=search)  # type: ignore[arg-type]
-        # Replace the http fetcher with our stub
-        collector._http = _RecordingFetchHTTP({
-            "https://www.nowcoder.com/d/123": "<html>字节面经原文...30 分钟项目深挖...</html>"
-        })  # type: ignore[assignment]
-
-        result = collector.collect("字节跳动")
-        assert result.inserted == 1
-        assert result.hits_seen >= 1
-        # 面经 actually in DB
-        rows = interview_corpus.fetch_for_company(store, "字节跳动")
-        assert len(rows) == 1
-        assert rows[0].source == "agent_search"
-
-    def test_rejects_low_quality(self, corpus_setup) -> None:
-        store = corpus_setup
-        search = StubSearch({
-            "字节跳动 面经 暑期实习 2026": [
-                SearchHit(title="random", url="https://www.nowcoder.com/x", snippet="s"),
-            ]
-        })
-        llm = _StubLLM(response_per_call=[
-            json.dumps({
-                "is_genuine_interview_exp": False,
-                "company_match": False,
-                "role_hint": None,
-                "year_guess": None,
-                "clean_raw_text": "",
-                "rationale": "this is a marketing page, not 面经",
-            })
-        ])
-        collector = CorpusCollector(store=store, llm=llm, search=search)  # type: ignore[arg-type]
-        collector._http = _RecordingFetchHTTP({
-            "https://www.nowcoder.com/x": "<html>...</html>"
-        })  # type: ignore[assignment]
-        result = collector.collect("字节跳动")
-        assert result.inserted == 0
-        assert result.skipped_low_quality >= 1
-
-    def test_skips_non_preferred_domains(self, corpus_setup) -> None:
-        store = corpus_setup
-        # All hits are from random sites (not in _PREFERRED_DOMAINS)
-        search = StubSearch({
-            "字节跳动 面经 暑期实习 2026": [
-                SearchHit(title="t", url="https://example.com/x", snippet="s"),
-                SearchHit(title="t", url="https://random.cn/y", snippet="s"),
-            ]
-        })
-        llm = _StubLLM()  # never called
-        collector = CorpusCollector(store=store, llm=llm, search=search)  # type: ignore[arg-type]
-        result = collector.collect("字节跳动")
-        # No fetches because no preferred-domain candidates
-        assert result.hits_evaluated == 0
-        assert result.inserted == 0
-
-
-# ═══════════════════════════════════════════════════════════════════
-# META-AGENT SWEEP
-# ═══════════════════════════════════════════════════════════════════
-
-
-def _seed_app(store, company: str, status: str = "applied") -> int:
-    with store.connect() as conn:
-        conn.execute(
-            "INSERT INTO jobs(source, title, company, raw_text, content_hash) "
-            "VALUES ('manual', 't', ?, 'jd', ?)",
-            (company, f"hash_{company}_{status}"),
-        )
-        cur = conn.execute(
-            "INSERT INTO applications(job_id, status) VALUES "
-            "((SELECT id FROM jobs WHERE company = ? ORDER BY id DESC LIMIT 1), ?)",
-            (company, status),
-        )
-        return int(cur.lastrowid or 0)
-
-
-class TestSweep:
-    def test_sweep_with_no_llm_summarizes_only(self, corpus_setup) -> None:
-        store = corpus_setup
-        _seed_app(store, "字节跳动", status="applied")
-        _seed_app(store, "字节跳动", status="rejected")
-        result = sweep_company(
-            "字节跳动", store=store, llm=None, search=None,
-        )
-        assert result.application_summary["total"] == 2
-        assert result.application_summary["active"] == 1
-        assert result.interview_corpus is None
-        # Notes mention skipped agentic step
-        assert any("skipped" in n.lower() for n in result.notes)
-
-    def test_sweep_with_llm_runs_corpus_collection(self, corpus_setup) -> None:
-        store = corpus_setup
-        search = StubSearch()  # always empty results — easy/safe path
-        llm = _StubLLM()
-        result = sweep_company(
-            "字节跳动", store=store,
-            llm=llm,  # type: ignore[arg-type]
-            search=search,
-        )
-        # corpus result is present (even though it found nothing)
-        assert result.interview_corpus is not None
-        assert result.interview_corpus.inserted == 0
-
-
-# ═══════════════════════════════════════════════════════════════════
 # /api/email/classify mode handling
 # ═══════════════════════════════════════════════════════════════════
 
 
 @pytest.fixture
-def app_setup(tmp_path: Path):
+def app_setup(tmp_path: Path, master_resume_source_factory):
     store = offerguide.Store(tmp_path / "ag.db")
     store.init_schema()
-    profile = UserProfile(raw_resume_text="x")
+    profile = master_resume_source_factory("x")
     app = create_app(
         settings=Settings(),  # no DEEPSEEK_API_KEY
-        store=store, profile=profile,
+        store=store, master_source=profile,
         skills=discover_skills(SKILLS_ROOT), runtime=None,
         notifier=ConsoleNotifier(),
     )
@@ -428,27 +250,3 @@ class TestEmailClassifyMode:
             json={"text": "面试邀请", "batch": False, "mode": "regex"},
         )
         assert "extracted" in resp.json()["results"][0]
-
-
-class TestSweepEndpoint:
-    def test_sweep_returns_summary_no_llm(self, app_setup) -> None:
-        app, store = app_setup
-        _seed_app(store, "字节跳动")
-        resp = TestClient(app).post(
-            "/api/agent/sweep",
-            json={"company": "字节跳动", "do_corpus": False},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["company"] == "字节跳动"
-        assert data["application_summary"]["total"] == 1
-        assert data["interview_corpus"] is None
-
-    def test_sweep_skips_corpus_when_do_corpus_false(self, app_setup) -> None:
-        app, _ = app_setup
-        resp = TestClient(app).post(
-            "/api/agent/sweep",
-            json={"company": "腾讯", "do_corpus": False},
-        )
-        data = resp.json()
-        assert data["interview_corpus"] is None

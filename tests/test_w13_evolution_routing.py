@@ -96,6 +96,7 @@ class TestRegistryCRUD:
                                 traffic_pct=0.3)
         assert ok is True
         v = get_variant_by_version(store, "x", "0.2.0")
+        assert v is not None
         assert v.status == "canary"
         assert v.canary_traffic_pct == pytest.approx(0.3)
         assert v.promoted_at is not None
@@ -130,6 +131,8 @@ class TestRegistryCRUD:
         # 0.1.0 is now retired, 0.2.0 is live
         v_old = get_variant_by_version(store, "x", "0.1.0")
         v_new = get_variant_by_version(store, "x", "0.2.0")
+        assert v_old is not None
+        assert v_new is not None
         assert v_old.status == "retired"
         assert v_new.status == "live"
         assert v_new.canary_traffic_pct == 0.0
@@ -141,6 +144,7 @@ class TestRegistryCRUD:
                            reason="critic = 0.2")
         assert ok is True
         v = get_variant_by_version(store, "x", "0.2.0")
+        assert v is not None
         assert v.status == "failed"
         assert "critic = 0.2" in (v.notes or "")
 
@@ -149,6 +153,7 @@ class TestRegistryCRUD:
                                parent_version="0.1.0", body_md="b")
         update_fitness_score(store, skill_name="x", version="0.2.0", fitness=0.78)
         v = get_variant_by_version(store, "x", "0.2.0")
+        assert v is not None
         assert v.fitness_score == pytest.approx(0.78)
 
 
@@ -172,6 +177,7 @@ class TestSelectVariantForInvoke:
             )
         sel = select_variant_for_invoke(store, skill_name="x")
         assert sel.use_disk_seed is False
+        assert sel.selected_variant is not None
         assert sel.selected_variant.version == "0.2.0"
         assert "live" in sel.selection_reason
 
@@ -191,6 +197,7 @@ class TestSelectVariantForInvoke:
         rng = random.Random(42)
         for _ in range(5):
             sel = select_variant_for_invoke(store, skill_name="x", rng=rng)
+            assert sel.selected_variant is not None
             assert sel.selected_variant.version == "0.2.0"
             assert "canary" in sel.selection_reason
 
@@ -209,6 +216,7 @@ class TestSelectVariantForInvoke:
         live_hits = canary_hits = 0
         for _ in range(200):
             sel = select_variant_for_invoke(store, skill_name="x", rng=rng)
+            assert sel.selected_variant is not None
             if sel.selected_variant.version == "0.1.0":
                 live_hits += 1
             else:
@@ -232,6 +240,7 @@ class TestSelectVariantForInvoke:
         # 100 rolls: should always pick the live variant
         for _ in range(100):
             sel = select_variant_for_invoke(store, skill_name="x")
+            assert sel.selected_variant is not None
             assert sel.selected_variant.version == "0.1.0"
 
 

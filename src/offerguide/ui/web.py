@@ -22,29 +22,54 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
-import os
-import re
-from datetime import UTC
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .. import inbox as inbox_mod
-from ..application_plan import build_application_plan
 from ..config import Settings
-from ..job_quality import is_job_usable_for_recommendation
-from ..llm import LLMClient, LLMError
+from ..interview_research import (
+    InterviewResearchConflictError,
+    InterviewResearchRepository,
+    InterviewResearchSubject,
+    init_interview_research_schema,
+)
+from ..llm import LLMClient
+from ..manual_job import ManualJobIntakeError, intake_manual_job
 from ..memory import Store
-from ..platforms._spec import RawJob
-from ..profile import UserProfile, load_resume_pdf
-from ..skills import SkillRuntime, SkillSpec, discover_skills
-from ..workers import scout
+from ..research_agents.browser_bridge import AuthenticatedBrowserBridgeStore
+from ..research_agents.coordinator import init_agent_invocation_schema
+from ..research_agents.job_discovery import (
+    JobDiscoveryRepository,
+    JobDiscoveryRevisionConflict,
+    init_job_discovery_schema,
+)
+from ..research_agents.service import ResearchAgentService
+from ..research_agents.sources import EvidenceNotFoundError, SourceEvidenceStore
+from ..resume import (
+    ApplicationPackage,
+    MasterResumeDocument,
+    MasterResumeSource,
+    ResumeEditor,
+    ResumeWorkflow,
+    ResumeWorkspaceError,
+    ResumeWorkspaceRepository,
+    WorkspaceNotFoundError,
+    generate_application_package,
+    job_snapshot_from_evidence,
+    load_resume_pdf,
+)
+from ..skills import SkillInvoker, SkillRuntime, SkillSpec, discover_skills
+from .browser_bridge import build_browser_bridge_router
 from .notify import Notifier, make_notifier
 
 log = logging.getLogger(__name__)
@@ -61,54 +86,82 @@ def create_app(
     *,
     settings: Settings,
     store: Store,
-    profile: UserProfile | None,
+    master_source: MasterResumeSource | None,
     skills: list[SkillSpec],
-    runtime: SkillRuntime | None,
+    runtime: SkillInvoker | None,
+    resume_editor: ResumeEditor | None = None,
+    visual_resume_editor: ResumeEditor | None = None,
     notifier: Notifier | None = None,
+    research_agents: ResearchAgentService | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with explicit dependencies (testable)."""
-    # FastAPI lifespan: start the ambient discovery task unless explicitly
-    # disabled. The task is useful in normal app mode, but tests and one-off
-    # UI probes must be able to opt out without surprise network writes.
-    import asyncio as _async_mod
-    import contextlib as _ctxlib
+    master_repository = ResumeWorkspaceRepository(store)
+    interview_repository = (
+        research_agents.interview_repository
+        if research_agents is not None
+        else InterviewResearchRepository(store)
+    )
+    interview_source_store = (
+        research_agents.source_store
+        if research_agents is not None
+        else SourceEvidenceStore(store)
+    )
+    interview_source_store.init_schema()
+    browser_bridge_store = (
+        getattr(research_agents, "browser_bridge_store", None)
+        if research_agents is not None
+        else None
+    ) or AuthenticatedBrowserBridgeStore(store)
+    browser_bridge_store.init_schema()
+    init_interview_research_schema(store)
+    init_job_discovery_schema(store)
+    init_agent_invocation_schema(store)
+    def _effective_master_text() -> str | None:
+        return master_repository.effective_master_text(master_source)
 
-    from ..workers.ambient import _ambient_discovery_loop
-
-    @_ctxlib.asynccontextmanager
+    # The background trigger owns no discovery logic. It only wakes the same
+    # JobDiscoveryAgent used by the page and main-agent delegation.
+    @contextlib.asynccontextmanager
     async def _lifespan(app: FastAPI):
-        bg_task: _async_mod.Task[None] | None = None
-        # Disabled when api_key is empty (no point crawling without downstream
-        # score_match) or when env opt-out (tests / probes don't want network).
-        if (settings.deepseek_api_key
-                and not getattr(settings, "disable_ambient_crawl", False)):
-            bg_task = _async_mod.create_task(
-                _ambient_discovery_loop(
-                    store=store, settings=settings,
-                    runtime=runtime, skills=skills,
-                    user_profile_text=(
-                        profile.raw_resume_text if profile else None
-                    ),
-                ),
-                name="offerguide_ambient_discovery",
+        background_task: asyncio.Task[None] | None = None
+
+        async def _scheduled_job_discovery() -> None:
+            while True:
+                try:
+                    if (
+                        research_agents is not None
+                        and research_agents.job_repository.get_search_context() is not None
+                    ):
+                        research_agents.enqueue_job_discovery(
+                            trigger_reason="scheduled market refresh"
+                        )
+                except Exception:
+                    log.exception("scheduled JobDiscoveryAgent trigger failed")
+                await asyncio.sleep(6 * 60 * 60)
+
+        if research_agents is not None and not settings.disable_background_agents:
+            background_task = asyncio.create_task(
+                _scheduled_job_discovery(),
+                name="offerguide-job-discovery-agent",
             )
         try:
             yield
         finally:
-            if bg_task is not None:
-                bg_task.cancel()
-                with _ctxlib.suppress(BaseException):
-                    await bg_task
+            if background_task is not None:
+                background_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await background_task
+            if research_agents is not None:
+                research_agents.close()
 
     app = FastAPI(
         title="OfferGuide", docs_url=None, redoc_url=None, lifespan=_lifespan,
     )
+    app.include_router(build_browser_bridge_router(browser_bridge_store))
+    app.state.browser_bridge_store = browser_bridge_store
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-    # Static asset mount — serves the design-redesign mockups directly so
-    # /preview/redesign and /static/redesign/tokens/a.css load without per-file
-    # endpoints. The new W21+ UI design lives under static/redesign/ until it
-    # is wired into Jinja templates page-by-page.
+    # Static asset mount for the live UI stylesheet and browser extension assets.
     if STATIC_DIR.exists():
         from fastapi.staticfiles import StaticFiles
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -143,28 +196,13 @@ def create_app(
 
         base = {
             "request": request,
-            "profile_loaded": profile is not None,
-            "profile_chars": len(profile.raw_resume_text) if profile else 0,
+            "master_loaded": master_source is not None,
+            "master_chars": len(_effective_master_text() or ""),
             "nav": nav,
         }
         base.update(extra)
         return base
 
-    @app.get("/preview/redesign", response_class=HTMLResponse)
-    def preview_redesign(request: Request) -> Any:
-        """Static preview of the redesigned UI mockups.
-
-        The hi-fi redesign (7 screens + tokens, by user 2026-05-15) lives in
-        ``static/redesign/``. This endpoint serves the loader index.html
-        directly so the new design can be viewed alongside the live UI while
-        it gets wired page-by-page into Jinja. Drop this route once the
-        redesign is fully integrated.
-        """
-        from fastapi.responses import FileResponse
-        path = STATIC_DIR / "redesign" / "index.html"
-        if not path.exists():
-            raise HTTPException(404, "redesign preview not installed")
-        return FileResponse(str(path))
 
     @app.get("/", response_class=HTMLResponse)
     def mission_control(request: Request) -> Any:
@@ -206,31 +244,23 @@ def create_app(
         # Cap to 5 on hero strip
         interrupts = interrupts[:5]
 
-        # Recent jobs — top 5 most-recently-fetched scored or unscored
+        # Home shows the same current selection as /recommended. It does not
+        # independently score, filter, or manufacture another recommendation set.
         recent_jobs: list[dict] = []
         try:
+            job_repository = (
+                getattr(research_agents, "job_repository", None)
+                or JobDiscoveryRepository(store)
+            )
+            selection = job_repository.get_current_selection()
             with store.connect() as conn:
-                rows = conn.execute(
-                    "SELECT id, title, company, location, source, extras_json, url, raw_text "
-                    "FROM jobs "
-                    "ORDER BY fetched_at DESC LIMIT 20"
-                ).fetchall()
-                jobs_today_count = conn.execute(
-                    "SELECT COUNT(*) FROM jobs "
-                    "WHERE fetched_at >= julianday('now', 'start of day')"
-                ).fetchone()[0]
-                # Try to get scores from harness_events
-                score_map: dict[int, int] = {}
-                try:
-                    for srow in conn.execute(
-                        "SELECT job_id, json_extract(note, '$.probability') "
-                        "FROM harness_events WHERE kind='scored' "
-                        "ORDER BY id DESC"
-                    ).fetchall():
-                        if srow[0] is not None and srow[1] is not None and int(srow[0]) not in score_map:
-                            score_map[int(srow[0])] = int(round(float(srow[1]) * 100))
-                except Exception:
-                    pass
+                workspace_job_ids = {
+                    int(row[0])
+                    for row in conn.execute(
+                        "SELECT DISTINCT a.job_id FROM resume_workspaces AS rw "
+                        "JOIN applications AS a ON a.id = rw.application_id"
+                    ).fetchall()
+                }
             _src_map = {
                 "nowcoder": ("牛", "nc"), "tencent_campus": ("腾", "tc"),
                 "tencent_social": ("腾", "tc"), "baidu_campus": ("百", "bd"),
@@ -238,48 +268,72 @@ def create_app(
                 "shixiseng": ("僧", ""), "zerovoice_repo": ("0v", ""),
                 "manual": ("M", ""),
             }
-            for r in rows:
-                jid, title, company, location, source = int(r[0]), r[1] or "(无标题)", r[2] or "?", r[3] or "", r[4] or ""
-                if not is_job_usable_for_recommendation(
-                    source=source,
-                    title=title,
-                    company=company,
-                    url=r[6] or "",
-                    raw_text=r[7] or "",
-                    extras_json=r[5] or "{}",
-                ):
+            for selected in selection.items if selection is not None else ():
+                assert selection is not None
+                evidence = selected.job_evidence
+                if evidence is None or evidence.job_id is None:
                     continue
+                live_evidence = job_repository.get_job_evidence(
+                    selected.job_evidence_id
+                )
+                live_status = (
+                    live_evidence.source_status
+                    if live_evidence is not None
+                    else "unknown"
+                )
+                has_workspace = evidence.job_id in workspace_job_ids
+                source = evidence.source_name
                 src_label, src_cls = _src_map.get(source, (source[:1].upper() if source else "?", ""))
-                score = score_map.get(jid)
-                tag_cls, tag_label = ("ok", "已评") if score is not None else ("", "待评")
                 recent_jobs.append({
-                    "id": jid, "title": title, "score": score,
-                    "subtitle": f"{source} · {location} · 校招" if location else f"{source} · 校招",
+                    "id": evidence.job_id,
+                    "title": evidence.title,
+                    "subtitle": " · ".join(
+                        value for value in (
+                            evidence.company,
+                            evidence.location or "",
+                            source,
+                        ) if value
+                    ),
                     "src_label": src_label, "src_cls": src_cls,
-                    "tag_cls": tag_cls, "tag_label": tag_label,
+                    "tag_cls": "ok" if live_status != "closed" else "",
+                    "tag_label": (
+                        "已有投递包"
+                        if has_workspace
+                        else ("已关闭" if live_status == "closed" else "已核验")
+                    ),
+                    "apply_pack_url": (
+                        f"/jobs/{evidence.job_id}/apply-pack"
+                        if has_workspace
+                        else (
+                            None
+                            if live_status == "closed"
+                            else (
+                                f"/jobs/{evidence.job_id}/apply-pack"
+                                f"?selection_revision={selection.result_revision}"
+                                f"&job_evidence_id={selected.job_evidence_id}"
+                            )
+                        )
+                    ),
                 })
                 if len(recent_jobs) >= 5:
                     break
+            jobs_today_count = len(selection.items) if selection is not None else 0
         except Exception:
             jobs_today_count = 0
 
-        # Agent state — wake count = harness_runs total, today cost from harness_runs+skill_runs
-        wake_count = 0
-        today_cost = 0.0
+        # Durable application resources keep apply packs and interview results
+        # reachable after the user leaves their original page.
         try:
-            with store.connect() as conn:
-                wake_count = conn.execute(
-                    "SELECT COUNT(*) FROM harness_runs"
-                ).fetchone()[0] or 0
-                tc = conn.execute(
-                    "SELECT COALESCE(SUM(cost_usd), 0) FROM skill_runs "
-                    "WHERE created_at >= julianday('now', 'start of day')"
-                ).fetchone()
-                today_cost = float(tc[0] or 0.0) if tc else 0.0
+            application_resources = _application_resources()
         except Exception:
-            pass
+            application_resources = {}
+        resources_by_job = {
+            int(resource["job_id"]): resource
+            for resource in application_resources.values()
+        }
 
-        # Recent agent events (last 6h) — harness_events
+        # Recent agent events (last 6h), including the domain Agents that keep
+        # running after the initiating chat request has already returned.
         recent_events: list[dict] = []
         recent_artifacts: list[dict] = []
         try:
@@ -295,7 +349,6 @@ def create_app(
                 ).astimezone().strftime("%H:%M")
                 verb_map = {
                     "scored": "评估", "applied": "投递", "user_marked_applied": "标记已投",
-                    "tailor_resume_generated": "微调简历", "apply_pack_generated": "生成投递包",
                     "project_record_saved": "存项目档案", "dead_url_reported": "标失效",
                 }
                 note_obj = {}
@@ -312,36 +365,176 @@ def create_app(
                         "title": title,
                         "kind": str(note_obj.get("direction") or "project"),
                         "href": view or "/project-vault",
+                        "_sort_at": float(ec),
                     })
                 recent_events.append({
                     "time": ts, "kind": "log",
                     "verb": verb_map.get(ek, ek),
                     "obj": title or (f"job#{ej}" if ej else ""),
+                    "tail": "", "href": view or None, "_sort_at": float(ec),
+                })
+
+                if ej and int(ej) in resources_by_job:
+                    resource = resources_by_job[int(ej)]
+                    recent_events[-1]["obj"] = " · ".join(
+                        value
+                        for value in (resource["company"], resource["title"])
+                        if value
+                    )
+                    if ek == "user_marked_applied" and resource["interview_url"]:
+                        recent_events[-1]["href"] = resource["interview_url"]
+
+            with store.connect() as conn:
+                invocation_rows = conn.execute(
+                    "SELECT id, subject_kind, subject_id, status, updated_at "
+                    "FROM research_agent_invocations "
+                    "WHERE updated_at >= julianday('now') - 0.25 "
+                    "ORDER BY updated_at DESC LIMIT 10"
+                ).fetchall()
+            for invocation_id, subject_kind, subject_id, status, updated_at in invocation_rows:
+                timestamp = float(updated_at)
+                ts = _dt.datetime.fromtimestamp(
+                    (timestamp - 2440587.5) * 86400, tz=_dt.UTC,
+                ).astimezone().strftime("%H:%M")
+                if subject_kind == "job_search":
+                    verb = "正在找岗位" if status in {"queued", "running"} else (
+                        "岗位已更新" if status == "published" else "岗位已检查"
+                    )
+                    obj = f"当前 {jobs_today_count} 个候选"
+                    href = "/recommended"
+                elif subject_kind == "interview_research":
+                    parts = str(subject_id).split(":")
+                    application_id = (
+                        int(parts[1])
+                        if len(parts) == 4 and parts[0] == "application" and parts[1].isdigit()
+                        else None
+                    )
+                    resource = application_resources.get(application_id) if application_id else None
+                    verb = "正在搜索面经" if status in {"queued", "running"} else (
+                        "面经已完成" if status == "published" else "面经已检查"
+                    )
+                    obj = (
+                        " · ".join(
+                            value
+                            for value in (resource["company"], resource["title"])
+                            if value
+                        )
+                        if resource
+                        else "真实面经"
+                    )
+                    href = resource["interview_url"] if resource else None
+                else:
+                    continue
+                recent_events.append({
+                    "time": ts,
+                    "kind": "log",
+                    "verb": verb,
+                    "obj": obj,
                     "tail": "",
+                    "href": href,
+                    "invocation_id": str(invocation_id),
+                    "_sort_at": timestamp,
                 })
         except Exception:
             pass
 
-        # Uptime — days since earliest harness_run
-        uptime_str = "—"
+        for resource in application_resources.values():
+            if not resource["interview_url"] or resource["updated_at"] is None:
+                continue
+            timestamp = float(resource["updated_at"])
+            if timestamp < _to_julian(_dt.datetime.now(tz=_dt.UTC)) - 0.25:
+                continue
+            ts = _dt.datetime.fromtimestamp(
+                (timestamp - 2440587.5) * 86400, tz=_dt.UTC,
+            ).astimezone().strftime("%H:%M")
+            recent_artifacts.append({
+                "time": ts,
+                "title": " · ".join(
+                    value
+                    for value in (resource["company"], resource["title"])
+                    if value
+                ),
+                "kind": resource["interview_label"],
+                "href": resource["interview_url"],
+                "_sort_at": timestamp,
+            })
+
+        recent_events.sort(key=lambda item: float(item.get("_sort_at") or 0), reverse=True)
+        recent_events = recent_events[:10]
+        recent_artifacts.sort(
+            key=lambda item: float(item.get("_sort_at") or 0), reverse=True
+        )
+        recent_artifacts = recent_artifacts[:6]
+
+        agent_now_task = "当前没有运行中的任务"
+        agent_now_href: str | None = None
+        agent_poll_invocation_id: str | None = None
+        agent_state_dot = "ok"
+        agent_state_label = "待命"
+        agent_overall_label = "待命"
         try:
             with store.connect() as conn:
-                first = conn.execute(
-                    "SELECT MIN(started_at) FROM harness_runs"
+                latest_invocation = conn.execute(
+                    "SELECT id, subject_kind, subject_id, status, message "
+                    "FROM research_agent_invocations "
+                    "ORDER BY CASE WHEN status IN ('queued', 'running') THEN 0 ELSE 1 END, "
+                    "updated_at DESC LIMIT 1"
                 ).fetchone()
-            if first and first[0]:
-                delta_days = (_dt.datetime.now().toordinal() -
-                              _dt.datetime.fromtimestamp((float(first[0]) - 2440587.5) * 86400).toordinal())
-                uptime_str = f"{max(0, delta_days)}d"
+            if latest_invocation is not None:
+                invocation_id, subject_kind, subject_id, status, message = latest_invocation
+                active = status in {"queued", "running"}
+                if subject_kind == "job_search":
+                    agent_now_task = (
+                        "正在核验来源并整理当前岗位选择"
+                        if active
+                        else f"找岗已完成，当前有 {jobs_today_count} 个候选"
+                    )
+                    agent_now_href = "/recommended"
+                else:
+                    parts = str(subject_id).split(":")
+                    application_id = (
+                        int(parts[1])
+                        if len(parts) == 4 and parts[0] == "application" and parts[1].isdigit()
+                        else None
+                    )
+                    resource = application_resources.get(application_id) if application_id else None
+                    target = (
+                        " · ".join(
+                            value
+                            for value in (resource["company"], resource["title"])
+                            if value
+                        )
+                        if resource
+                        else "当前投递"
+                    )
+                    agent_now_task = (
+                        f"正在为 {target} 搜索真实面经"
+                        if active
+                        else (
+                            f"{target}：{resource['interview_label']}"
+                            if resource
+                            else str(message or "面经搜索已结束")
+                        )
+                    )
+                    agent_now_href = resource["interview_url"] if resource else None
+                if active:
+                    agent_poll_invocation_id = str(invocation_id)
+                    agent_state_dot = "live"
+                    agent_state_label = "运行中"
+                    agent_overall_label = "运行中"
+                elif status in {"failed", "blocked"}:
+                    agent_state_dot = "warn"
+                    agent_state_label = "需要处理"
+                    agent_overall_label = "需要处理"
         except Exception:
             pass
 
         # Hero subtitle — what agent did in last 6h
         hero_subtitle = (
             f"Agent 在过去 6 小时里处理了 {len(recent_events)} 件事。"
-            f"今日新发现 {jobs_today_count} 个岗位。"
+            f"当前岗位选择集有 {jobs_today_count} 个岗位。"
             if recent_events or jobs_today_count else
-            "Agent 待命中。粘 JD 评估或等下次 ambient 巡检 (~6h cron)。"
+            "Agent 待命中。可以修改当前找岗意图或手动刷新。"
         )
 
         ctx = _ctx(
@@ -351,18 +544,18 @@ def create_app(
             interrupts_count=len(interrupts),
             recent_jobs=recent_jobs,
             jobs_today_count=jobs_today_count,
-            today_cost_usd=today_cost,
-            budget_cap_usd=5.0,
-            wake_count=wake_count,
-            uptime_str=uptime_str,
-            agent_now_task="Agent 在睡 — 等下次 cron 触发或粘 JD",
+            application_count=len(application_resources),
+            agent_now_task=agent_now_task,
+            agent_now_href=agent_now_href,
+            agent_poll_invocation_id=agent_poll_invocation_id,
             agent_now_progress=None,
             agent_now_progress_label="",
             agent_now_eta="",
-            agent_state_dot="ok",
-            agent_state_label="待命",
+            agent_state_dot=agent_state_dot,
+            agent_state_label=agent_state_label,
+            agent_overall_label=agent_overall_label,
             recent_window_label="最近 6 小时",
-            next_wake_label="cron 巡检 ~6h 一次",
+            next_wake_label="Agent 运行记录",
             recent_events=recent_events,
             recent_artifacts=recent_artifacts,
             hero_subtitle=hero_subtitle,
@@ -371,426 +564,8 @@ def create_app(
         return templates.TemplateResponse(request, "mission_control.html", ctx)
 
     @app.get("/today", response_class=HTMLResponse)
-    def home_legacy(request: Request) -> Any:
-        from fastapi.responses import RedirectResponse as _R
-        return _R(url="/", status_code=301)  # W21 redesign: merged into Mission Control
-        """Home (W13.x rewrite) — agent-driven, not dashboard-driven.
-
-        The pre-W13 home was a daemon-style stat panel ("4 stat cards + 5
-        action items"). That's "show me what cron observed", not "what does
-        my copilot think about my situation right now".
-
-        New shape:
-          - Centerpiece: the most recent agent run's final answer (with
-            critic_score + run timestamp + "rerun now" button)
-          - Pending agent_suggestion inbox items (the things agent thinks
-            you should decide)
-          - Quick-stats strip (just numbers, not "推荐操作" — leave that to agent)
-          - Quick links to /agent + /apply + /evolution
-        """
-        # Most recent harness run for the hero. Graceful: harness_runs may
-        # not exist yet on a brand-new install (init_agent_runtime_schema runs on
-        # first harness.run, not at web boot).
-        row = None
-        try:
-            with store.connect() as conn:
-                row = conn.execute(
-                    "SELECT id, trigger_kind, trigger_detail, final_text, "
-                    "       started_at, ended_at, iterations, status "
-                    "FROM harness_runs WHERE final_text IS NOT NULL "
-                    "  AND status = 'ok' "
-                    "ORDER BY started_at DESC LIMIT 1"
-                ).fetchone()
-        except Exception:
-            row = None
-        latest_run = None
-        if row:
-            goal = _extract_trigger_goal(row[2])
-            latency_ms: int | None = None
-            if row[5] is not None and row[4] is not None:
-                latency_ms = int((float(row[5]) - float(row[4])) * 86400 * 1000)
-            latest_run = {
-                "id": row[0], "goal": goal, "final_answer": row[3],
-                "critic_score": None, "critic_notes": None,
-                "latency_ms": latency_ms, "started_at": row[4],
-                "status": row[7], "iterations": row[6],
-                "trigger_kind": row[1],
-            }
-
-        # Pending agent_suggestion items
-        suggestions = [
-            i for i in inbox_mod.list_items(store, status="pending", limit=20)
-            if i.kind == "agent_suggestion"
-        ][:6]
-        # W14.20 — pending questions agent asked user (separate, more urgent)
-        pending_questions = [
-            i for i in inbox_mod.list_items(store, status="pending", limit=20)
-            if i.kind == "question"
-        ][:3]
-
-        # Just-stats (not action lists — agent gives those)
-        with store.connect() as conn:
-            n_jobs = conn.execute(
-                "SELECT COUNT(*) FROM jobs WHERE length(raw_text) >= 200"
-            ).fetchone()[0]
-            n_apps_active = conn.execute(
-                "SELECT COUNT(*) FROM applications "
-                "WHERE status NOT IN ('offer','rejected','withdrawn')"
-            ).fetchone()[0]
-            n_apps_offer = conn.execute(
-                "SELECT COUNT(*) FROM applications WHERE status='offer'"
-            ).fetchone()[0]
-            n_pending_inbox = conn.execute(
-                "SELECT COUNT(*) FROM inbox_items WHERE status='pending'"
-            ).fetchone()[0]
-            # W14.11: state-aware next-step suggestion. Replaces the generic
-            # "三步走" onboarding banner with a context-sensitive prompt
-            # that points at the actual next thing to do.
-            n_active_goals = conn.execute(
-                "SELECT COUNT(*) FROM user_goals WHERE status='active'"
-            ).fetchone()[0]
-            latest_job_id = conn.execute(
-                "SELECT id FROM jobs ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            latest_job_id = latest_job_id[0] if latest_job_id else None
-
-            # W14.12 — "agent 本周报告" data: what the autonomous daemons
-            # actually accomplished in the last 7 days, so home reads as
-            # "look what your agent did" rather than "tell the agent what
-            # to do". Window is rolling 7 days from now.
-            n_jobs_auto_found_week = conn.execute(
-                "SELECT COUNT(*) FROM jobs "
-                "WHERE source = 'agent_search' "
-                "  AND created_at >= julianday('now') - 7"
-            ).fetchone()[0]
-            n_score_runs_week = conn.execute(
-                "SELECT COUNT(*) FROM skill_runs "
-                "WHERE skill_name = 'score_match' "
-                "  AND created_at >= julianday('now') - 7"
-            ).fetchone()[0]
-            n_suggestions_week = conn.execute(
-                "SELECT COUNT(*) FROM inbox_items "
-                "WHERE kind = 'agent_suggestion' "
-                "  AND created_at >= julianday('now') - 7"
-            ).fetchone()[0]
-            try:
-                n_agent_runs_week = conn.execute(
-                    "SELECT COUNT(*) FROM harness_runs "
-                    "WHERE started_at >= julianday('now') - 7 "
-                    "  AND status = 'ok'"
-                ).fetchone()[0]
-            except Exception:
-                n_agent_runs_week = 0
-            # cost burned by autonomous activity this week (skill_runs + harness_runs)
-            cost_week_row = conn.execute(
-                "SELECT "
-                "  COALESCE(SUM(cost_usd), 0) "
-                "FROM skill_runs WHERE created_at >= julianday('now') - 7"
-            ).fetchone()
-            cost_week = float(cost_week_row[0] or 0.0)
-
-            # W14.13 — Mission Control daemon status. For each cron daemon,
-            # read the most-recent daemon_runs row + count of recent runs.
-            # Lets the home show "agent is doing X right now / last did Y at
-            # T / next runs at Z" instead of a static brochure.
-            # W14.18: now only wake_agent is on a cron. discover/score
-            # are tools the agent calls itself when it judges they're
-            # needed. We still expose them as "manual trigger" cards on
-            # Mission Control so the user can force-run for impatience /
-            # debugging.
-            daemon_specs = [
-                {
-                    "name": "wake_agent",
-                    "icon": "🤖",
-                    "label": "中央 agent (心跳)",
-                    "what": "每小时唤醒, 看全局自主决定干啥 (找 JD / score / "
-                            "follow up / lay low) — 整个 OfferGuide 的大脑",
-                    "schedule": "每小时 (08-22), 心跳唯一 cron",
-                },
-                {
-                    "name": "discover_new_jobs",
-                    "icon": "🔍",
-                    "label": "找新 JD (子 agent)",
-                    "what": "DiscoverySubAgent 用 9 个 verified 官方源 fetcher "
-                            "(nowcoder / 腾讯 / 百度 / 字节 / 0voice / 实习僧) "
-                            "找匹配 north star 的 JD. 平时由 agent runtime 主 agent "
-                            "自己调; 这里 ▶ 是手动触发, 等不及 cron 时用",
-                    "schedule": "由 agent runtime 主 agent 自主决定 (无独立 cron)",
-                },
-                {
-                    "name": "score_unscored_jobs",
-                    "icon": "📊",
-                    "label": "评分 + 推到 inbox",
-                    "what": "扫待评分 JD 跑 score_match, 高分预生成投递包推到 "
-                            "inbox. 由中央 agent 自己调; 这里 ▶ 是手动触发",
-                    "schedule": "由中央 agent 自主决定 (无独立 cron)",
-                },
-            ]
-            # W14.19 — alias-aware lookup. The daemon_runs table has
-            # historical rows under the OLD canonical names ("discover_jobs_via_search"
-            # / "auto_score_new_jobs") from when those were independent crons,
-            # plus the wake_agent → maintenance tool path that may write under
-            # either old OR new names depending on which dispatch wrote it.
-            # Without alias-aware query Mission Control shows "从未跑过" even
-            # when the daemon really ran (W14.18 → user thought "失败了").
-            DAEMON_NAME_ALIASES = {
-                "discover_new_jobs": ("discover_new_jobs", "discover_jobs_via_search"),
-                "score_unscored_jobs": ("score_unscored_jobs", "auto_score_new_jobs"),
-                "wake_agent": ("wake_agent",),
-            }
-            daemon_status = []
-            for spec in daemon_specs:
-                names = DAEMON_NAME_ALIASES.get(spec["name"], (spec["name"],))
-                placeholders = ",".join("?" * len(names))
-                last_row = conn.execute(
-                    f"SELECT id, started_at, ended_at, status, summary_json, error_text "
-                    f"FROM daemon_runs WHERE job_name IN ({placeholders}) "
-                    f"ORDER BY id DESC LIMIT 1",
-                    names,
-                ).fetchone()
-                runs_24h = conn.execute(
-                    f"SELECT COUNT(*) FROM daemon_runs "
-                    f"WHERE job_name IN ({placeholders}) "
-                    f"  AND started_at >= julianday('now') - 1",
-                    names,
-                ).fetchone()[0]
-                last = None
-                if last_row:
-                    summary = {}
-                    with contextlib.suppress(Exception):
-                        summary = json.loads(last_row[4] or "{}")
-                    last = {
-                        "id": last_row[0],
-                        "started_at": last_row[1],
-                        "ended_at": last_row[2],
-                        "status": last_row[3],
-                        "summary": summary,
-                        "error_text": last_row[5],
-                    }
-                daemon_status.append({**spec, "last": last, "runs_24h": runs_24h})
-
-            # Recent daemon activity timeline (last 8 entries across all daemons)
-            timeline_rows = conn.execute(
-                "SELECT id, job_name, started_at, ended_at, status, "
-                "       summary_json, error_text "
-                "FROM daemon_runs ORDER BY id DESC LIMIT 8"
-            ).fetchall()
-            activity_timeline = []
-            for r in timeline_rows:
-                summary = {}
-                with contextlib.suppress(Exception):
-                    summary = json.loads(r[5] or "{}")
-                activity_timeline.append({
-                    "id": r[0], "job_name": r[1],
-                    "started_at": r[2], "ended_at": r[3],
-                    "status": r[4], "summary": summary,
-                    "error_text": r[6],
-                })
-
-        # State-machine for the next-step card:
-        #   no goal & no job  → set a goal OR paste a JD (parallel paths)
-        #   goal but no job   → emphasize "add a JD now" (the actual blocker)
-        #   job but no app    → "go generate a 投递包" (one click away)
-        #   has applications  → "wake agent for review" (let model drive)
-        next_step = None
-        if not latest_run and (n_active_goals == 0 and n_jobs == 0):
-            next_step = {
-                "kind": "first_use",
-                "title": "👋 第一次用? 这里有两条路, 哪条都行",
-            }
-        elif n_active_goals > 0 and n_jobs == 0:
-            next_step = {
-                "kind": "need_jd",
-                "title": "🎯 Goal 设好了, 现在缺 JD — 30 秒粘一个就开始",
-            }
-        elif n_jobs > 0 and n_apps_active == 0 and n_apps_offer == 0:
-            next_step = {
-                "kind": "have_jd",
-                "title": "📋 已经有 JD 在 pipeline, 去生成投递包 / 调简历",
-                "latest_job_id": latest_job_id,
-            }
-
-        # W15.9 — surface the agent's worldview as the centerpiece of home.
-        # This is the "心智窗口" — what the agent actually thinks about the
-        # user / their job hunt right now. Read the markdown files the agent
-        # owns; show snippets so the user can read agent's brain at a glance.
-        worldview_summary: dict[str, str] = {}
-        worldview_files: list[str] = []
-        try:
-            from ..agent_runtime import MemoryStore, default_worldview_dir
-            wdir = default_worldview_dir(settings)
-            mstore = MemoryStore(root=wdir)
-            for fname in ("MEMORY.md", "candidate.md", "tracked-jobs.md", "upcoming-events.md"):
-                fpath = wdir / fname
-                if fpath.exists():
-                    text = fpath.read_text(encoding="utf-8")
-                    # First 60 lines is enough for at-a-glance — full file at /worldview/<fname>
-                    lines = text.splitlines()[:60]
-                    worldview_summary[fname] = "\n".join(lines)
-            worldview_files = mstore.list_files()
-        except Exception as e:
-            log.debug("worldview load failed (non-fatal): %s", e)
-
-        # Recent harness runs — 5 most recent for "agent 最近做了啥" strip
-        harness_runs_recent: list[dict[str, Any]] = []
-        try:
-            with store.connect() as conn:
-                rows = conn.execute(
-                    "SELECT id, trigger_kind, started_at, ended_at, "
-                    "       iterations, status, final_text, cost_usd "
-                    "FROM harness_runs ORDER BY started_at DESC LIMIT 5"
-                ).fetchall()
-            for r in rows:
-                harness_runs_recent.append({
-                    "id": int(r[0]), "trigger_kind": r[1],
-                    "started_at": r[2], "ended_at": r[3],
-                    "iterations": int(r[4] or 0), "status": r[5],
-                    "final_text": (r[6] or "")[:200],
-                    "cost_usd": float(r[7] or 0.0),
-                })
-        except Exception:
-            pass  # harness_runs table may not exist yet
-
-        return templates.TemplateResponse(
-            request,
-            "home.html",
-            _ctx(
-                request,
-                latest_run=latest_run,
-                suggestions=suggestions,
-                stats={
-                    "jobs": n_jobs,
-                    "active_apps": n_apps_active,
-                    "offers": n_apps_offer,
-                    "pending_inbox": n_pending_inbox,
-                },
-                next_step=next_step,
-                weekly={
-                    "jobs_auto_found": n_jobs_auto_found_week,
-                    "score_runs": n_score_runs_week,
-                    "suggestions": n_suggestions_week,
-                    "agent_runs": n_agent_runs_week,
-                    "cost_usd": cost_week,
-                },
-                daemon_status=daemon_status,
-                activity_timeline=activity_timeline,
-                pending_questions=pending_questions,
-                worldview_summary=worldview_summary,
-                worldview_files=worldview_files,
-                harness_runs_recent=harness_runs_recent,
-                runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
-                active_tab="home",
-            ),
-        )
-
-    @app.post("/api/scheduler/trigger/{job_name}", response_class=JSONResponse)
-    def manual_trigger_daemon(job_name: str) -> Any:
-        """W14.13 — let the user manually trigger a scheduler daemon now,
-        instead of waiting for the next cron tick. Used by the Mission
-        Control cards on home so "show me what discover_jobs would find
-        right now" is a single click.
-
-        Whitelist enforced — only daemons with a clear human-trigger
-        meaning. Internal/maintenance jobs aren't exposed via this route.
-        """
-        # W14.18: accept both old (cron) names and new (agent-tool) names
-        # so old links keep working + new home cards work.
-        ALIASES = {
-            "discover_new_jobs": "discover_jobs_via_search",
-            "score_unscored_jobs": "auto_score_new_jobs",
-        }
-        canonical = ALIASES.get(job_name, job_name)
-        VALID = {"discover_jobs_via_search", "auto_score_new_jobs", "wake_agent"}
-        if canonical not in VALID:
-            raise HTTPException(404, f"unknown daemon: {job_name}")
-        job_name = canonical  # use canonical for downstream dispatch + recording
-        if not settings.deepseek_api_key:
-            raise HTTPException(400, "需要先配 LLM key (.env)")
-        if runtime is None:
-            raise HTTPException(400, "SkillRuntime 没初始化 (检查 LLM 配置)")
-
-        # W15.7: route through the harness instead of the deleted W14
-        # daemon helpers. The endpoint preserves the daemon_runs telemetry
-        # contract (mission control timeline) but executes via harness.
-        from ..agentic.search import build_default_search
-        from ..agent_runtime import (
-            AgentRuntimeDeps,
-            MemoryStore,
-            default_worldview_dir,
-            make_user_input_trigger,
-        )
-        from ..agent_runtime import _schema as _harness_schema
-        from ..agent_runtime import run as agent_runtime_run
-
-        llm = LLMClient(
-            api_key=settings.deepseek_api_key,
-            base_url=settings.deepseek_base_url,
-            default_model=settings.default_model,
-        )
-        try:
-            search = build_default_search()
-        except Exception:
-            search = None
-        _harness_schema.init_agent_runtime_schema(store)
-        deps = AgentRuntimeDeps(
-            settings=settings,
-            store=store,
-            memory_store=MemoryStore(root=default_worldview_dir(settings)),
-            llm=llm,
-            runtime=runtime,
-            skills=skills,
-            search=search,
-            notifier=notifier,
-            user_profile_text=profile.raw_resume_text if profile else None,
-        )
-
-        # Record a daemon_runs row for this manual trigger so the
-        # Mission Control activity timeline still shows it (UI legacy).
-        with store.connect() as conn:
-            cur = conn.execute(
-                "INSERT INTO daemon_runs(job_name, status, summary_json) "
-                "VALUES (?, 'running', '{}') RETURNING id",
-                (job_name,),
-            )
-            run_id = int(cur.fetchone()[0])
-
-        # Map old daemon names to a user-input goal the agent runtime runs
-        if job_name == "discover_jobs_via_search":
-            user_msg = "(manual trigger) 帮我用 discover_jobs 找几个新岗位."
-        elif job_name == "auto_score_new_jobs":
-            user_msg = "(manual trigger) 给最近还没 score 的 jobs 跑 score_match."
-        else:  # wake_agent
-            user_msg = "(manual trigger) 看下当前状态自己决定干啥."
-
-        try:
-            res = agent_runtime_run(
-                trigger=make_user_input_trigger(user_msg), deps=deps,
-                max_iterations=15,
-            )
-            result = {
-                "harness_run_id": res.run_id,
-                "iterations": res.iterations,
-                "finish": res.finish_reason,
-                "cost_usd": round(res.cost_usd, 4),
-            }
-            with store.connect() as conn:
-                conn.execute(
-                    "UPDATE daemon_runs SET status='ok', "
-                    "  ended_at=julianday('now'), summary_json=? WHERE id=?",
-                    (json.dumps(result, ensure_ascii=False, default=str)[:4000], run_id),
-                )
-            return {"job": job_name, "result": result, "run_id": run_id}
-        except Exception as e:
-            with store.connect() as conn:
-                conn.execute(
-                    "UPDATE daemon_runs SET status='error', "
-                    "  ended_at=julianday('now'), error_text=? WHERE id=?",
-                    (str(e)[:500], run_id),
-                )
-            raise HTTPException(500, f"daemon failed: {e}") from None
-        finally:
-            with contextlib.suppress(Exception):
-                llm.close()
+    def home_legacy(_request: Request) -> Any:
+        return RedirectResponse(url="/", status_code=301)
 
     @app.post("/api/home/wake-agent", response_class=JSONResponse)
     async def home_wake_agent(request: Request) -> Any:
@@ -828,7 +603,8 @@ def create_app(
                 memory_store=MemoryStore(root=default_worldview_dir(settings)),
                 llm=llm, runtime=runtime, skills=skills,
                 search=_search, notifier=notifier,
-                user_profile_text=profile.raw_resume_text if profile else None,
+                user_profile_text=_effective_master_text(),
+                research_agents=research_agents,
             )
             import asyncio
             result = await asyncio.to_thread(
@@ -895,7 +671,8 @@ def create_app(
                 memory_store=MemoryStore(root=default_worldview_dir(settings)),
                 llm=llm, runtime=runtime, skills=skills,
                 search=_search, notifier=notifier,
-                user_profile_text=profile.raw_resume_text if profile else None,
+                user_profile_text=_effective_master_text(),
+                research_agents=research_agents,
             )
             import asyncio as _asyncio
             res = await _asyncio.to_thread(
@@ -907,6 +684,30 @@ def create_app(
         finally:
             with contextlib.suppress(Exception):
                 llm.close()
+        research_followup = None
+        if res.run_id is not None:
+            with store.connect() as conn:
+                invocation_row = conn.execute(
+                    "SELECT id, subject_kind, subject_id, status, message "
+                    "FROM research_agent_invocations "
+                    "WHERE status IN ('queued', 'running') "
+                    "OR created_at >= COALESCE(("
+                    "SELECT started_at FROM harness_runs WHERE id = ?"
+                    "), julianday('now')) "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (res.run_id,),
+                ).fetchone()
+            if invocation_row is not None:
+                followup_status = str(invocation_row[3])
+                research_followup = {
+                    "id": str(invocation_row[0]),
+                    "status": followup_status,
+                    "message": str(invocation_row[4] or ""),
+                    "result_url": _research_invocation_result_url(
+                        str(invocation_row[1]), str(invocation_row[2])
+                    ),
+                    "terminal": followup_status not in {"queued", "running"},
+                }
         return {
             "run_id": res.run_id,
             "iterations": res.iterations,
@@ -914,159 +715,146 @@ def create_app(
             "final_text": res.final_text[:2000],
             "tool_calls": res.tool_call_log[-10:],
             "cost_usd": round(res.cost_usd, 4),
+            "research_invocation": research_followup,
         }
 
-    @app.post("/api/evaluate-job", response_class=JSONResponse)
-    async def evaluate_job_endpoint(request: Request) -> Any:
-        """W15.14 hero flow: paste a JD URL/text → structured evaluation.
-
-        Bypasses agent loop for speed (~10-20s vs 30-90s) since this is
-        a user-driven flow where we KNOW we want fetch + score + tailor.
-        Returns structured JSON the frontend renders as cards (not a
-        raw markdown blob from agent's final_text).
-        """
-        if not settings.deepseek_api_key:
-            raise HTTPException(400, "需要先配 LLM key (.env)")
-        if runtime is None:
-            raise HTTPException(400, "SkillRuntime 未初始化")
+    @app.post("/api/jobs/manual", response_class=JSONResponse)
+    async def create_manual_job(request: Request) -> Any:
+        """Manual JD fallback: preserve the complete input and open one workspace."""
         body = await request.json()
         url_or_text = (body.get("url_or_text") or "").strip()
-        if not url_or_text:
-            raise HTTPException(400, "url_or_text 不能为空")
-        if len(url_or_text) > 50_000:
-            raise HTTPException(400, "JD 文本太长 (max 50K 字符)")
-        company_hint = (body.get("company_hint") or "").strip() or None
-        title_hint = (body.get("title_hint") or "").strip() or None
-
-        from ..agent_runtime import (
-            AgentRuntimeDeps,
-            MemoryStore,
-            default_worldview_dir,
-        )
-        from ..agent_runtime import _schema as _hs
-        from ..agent_runtime.evaluate import evaluate_job
-        _hs.init_agent_runtime_schema(store)
-        deps = AgentRuntimeDeps(
-            settings=settings, store=store,
-            memory_store=MemoryStore(root=default_worldview_dir(settings)),
-            llm=LLMClient(
-                api_key=settings.deepseek_api_key,
-                base_url=settings.deepseek_base_url,
-                default_model=settings.default_model,
-            ),
-            runtime=runtime, skills=skills,
-            user_profile_text=profile.raw_resume_text if profile else None,
-            notifier=notifier,
-        )
-        import asyncio as _asyncio
         try:
-            result = await _asyncio.to_thread(
-                evaluate_job,
-                url_or_text=url_or_text, deps=deps,
-                company_hint=company_hint, title_hint=title_hint,
+            result = await asyncio.to_thread(
+                intake_manual_job,
+                store=store,
+                source_store=interview_source_store,
+                source_reader=getattr(research_agents, "source_reader", None),
+                url_or_text=url_or_text,
+                company_hint=str(body.get("company_hint") or ""),
+                title_hint=str(body.get("title_hint") or ""),
+                location_hint=str(body.get("location_hint") or ""),
+                source_url=(str(body.get("source_url") or "").strip() or None),
             )
-        finally:
-            with contextlib.suppress(Exception):
-                if deps.llm:
-                    deps.llm.close()
-        return result.to_dict()
-
-    @app.get("/api/keywords", response_class=JSONResponse)
-    def keywords_list() -> Any:
-        """Current user-managed include/exclude keyword lists for /recommended."""
-        from .. import user_keywords as _uk
-        inc, exc = _uk.list_keywords(store)
+        except ManualJobIntakeError as exc:
+            status = 422 if url_or_text.startswith(("http://", "https://")) else 400
+            raise HTTPException(status, str(exc)) from None
         return {
-            "includes": [{"id": k.id, "keyword": k.keyword} for k in inc],
-            "excludes": [{"id": k.id, "keyword": k.keyword} for k in exc],
+            "job_id": result.job_id,
+            "is_new": result.is_new,
+            "company": result.company,
+            "title": result.title,
+            "source_evidence_id": result.source_evidence_id,
+            "apply_pack_url": f"/jobs/{result.job_id}/apply-pack",
         }
 
-    @app.post("/api/keywords", response_class=JSONResponse)
-    async def keywords_add(request: Request) -> Any:
-        """Add an include/exclude keyword. Body: ``{keyword, kind}``.
-
-        ``kind='include'`` — ambient discovery loop will rotate this into
-        the per-cycle keyword set (verified-official + shixiseng fetchers).
-        ``kind='exclude'`` — /recommended hides cards whose JD text matches.
-        """
-        from .. import user_keywords as _uk
+    def _application_for_job(self_job_id: int, *, create: bool) -> int | None:
+        """Return the one active application row for a selected job."""
         try:
-            body = await request.json()
-        except Exception:
-            raise HTTPException(400, "JSON body required") from None
-        keyword = (body.get("keyword") or "").strip()
-        kind = body.get("kind") or "include"
-        if not keyword:
-            raise HTTPException(400, "keyword 不能为空")
-        if kind not in ("include", "exclude"):
-            raise HTTPException(400, "kind must be 'include' or 'exclude'")
-        try:
-            was_new, kid = _uk.add_keyword(store, keyword=keyword, kind=kind)
-        except ValueError as e:
-            raise HTTPException(400, str(e)) from None
-        return {"id": kid, "keyword": keyword, "kind": kind, "added": was_new}
+            application_id, _ = ResumeWorkspaceRepository(store).application_for_job(
+                self_job_id,
+                create=create,
+            )
+        except WorkspaceNotFoundError:
+            raise HTTPException(404, f"job#{self_job_id} not found") from None
+        except ResumeWorkspaceError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return application_id
+    def _write_apply_pack(
+        job_snapshot: dict[str, Any],
+        context: Any,
+        editor_result: Any,
+    ) -> dict[str, Any]:
+        return generate_application_package(
+            runtime=runtime,
+            skills=skills,
+            job_snapshot=job_snapshot,
+            context=context,
+            editor_result=editor_result,
+        )
 
-    @app.delete("/api/keywords/{kid}", response_class=JSONResponse)
-    def keywords_remove(kid: int) -> Any:
-        """Remove one user keyword by id."""
-        from .. import user_keywords as _uk
-        removed = _uk.remove_keyword(store, kid)
-        if not removed:
-            raise HTTPException(404, f"keyword#{kid} not found")
-        return {"id": kid, "removed": True}
+    def _resume_workflow() -> ResumeWorkflow:
+        if master_source is None:
+            raise HTTPException(409, "未加载 master PDF，请先配置 OFFERGUIDE_RESUME_PDF")
+        if resume_editor is None:
+            raise HTTPException(409, "简历编辑模型未配置")
+        return ResumeWorkflow(
+            store=store,
+            master_source=master_source,
+            editor=resume_editor,
+            visual_editor=visual_resume_editor,
+            apply_pack_writer=_write_apply_pack,
+            artifact_root=(
+                settings.db_path.expanduser().resolve().parent / "resume_workspaces"
+            ),
+        )
 
-    @app.post("/api/jobs/{job_id}/report-dead", response_class=JSONResponse)
-    async def report_dead_job(job_id: int, request: Request) -> Any:
-        """User clicked "失效 →" on a /recommended card — mark this row dead.
+    def _submitted_interview_target(application_id: int) -> tuple[int, Any]:
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT job_id FROM applications WHERE id = ?",
+                (application_id,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"application#{application_id} not found")
+        workspace = ResumeWorkspaceRepository(store).get(application_id)
+        if workspace is None or not workspace.is_submitted:
+            raise HTTPException(409, "面试研究只接受已经实际提交并冻结的投递版本")
+        return int(row[0]), workspace
 
-        Background: ingest captures a JD URL at crawl-time; platforms (especially
-        nowcoder) take down listings days later. The user discovers it as "查无
-        此岗" and would otherwise be stuck seeing the dead card on every visit.
+    def _maybe_enqueue_interview_research(
+        *,
+        application_id: int,
+        workspace_id: int,
+        trigger_reason: str,
+        force: bool,
+    ) -> Any:
+        if research_agents is None:
+            return None
+        subject = interview_repository.ensure_subject(application_id, workspace_id)
+        latest = research_agents.latest_interview_invocation(
+            application_id=application_id,
+            workspace_id=workspace_id,
+        )
+        if (
+            not force
+            and latest is not None
+            and latest.subject_revision == subject.agent_subject_revision
+        ):
+            return latest
+        invocation, _created = research_agents.enqueue_interview_research(
+            application_id=application_id,
+            workspace_id=workspace_id,
+            trigger_reason=trigger_reason,
+        )
+        return invocation
 
-        We don't hard-delete (preserves score history + signal attribution),
-        just stash a flag on jobs.extras_json. /recommended SQL hides any row
-        with extras.dead = true.
-        """
-        try:
-            payload = await request.json()
-        except Exception:
-            payload = {}
-        reason = (payload.get("reason") or "user reported 404 / dead url")[:200]
+    @app.get("/api/resume-workspaces/{workspace_id}/pdf")
+    def resume_workspace_pdf(workspace_id: int) -> Any:
+        from fastapi.responses import FileResponse
 
         with store.connect() as conn:
             row = conn.execute(
-                "SELECT extras_json FROM jobs WHERE id = ?", (job_id,),
+                "SELECT pdf_path, pdf_sha256 FROM resume_workspaces WHERE id = ?",
+                (workspace_id,),
             ).fetchone()
-            if row is None:
-                raise HTTPException(404, f"job#{job_id} not found")
-            try:
-                extras = json.loads(row[0] or "{}")
-                if not isinstance(extras, dict):
-                    extras = {}
-            except (json.JSONDecodeError, TypeError):
-                extras = {}
-            extras["dead"] = True
-            extras["dead_reason"] = reason
-            extras["dead_reported_at"] = (
-                __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat()
-            )
-            conn.execute(
-                "UPDATE jobs SET extras_json = ? WHERE id = ?",
-                (json.dumps(extras, ensure_ascii=False), job_id),
-            )
-
-        # Log as a harness event so the agent learns 'this source returned a
-        # dead URL' — input for downstream quality decisions.
-        from ..agent_runtime import _schema as _hs
-        _hs.init_agent_runtime_schema(store)
-        with store.connect() as conn:
-            conn.execute(
-                "INSERT INTO harness_events(kind, job_id, note, source) "
-                "VALUES (?, ?, ?, ?)",
-                ("dead_url_reported", job_id, reason, "user"),
-            )
-        return {"job_id": job_id, "marked_dead": True}
-
+        if row is None or not row[0] or not row[1]:
+            raise HTTPException(404, "resume PDF not found")
+        path = Path(str(row[0])).expanduser().resolve()
+        allowed_root = settings.db_path.expanduser().resolve().parent / "resume_workspaces"
+        if allowed_root != path and allowed_root not in path.parents:
+            raise HTTPException(400, "resume PDF is outside the artifact directory")
+        if not path.is_file():
+            raise HTTPException(404, "resume PDF file missing")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != str(row[1]):
+            raise HTTPException(409, "resume PDF failed its integrity check")
+        return FileResponse(
+            path,
+            media_type="application/pdf",
+            filename=path.name,
+            content_disposition_type="inline",
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
 
     @app.post("/api/jobs/{job_id}/track", response_class=JSONResponse)
     def track_job(job_id: int, request: Request) -> Any:
@@ -1078,23 +866,18 @@ def create_app(
 
         Idempotent: if already tracked, returns existing application_id.
         """
-        with store.connect() as conn:
-            row = conn.execute(
-                "SELECT id FROM jobs WHERE id = ?", (job_id,),
-            ).fetchone()
-            if row is None:
-                raise HTTPException(404, f"job#{job_id} not found")
-            existing = conn.execute(
-                "SELECT id FROM applications WHERE job_id = ?", (job_id,),
-            ).fetchone()
-            if existing:
-                return {"application_id": int(existing[0]), "created": False}
-            cur = conn.execute(
-                "INSERT INTO applications(job_id, status) VALUES (?, 'considering') "
-                "RETURNING id",
-                (job_id,),
+        try:
+            application_id, created = ResumeWorkspaceRepository(store).application_for_job(
+                job_id,
+                create=True,
             )
-            app_id = int(cur.fetchone()[0])
+        except WorkspaceNotFoundError:
+            raise HTTPException(404, f"job#{job_id} not found") from None
+        except ResumeWorkspaceError as exc:
+            raise HTTPException(409, str(exc)) from None
+        assert application_id is not None
+        if not created:
+            return {"application_id": application_id, "created": False}
 
         # Also fire a harness event so agent knows next wake
         from ..agent_runtime import _schema as _hs
@@ -1105,95 +888,65 @@ def create_app(
                 "VALUES (?, ?, ?, ?)",
                 ("user_tracked", job_id, "user clicked '加入跟踪'", "user"),
             )
-        return {"application_id": app_id, "created": True}
+        return {"application_id": application_id, "created": True}
 
     @app.post("/api/jobs/{job_id}/applied", response_class=JSONResponse)
     def mark_applied(job_id: int, request: Request) -> Any:
-        """W15.14: user clicks "已投" on a job — track + transition status.
+        """Freeze the reviewed package only after the user confirms submission."""
+        from ..resume import ResumeWorkspaceError, ResumeWorkspaceRepository
 
-        Idempotent. Triggers a 7-day-out scheduled wake so agent
-        proactively checks for response (true ambient ownership).
-        """
+        application_id = _application_for_job(job_id, create=False)
+        if application_id is None:
+            raise HTTPException(409, "请先生成并审核投递包，再确认“我投了”")
+
         with store.connect() as conn:
-            row = conn.execute(
-                "SELECT id FROM jobs WHERE id = ?", (job_id,),
-            ).fetchone()
-            if row is None:
-                raise HTTPException(404, f"job#{job_id} not found")
-            existing = conn.execute(
-                "SELECT id, status FROM applications WHERE job_id = ?", (job_id,),
-            ).fetchone()
-            if existing:
-                app_id = int(existing[0])
+            already_submitted = (
                 conn.execute(
-                    "UPDATE applications SET status = 'applied', "
-                    "  applied_at = COALESCE(applied_at, julianday('now')) "
-                    "WHERE id = ?", (app_id,),
-                )
-            else:
-                cur = conn.execute(
-                    "INSERT INTO applications(job_id, status, applied_at) "
-                    "VALUES (?, 'applied', julianday('now')) RETURNING id",
-                    (job_id,),
-                )
-                app_id = int(cur.fetchone()[0])
-
-        # Schedule a 7-day-out wake to check for response. This wires
-        # the "agent ownership" promise: after user marks applied, the
-        # agent will proactively wake to check status without user nag.
-        from ..agent_runtime import _schema as _hs
-        _hs.init_agent_runtime_schema(store)
-        with store.connect() as conn:
-            # 7 days = 7.0 in julianday delta
-            conn.execute(
-                "INSERT INTO harness_scheduled_wakes(fire_at, reason) "
-                "VALUES (julianday('now') + 7, ?)",
-                (f"check job#{job_id} response 7 days after user applied",),
-            )
-            conn.execute(
-                "INSERT INTO harness_events(kind, job_id, note, source) "
-                "VALUES (?, ?, ?, ?)",
-                ("user_marked_applied", job_id, "user clicked '已投'", "user"),
-            )
-
-        # W20.4 — REAL signal (not LLM-judging-LLM): user actually acted on
-        # this job → record follow_through=True for the score_match SKILL run
-        # that recommended it. This is ground-truth, not opinion. Goes
-        # straight into evolution_signals (weight 0.8).
-        try:
-            from .. import evolution as _evo
-            with store.connect() as conn:
-                # Find the score_match skill_run that scored this job
-                # (most recent). harness_events.kind='scored' carries the
-                # skill_run_id in the JSON note.
-                row = conn.execute(
-                    "SELECT json_extract(note, '$.skill_run_id') as srid "
-                    "FROM harness_events "
-                    "WHERE kind = 'scored' AND job_id = ? "
-                    "ORDER BY id DESC LIMIT 1",
-                    (job_id,),
+                    "SELECT 1 FROM application_events "
+                    "WHERE application_id = ? AND kind = 'submitted' LIMIT 1",
+                    (application_id,),
                 ).fetchone()
-                if row and row[0] is not None:
-                    srid = int(row[0])
-                    # Look up the SKILL version that ran
-                    sr = conn.execute(
-                        "SELECT skill_version FROM skill_runs WHERE id = ?",
-                        (srid,),
-                    ).fetchone()
-                    if sr and sr[0]:
-                        _evo.record_follow_through(
-                            store,
-                            skill_name="score_match",
-                            skill_version=str(sr[0]),
-                            skill_run_id=srid,
-                            executed=True,
-                            notes=f"user clicked '我投了' on job#{job_id}",
-                        )
-        except Exception as e:
-            log_mod = __import__("logging").getLogger(__name__)
-            log_mod.debug("follow_through signal write failed: %s", e)
+                is not None
+            )
+        try:
+            submitted = ResumeWorkspaceRepository(store).submit(application_id)
+        except ResumeWorkspaceError as exc:
+            raise HTTPException(409, f"无法冻结投递材料: {exc}") from None
+        if not already_submitted:
+            from ..agent_runtime import _schema as _hs
 
-        return {"application_id": app_id, "next_wake": "+7d"}
+            _hs.init_agent_runtime_schema(store)
+            with store.connect() as conn:
+                conn.execute(
+                    "INSERT INTO harness_events(kind, job_id, note, source) "
+                    "VALUES ('user_marked_applied', ?, ?, 'user')",
+                    (job_id, json.dumps({"workspace_id": submitted.id})),
+                )
+        research_invocation = None
+        research_error = None
+        try:
+            interview_repository.ensure_subject(application_id, submitted.id)
+            research_invocation = _maybe_enqueue_interview_research(
+                application_id=application_id,
+                workspace_id=submitted.id,
+                trigger_reason="application submitted",
+                force=False,
+            )
+        except Exception as exc:
+            research_error = f"{type(exc).__name__}: {exc}"
+            log.exception(
+                "could not initialize interview research for application %s",
+                application_id,
+            )
+        return {
+            "application_id": application_id,
+            "workspace_id": submitted.id,
+            "workspace_status": submitted.status,
+            "interview_research_status": (
+                research_invocation.status if research_invocation is not None else None
+            ),
+            "interview_research_error": research_error,
+        }
 
     @app.get("/jobs", response_class=HTMLResponse)
     def jobs_view(request: Request) -> Any:
@@ -1228,73 +981,87 @@ def create_app(
             ),
         )
 
-    def _link_skill_to_job_and_signal(
-        *, skill_name: str, skill_run_id: int | None,
-        job_id: int, signal_kind: str,
-    ) -> None:
-        """W20.5 — write 2 things in one go (idempotent, errors swallowed):
 
-        1. ``harness_event`` linking this skill_run_id ↔ job_id (so later
-           code can find "which apply_assistant call was for this job").
-           Was missing pre-W20.5 for everything except score_match.
-        2. ``evolution_signal`` of kind 'follow_through' (real signal: user
-           opened this view = they're using the SKILL output).
-
-        Skipped silently if skill_run_id is None (SKILL didn't run, e.g.,
-        no LLM key — nothing to attribute).
-        """
-        if skill_run_id is None:
-            return
-        try:
-            with store.connect() as conn:
-                # Look up skill_version for accurate evolve attribution
-                sr = conn.execute(
-                    "SELECT skill_version FROM skill_runs WHERE id = ?",
-                    (skill_run_id,),
-                ).fetchone()
-                if not sr or not sr[0]:
-                    return
-                skill_version = str(sr[0])
-                conn.execute(
-                    "INSERT INTO harness_events(kind, job_id, note, source) "
-                    "VALUES (?, ?, ?, ?)",
-                    (
-                        signal_kind, job_id,
-                        json.dumps({
-                            "skill_run_id": skill_run_id,
-                            "skill_name": skill_name,
-                            "skill_version": skill_version,
-                        }, ensure_ascii=False),
-                        "view_visit",
-                    ),
-                )
-            from .. import evolution as _evo
-            _evo.record_follow_through(
-                store,
-                skill_name=skill_name,
-                skill_version=skill_version,
-                skill_run_id=skill_run_id,
-                executed=True,
-                notes=f"user opened view for job#{job_id}",
+    def _published_job_snapshot(
+        job_id: int,
+        *,
+        selection_revision: int | None = None,
+        job_evidence_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        repository = (
+            getattr(research_agents, "job_repository", None)
+            or JobDiscoveryRepository(store)
+        )
+        if (selection_revision is None) != (job_evidence_id is None):
+            raise HTTPException(
+                400,
+                "selection_revision 和 job_evidence_id 必须同时提供",
             )
-        except Exception as e:
-            log.debug("link_skill_to_job_and_signal failed: %s", e)
+        if selection_revision is None:
+            return None
+        selection = repository.get_selection_revision(selection_revision)
+        if selection is None:
+            raise HTTPException(409, "这条岗位选择记录已不可读取，请返回推荐页重试")
+        for item in selection.items:
+            evidence = item.job_evidence
+            if (
+                evidence is not None
+                and evidence.job_id == job_id
+                and item.job_evidence_id == job_evidence_id
+            ):
+                live_evidence = repository.get_job_evidence(item.job_evidence_id)
+                if (
+                    live_evidence is not None
+                    and live_evidence.job_id != evidence.job_id
+                ):
+                    raise HTTPException(
+                        409,
+                        "岗位证据的当前身份与用户看到的发布版本不一致",
+                    )
+                snapshot = job_snapshot_from_evidence(evidence.model_dump(mode="json"))
+                snapshot["selection_result_revision"] = selection.result_revision
+                snapshot["job_evidence_id"] = item.job_evidence_id
+                snapshot["live_source_status"] = (
+                    live_evidence.source_status
+                    if live_evidence is not None
+                    else "unknown"
+                )
+                snapshot["live_checked_at"] = (
+                    live_evidence.checked_at if live_evidence is not None else None
+                )
+                return snapshot
+        raise HTTPException(409, "岗位与用户看到的选择记录不一致，请返回推荐页重试")
 
-    @app.get("/jobs/{job_id}/apply-pack", response_class=HTMLResponse)
-    async def apply_pack_view(job_id: int, request: Request) -> Any:
-        """投递包页面 — **先微调简历, 再生成投递话术**.
+    def _apply_pack_job(
+        job_id: int,
+        *,
+        frozen_snapshot: Mapping[str, Any] | None = None,
+        selection_revision: int | None = None,
+        job_evidence_id: int | None = None,
+    ) -> dict[str, Any]:
+        if frozen_snapshot is not None:
+            snapshot = dict(frozen_snapshot)
+            snapshot_id = snapshot.get("job_id", snapshot.get("id"))
+            if str(snapshot_id) != str(job_id):
+                raise HTTPException(409, "投递工作区的岗位快照与当前岗位不一致")
+            snapshot["id"] = job_id
+            snapshot["job_id"] = job_id
+            snapshot["raw_text"] = str(
+                snapshot.get("raw_text") or snapshot.get("jd_text") or ""
+            )
+            snapshot["url"] = str(
+                snapshot.get("url") or snapshot.get("canonical_url") or ""
+            )
+            return snapshot
 
-        CLAUDE.md 主流程:
-            agent[找岗位] → /recommended → 用户挑 →
-            [投递包: 微调简历 + 自我介绍 + 网申 QA + 内推码] →
-            用户去官网投
+        published = _published_job_snapshot(
+            job_id,
+            selection_revision=selection_revision,
+            job_evidence_id=job_evidence_id,
+        )
+        if published is not None:
+            return {"id": job_id, **published}
 
-        实现:
-        - 并行跑 tailor_resume (针对此 JD 的简历) + apply_assistant
-          (自我介绍 + Q&A) 两个 SKILL
-        - 两个都走 use_cache=True, 第一次冷启动 ~30-40s, 之后秒开
-        - 模板顶部先渲染 tailored 简历 + diff, 然后才是网申话术
-        """
         with store.connect() as conn:
             row = conn.execute(
                 "SELECT id, title, company, location, url, raw_text, source, extras_json "
@@ -1303,426 +1070,1020 @@ def create_app(
             ).fetchone()
         if row is None:
             raise HTTPException(404, f"job#{job_id} 不存在")
-        job = {
-            "id": int(row[0]), "title": row[1] or "", "company": row[2] or "",
-            "location": row[3] or "", "url": row[4] or "",
-            "raw_text": row[5] or "",
-            "source": row[6] or "", "extras_json": row[7] or "{}",
-        }
-        application_plan = build_application_plan(job)
-
-        # Run tailor_resume + apply_assistant concurrently. Both are LLM
-        # calls (~15-25s each cold) so gather() halves wall time. Cached
-        # invocations short-circuit instantly so warm visits stay snappy.
-        import asyncio as _asyncio
-
-        from .. import project_vault as _pv
-        from ..agent_runtime.tools import _format_jd_for_skill
-        from ..skill_view import invoke_skill_for_view
-
-        tailor_task = invoke_skill_for_view(
-            skill_name="tailor_resume",
-            inputs_builder=lambda _spec, p: {
-                "master_resume": _pv.append_to_profile_text(
-                    store, p.raw_resume_text, max_project_chars=3500,
-                )[:9000],
-                "job_text": _format_jd_for_skill(job)[:5000],
-                "company": job["company"],
-                "successful_profile_json": "{}",
-            },
-            settings=settings, profile=profile, runtime=runtime,
-            skills=skills, store=store,
-        )
-        apply_task = invoke_skill_for_view(
-            skill_name="apply_assistant",
-            inputs_builder=lambda _spec, p: {
-                "company": job["company"],
-                "role_focus": job["title"],
-                "job_text": _format_jd_for_skill(job)[:5000],
-                "user_profile": p.raw_resume_text[:5000],
-            },
-            settings=settings, profile=profile, runtime=runtime,
-            skills=skills, store=store,
-        )
-        tailor_result, apply_result = await _asyncio.gather(tailor_task, apply_task)
-
-        # Link both SKILL runs to the job for evolution signal attribution.
-        _link_skill_to_job_and_signal(
-            skill_name="tailor_resume", skill_run_id=tailor_result.skill_run_id,
-            job_id=job_id, signal_kind="apply_pack_generated",
-        )
-        _link_skill_to_job_and_signal(
-            skill_name="apply_assistant", skill_run_id=apply_result.skill_run_id,
-            job_id=job_id, signal_kind="apply_pack_generated",
-        )
-        return templates.TemplateResponse(
-            request, "apply_pack.html",
-            _ctx(request, job=job, application_plan=application_plan,
-                 pack=apply_result.parsed, error=apply_result.error,
-                 raw=apply_result.raw_text,
-                 skill_run_id=apply_result.skill_run_id,
-                 cost_usd=(apply_result.cost_usd or 0) + (tailor_result.cost_usd or 0),
-                 duration_ms=max(apply_result.duration_ms or 0,
-                                 tailor_result.duration_ms or 0),
-                 tailored=tailor_result.parsed,
-                 tailor_error=tailor_result.error,
-                 tailor_run_id=tailor_result.skill_run_id,
-                 active_tab="recommended"),
-        )
-
-    @app.get("/jobs/{job_id}/post-apply-pack", response_class=HTMLResponse)
-    async def post_apply_pack_view(job_id: int, request: Request) -> Any:
-        """W15.23 — 投后包页面 (用户点'我投了'后跳转过来).
-
-        跑 prepare_interview SKILL 出: 公司画像 + 高频题 (校准过的概率) +
-        备战重点 + 弱点. 也搜 interview_corpus 里的真实面经 (如果有抓过).
-
-        SKILL 输入 verified W15.22: (company, job_text, user_profile, past_experiences).
-        """
-        with store.connect() as conn:
-            row = conn.execute(
-                "SELECT id, title, company, location, url, raw_text "
-                "FROM jobs WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-        if row is None:
-            raise HTTPException(404, f"job#{job_id} 不存在")
-        job = {
-            "id": int(row[0]), "title": row[1] or "", "company": row[2] or "",
-            "location": row[3] or "", "url": row[4] or "",
-            "raw_text": row[5] or "",
-        }
-
-        # Pull past experiences from interview_corpus (if any)
-        past_experiences_text = ""
-        try:
-            from .. import interview_corpus
-            experiences = interview_corpus.fetch_for_company(
-                store, job["company"], limit=8,
+        if str(row[6] or "") != "manual":
+            raise HTTPException(
+                409,
+                "Agent 找到的岗位必须从带版本的岗位选择入口进入；"
+                "只有用户手动补充的 JD 可以仅使用 job_id",
             )
-            if experiences:
-                past_experiences_text = interview_corpus.render_snippets(
-                    experiences, max_chars=4000,
-                )
-        except Exception as e:
-            log.debug("post_apply_pack: interview_corpus lookup failed: %s", e)
+        try:
+            extras = json.loads(str(row[7] or "{}"))
+        except (json.JSONDecodeError, TypeError):
+            extras = {"unparsed_extras": str(row[7] or "")}
+        return {
+            "id": int(row[0]),
+            "title": str(row[1] or ""),
+            "company": str(row[2] or ""),
+            "location": str(row[3] or ""),
+            "url": str(row[4] or ""),
+            "raw_text": str(row[5] or ""),
+            "source": str(row[6] or ""),
+            "extras": extras if isinstance(extras, dict) else {"value": extras},
+        }
 
-        # W19 — invoke prepare_interview via reusable helper.
-        # SKILL inputs verified W15.22:
-        #   (company, job_text, user_profile, past_experiences)
-        from .. import project_vault as _pv
-        from ..agent_runtime.tools import _format_jd_for_skill
-        from ..skill_view import invoke_skill_for_view
+    def _ensure_new_workspace_allowed(job: Mapping[str, Any]) -> None:
+        if job.get("live_source_status") == "closed":
+            raise HTTPException(
+                409,
+                "该岗位最近一次检查显示已关闭，不能新建投递工作区",
+            )
 
-        result = await invoke_skill_for_view(
-            skill_name="prepare_interview",
-            inputs_builder=lambda _spec, p: {
-                "company": job["company"],
-                "job_text": _format_jd_for_skill(job)[:5000],
-                "user_profile": _pv.append_to_profile_text(
-                    store, p.raw_resume_text, max_project_chars=3500,
-                )[:8500],
-                "past_experiences": past_experiences_text or "(无过往面经)",
-            },
-            settings=settings, profile=profile, runtime=runtime,
-            skills=skills, store=store,
-        )
-        # W20.5 — link SKILL→job + follow_through signal (user opened view).
-        _link_skill_to_job_and_signal(
-            skill_name="prepare_interview", skill_run_id=result.skill_run_id,
-            job_id=job_id, signal_kind="post_apply_pack_generated",
-        )
-        return templates.TemplateResponse(
-            request, "post_apply_pack.html",
-            _ctx(request, job=job, pack=result.parsed,
-                 error=result.error, raw=result.raw_text,
-                 skill_run_id=result.skill_run_id,
-                 cost_usd=result.cost_usd, duration_ms=result.duration_ms,
-                 past_experiences_chars=len(past_experiences_text),
-                 active_tab="recommended"),
-        )
-
-    @app.get("/recommended", response_class=HTMLResponse)
-    def recommended_view(request: Request) -> Any:
-        """W15.21 + W17 — ranked feed with recruit-type filter.
-
-        W17: 应届校招用户(2027 届统计专硕) 主流程要分清:
-        - **暑期实习** (5-9 月入职, 通常带转正) ← 5 月节奏的核心
-        - **日常实习** (任何时间, 不一定转正)
-        - **校招正式** (秋招主体, 9-10 月开)
-        - **社招** (社会招聘, 应届生不该投)
-
-        Filter via ?type=summer|daily|fulltime|social|all (default: intern =
-        summer+daily, 5 月节奏的应届生默认看的就是这两个).
-        """
-        from ..recruit_type import (
-            LABEL_ZH as RECRUIT_LABEL_ZH,
-        )
-        from ..recruit_type import (
-            classify_recruit_type,
-        )
+    def _application_entry_urls(job_ids: set[int]) -> dict[int, str | None]:
+        """Resolve safe apply-pack links for non-recommendation UI surfaces."""
+        if not job_ids:
+            return {}
+        placeholders = ",".join("?" for _ in job_ids)
+        values = tuple(sorted(job_ids))
         with store.connect() as conn:
             rows = conn.execute(
-                "SELECT j.id, j.title, j.company, j.location, j.url, "
-                "       j.source, j.fetched_at, j.extras_json, "
-                "       COALESCE(a.status, 'new') as app_status "
-                "FROM jobs j "
-                "LEFT JOIN applications a ON a.job_id = j.id "
-                "WHERE a.status IS NULL "
-                "   OR a.status IN ('considered', 'evaluated') "
-                "ORDER BY j.fetched_at DESC "
-                "LIMIT 400"
+                f"SELECT id, source FROM jobs WHERE id IN ({placeholders})",
+                values,
+            ).fetchall()
+            workspace_job_ids = {
+                int(row[0])
+                for row in conn.execute(
+                    f"SELECT DISTINCT a.job_id FROM applications AS a "
+                    f"JOIN resume_workspaces AS rw ON rw.application_id = a.id "
+                    f"WHERE a.job_id IN ({placeholders})",
+                    values,
+                ).fetchall()
+            }
+        sources = {int(row[0]): str(row[1] or "") for row in rows}
+        repository = (
+            getattr(research_agents, "job_repository", None)
+            or JobDiscoveryRepository(store)
+        )
+        selection = repository.get_current_selection()
+        selected_by_job = {
+            item.job_evidence.job_id: item
+            for item in (selection.items if selection is not None else ())
+            if item.job_evidence is not None and item.job_evidence.job_id is not None
+        }
+        urls: dict[int, str | None] = {}
+        for job_id in job_ids:
+            if job_id in workspace_job_ids or sources.get(job_id) == "manual":
+                urls[job_id] = f"/jobs/{job_id}/apply-pack"
+                continue
+            selected = selected_by_job.get(job_id)
+            if selected is None or selection is None:
+                urls[job_id] = None
+                continue
+            live = repository.get_job_evidence(selected.job_evidence_id)
+            if live is not None and live.source_status == "closed":
+                urls[job_id] = None
+                continue
+            urls[job_id] = (
+                f"/jobs/{job_id}/apply-pack"
+                f"?selection_revision={selection.result_revision}"
+                f"&job_evidence_id={selected.job_evidence_id}"
+            )
+        return urls
+
+    def _application_resources(
+        application_ids: set[int] | None = None,
+    ) -> dict[int, dict[str, Any]]:
+        """Return the one durable apply-pack/interview entry for each application."""
+        params: tuple[int, ...] = ()
+        where_clause = ""
+        if application_ids is not None:
+            if not application_ids:
+                return {}
+            params = tuple(sorted(application_ids))
+            where_clause = (
+                "WHERE a.id IN (" + ",".join("?" for _ in params) + ")"
+            )
+        with store.connect() as conn:
+            rows = conn.execute(
+                "SELECT a.id, a.job_id, j.company, j.title, rw.id, rw.status, "
+                "rw.updated_at, rw.submitted_at, irc.current_result_revision, "
+                "material.answer_set_json, material.created_at "
+                "FROM applications AS a "
+                "JOIN jobs AS j ON j.id = a.job_id "
+                "LEFT JOIN resume_workspaces AS rw ON rw.application_id = a.id "
+                "LEFT JOIN interview_research_contexts AS irc "
+                "ON irc.workspace_id = rw.id AND irc.application_id = a.id "
+                "LEFT JOIN interview_answer_set_revisions AS material "
+                "ON material.workspace_id = rw.id "
+                "AND material.result_revision = irc.current_result_revision "
+                f"{where_clause} ORDER BY a.id DESC",
+                params,
+            ).fetchall()
+            invocation_rows = conn.execute(
+                "SELECT id, subject_id, status, message, error_text, updated_at "
+                "FROM research_agent_invocations "
+                "WHERE agent_name = 'interview_research_agent' "
+                "ORDER BY created_at DESC"
             ).fetchall()
 
-            # W15.22 — Score lookup via harness_events kind='scored' (written
-            # by tools._exec_score_match + evaluate.py after a successful
-            # score_match run). Pre-W15.22 tried json_extract on input_json
-            # for nonexistent job_title/job_company keys → always empty.
-            # harness_events table may not exist in fresh fixtures — handle
-            # OperationalError gracefully.
-            scored_by_job: dict[int, dict[str, Any]] = {}
-            try:
-                score_rows = conn.execute(
-                    "SELECT job_id, "
-                    "       json_extract(note, '$.probability') as prob, "
-                    "       json_extract(note, '$.skill_run_id') as srid, "
-                    "       json_extract(note, '$.deal_breakers') as breakers "
-                    "FROM harness_events "
-                    "WHERE kind = 'scored' AND job_id IS NOT NULL "
-                    "ORDER BY id DESC"
-                ).fetchall()
-                for sr in score_rows:
-                    jid = int(sr[0])
-                    if jid in scored_by_job:
-                        continue  # keep the most recent (already iterated)
-                    prob = sr[1]
-                    if prob is None:
-                        continue
-                    breakers_raw = sr[3]
-                    breakers: list[str] = []
-                    if breakers_raw:
-                        try:
-                            parsed = json.loads(breakers_raw)
-                            if isinstance(parsed, list):
-                                breakers = [str(b)[:80] for b in parsed[:3]]
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    scored_by_job[jid] = {
-                        "probability": float(prob),
-                        "skill_run_id": sr[2],
-                        "deal_breakers": breakers,
-                    }
-            except Exception:
-                pass  # harness_events not initialized yet → no scores
-
-            # User-managed include/exclude keywords (panel on /recommended)
-            from .. import user_keywords as _uk
-            user_kw_inc, user_kw_exc = _uk.list_keywords(store)
-
-            candidates: list[dict[str, Any]] = []
-            for r in rows:
-                (
-                    job_id, title, company, location, url, source,
-                    _fetched_at, extras_json, app_status,
-                ) = r
-                if not is_job_usable_for_recommendation(
-                    source=source,
-                    title=title,
-                    company=company,
-                    url=url,
-                    extras_json=extras_json or "{}",
-                ):
-                    continue
-                # Apply user exclude keywords — match against title+company
-                # (cheap, no JD body fetch needed). The crawl already happened;
-                # this is just a view-time filter.
-                if user_kw_exc:
-                    hay = ((title or "") + " " + (company or ""))
-                    matched = _uk.matches_exclude(hay, user_kw_exc)
-                    if matched:
-                        continue
-                meta = scored_by_job.get(int(job_id))
-                # W17 — classify recruit_type from real platform fields
-                recruit_type = classify_recruit_type({
-                    "source": source or "",
-                    "title": title or "",
-                    "extras_json": extras_json or "{}",
-                })
-                # W18 — surface discovered_keyword (audit "哪个 keyword 引来的")
-                # so user can see source diversity, not just "AI Agent" everywhere
-                extras_obj: dict[str, Any] = {}
-                if extras_json:
-                    try:
-                        extras_obj = json.loads(extras_json)
-                        if not isinstance(extras_obj, dict):
-                            extras_obj = {}
-                    except (json.JSONDecodeError, TypeError):
-                        extras_obj = {}
-                discovered_keyword = extras_obj.get("discovered_keyword") or ""
-                discovered_via = extras_obj.get("discovered_via") or ""
-                # SKILL probability is 0-1; UI shows 0-100. Buckets per BOSS
-                # cold-apply baseline: <5% industry avg, so >30% = strong fit.
-                score: float | None = None
-                gaps: list[str] = []
-                sr_id = None
-                if meta:
-                    score = meta["probability"] * 100.0
-                    gaps = meta["deal_breakers"]
-                    sr_id = meta["skill_run_id"]
-
-                color = "gray"
-                verdict = "未评分"
-                if score is not None:
-                    if score >= 30:
-                        color, verdict = "green", "值得投"
-                    elif score >= 15:
-                        color, verdict = "yellow", "可以试"
-                    else:
-                        color, verdict = "red", "性价比低"
-
-                candidates.append({
-                    "job_id": int(job_id), "title": title or "(未命名)",
-                    "company": company or "(未知公司)",
-                    "location": location or "",
-                    "url": url, "source": source or "",
-                    "recruit_type": recruit_type,
-                    "recruit_type_label": RECRUIT_LABEL_ZH.get(recruit_type, recruit_type),
-                    # W18
-                    "discovered_keyword": discovered_keyword,
-                    "discovered_via": discovered_via,
-                    "application_plan": build_application_plan({
-                        "source": source or "",
-                        "url": url,
-                        "title": title or "",
-                        "company": company or "",
-                        "location": location or "",
-                    }),
-                    "app_status": app_status, "score": score,
-                    "reasoning": "", "gaps": gaps,
-                    "color": color, "verdict": verdict,
-                    "score_run_id": sr_id,
-                    "has_score": score is not None,
-                })
-
-            # Daily chat budget — count today's greeting_drafted events as proxy
-            # (harness_events.created_at is julianday REAL, not datetime).
-            # Table is created lazily by init_agent_runtime_schema; treat absence as 0.
-            today_chats = 0
-            try:
-                today_chats_row = conn.execute(
-                    "SELECT COUNT(*) FROM harness_events "
-                    "WHERE kind = 'greeting_drafted' "
-                    "  AND created_at >= julianday('now', 'start of day')"
-                ).fetchone()
-                today_chats = int(today_chats_row[0]) if today_chats_row else 0
-            except Exception:
-                pass
-
-        # W17 — recruit_type filter from query param. Default = intern (summer +
-        # daily) which matches 5 月节奏的应届校招生 (用户当前情况).
-        from ..recruit_type import (
-            ALL_TYPES,
-            CAMPUS_FULLTIME,
-            DAILY_INTERN,
-            SOCIAL,
-            SUMMER_INTERN,
-        )
-        # Aliases: ?type=summer | daily | intern | fulltime | social | all | unknown
-        filter_param = (request.query_params.get("type") or "intern").lower()
-        type_alias_map = {
-            "summer":   {SUMMER_INTERN},
-            "daily":    {DAILY_INTERN},
-            "intern":   {SUMMER_INTERN, DAILY_INTERN},
-            "fulltime": {CAMPUS_FULLTIME},
-            "social":   {SOCIAL},
-            "all":      set(ALL_TYPES),
-        }
-        # Also accept exact canonical labels
-        if filter_param in ALL_TYPES:
-            allowed_types = {filter_param}
-        else:
-            allowed_types = type_alias_map.get(filter_param, set(ALL_TYPES))
-
-        # Total pool by recruit_type — for filter buttons
-        recruit_counts: dict[str, int] = {t: 0 for t in ALL_TYPES}
-        for c in candidates:
-            recruit_counts[c["recruit_type"]] += 1
-
-        # W18 — source diversity stats (用户能看到 "不只大厂")
-        source_counts: dict[str, int] = {}
-        company_counts: dict[str, int] = {}
-        for c in candidates:
-            source_counts[c["source"]] = source_counts.get(c["source"], 0) + 1
-            company_counts[c["company"]] = company_counts.get(c["company"], 0) + 1
-        # Top non-大厂 companies (heuristic: those NOT in big_co_set get bonus)
-        big_co_set = {"腾讯", "百度", "字节跳动", "阿里巴巴", "美团",
-                      "京东", "拼多多", "网易", "华为", "小红书"}
-        non_big_companies = [
-            (co, n) for co, n in company_counts.items() if co not in big_co_set
-        ]
-        non_big_companies.sort(key=lambda x: -x[1])
-
-        # Apply filter
-        filtered = [c for c in candidates if c["recruit_type"] in allowed_types]
-
-        # Sort: scored first by score desc, then unscored by recency
-        scored = sorted(
-            (c for c in filtered if c["has_score"]),
-            key=lambda c: c["score"] or 0.0, reverse=True,
-        )
-        unscored = [c for c in filtered if not c["has_score"]]
-        feed = scored[:50] + unscored[:30]
-
-        # Bucket counts (for the top tile row) — based on filtered set
-        green_n = sum(1 for c in scored if c["color"] == "green")
-        yellow_n = sum(1 for c in scored if c["color"] == "yellow")
-        red_n = sum(1 for c in scored if c["color"] == "red")
-
-        # W18 — keywords daemon will use next cycle (transparency)
-        try:
-            from ..match_keywords import explain_match, extract_keywords
-            from ..workers.ambient import _load_active_north_star
-            cycle_keywords = extract_keywords(
-                profile.raw_resume_text if profile else None,
-                active_goal=_load_active_north_star(store)
-                    if hasattr(store, "connect") else None,
-                max_keywords=8,
+        latest_invocation_by_subject: dict[str, tuple[Any, ...]] = {}
+        for invocation_row in invocation_rows:
+            latest_invocation_by_subject.setdefault(
+                str(invocation_row[1]), tuple(invocation_row)
             )
-            keyword_explanations = [explain_match(h) for h in cycle_keywords]
-        except Exception:
-            keyword_explanations = []
 
+        entry_urls = _application_entry_urls({int(row[1]) for row in rows})
+        resources: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            application_id = int(row[0])
+            job_id = int(row[1])
+            workspace_id = int(row[4]) if row[4] is not None else None
+            workspace_status = str(row[5]) if row[5] is not None else None
+            material_status: str | None = None
+            answer_count = 0
+            if row[9]:
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    material = json.loads(str(row[9]))
+                    if isinstance(material, dict):
+                        material_status = str(material.get("status") or "") or None
+                        answers = material.get("answers")
+                        if isinstance(answers, list):
+                            answer_count = len(answers)
+
+            invocation = None
+            if workspace_id is not None:
+                invocation = latest_invocation_by_subject.get(
+                    f"application:{application_id}:workspace:{workspace_id}"
+                )
+            invocation_status = str(invocation[2]) if invocation is not None else None
+            interview_url = (
+                f"/jobs/{job_id}/post-apply-pack"
+                if workspace_status == "submitted"
+                else None
+            )
+            if invocation_status in {"queued", "running"}:
+                interview_label = "面经搜索中"
+                interview_status = "running"
+                interview_status_label = "搜索中"
+            elif material_status == "answered":
+                interview_label = f"真实面经 · {answer_count} 题"
+                interview_status = "ready"
+                interview_status_label = "已完成"
+            elif material_status == "not_found":
+                interview_label = "未找到真实面经"
+                interview_status = "not_found"
+                interview_status_label = "未找到"
+            elif invocation_status == "failed":
+                interview_label = "面经搜索失败"
+                interview_status = "error"
+                interview_status_label = "失败"
+            elif invocation_status == "blocked":
+                interview_label = "面经证据不足"
+                interview_status = "blocked"
+                interview_status_label = "证据不足"
+            else:
+                interview_label = "打开面经搜索"
+                interview_status = "idle"
+                interview_status_label = "待开始"
+
+            timestamps = [
+                float(value)
+                for value in (
+                    row[6],
+                    row[7],
+                    row[10],
+                    invocation[5] if invocation is not None else None,
+                )
+                if value is not None
+            ]
+            resources[application_id] = {
+                "application_id": application_id,
+                "job_id": job_id,
+                "company": str(row[2] or ""),
+                "title": str(row[3] or ""),
+                "workspace_id": workspace_id,
+                "workspace_status": workspace_status,
+                "apply_pack_url": entry_urls.get(job_id),
+                "interview_url": interview_url,
+                "interview_label": interview_label,
+                "interview_status": interview_status,
+                "interview_status_label": interview_status_label,
+                "answer_count": answer_count,
+                "material_status": material_status,
+                "invocation_id": str(invocation[0]) if invocation is not None else None,
+                "invocation_status": invocation_status,
+                "invocation_message": str(invocation[3] or "") if invocation else "",
+                "invocation_error": str(invocation[4]) if invocation and invocation[4] else None,
+                "updated_at": max(timestamps) if timestamps else None,
+            }
+        return resources
+
+    def _pipeline_pending_job_ids() -> list[int]:
+        """Current published candidates plus user-supplied fallback JDs, in order."""
+        repository = (
+            getattr(research_agents, "job_repository", None)
+            or JobDiscoveryRepository(store)
+        )
+        selection = repository.get_current_selection()
+        pending = [
+            int(item.job_evidence.job_id)
+            for item in (selection.items if selection is not None else ())
+            if item.job_evidence is not None and item.job_evidence.job_id is not None
+        ]
+        with store.connect() as conn:
+            manual_rows = conn.execute(
+                "SELECT j.id FROM jobs AS j "
+                "LEFT JOIN applications AS a ON a.job_id = j.id "
+                "WHERE j.source = 'manual' AND a.id IS NULL "
+                "ORDER BY j.fetched_at DESC, j.id DESC"
+            ).fetchall()
+        pending.extend(int(row[0]) for row in manual_rows)
+        return list(dict.fromkeys(pending))
+
+    def _research_invocation_result_url(
+        subject_kind: str,
+        subject_id: str,
+    ) -> str | None:
+        if subject_kind == "job_search":
+            return "/recommended"
+        if subject_kind != "interview_research":
+            return None
+        subject_parts = subject_id.split(":")
+        if (
+            len(subject_parts) != 4
+            or subject_parts[0] != "application"
+            or not subject_parts[1].isdigit()
+        ):
+            return None
+        with store.connect() as conn:
+            target = conn.execute(
+                "SELECT job_id FROM applications WHERE id = ?",
+                (int(subject_parts[1]),),
+            ).fetchone()
+        return (
+            f"/jobs/{int(target[0])}/post-apply-pack"
+            if target is not None
+            else None
+        )
+
+    @app.get("/jobs/{job_id}/apply-pack", response_class=HTMLResponse)
+    def apply_pack_view(
+        job_id: int,
+        request: Request,
+        selection_revision: int | None = None,
+        job_evidence_id: int | None = None,
+    ) -> Any:
+        """Read the one current workspace. Generating or editing requires POST."""
+        application_id = _application_for_job(job_id, create=False)
+        repo = ResumeWorkspaceRepository(store)
+        workspace = repo.get(application_id) if application_id is not None else None
+        if workspace is not None and (
+            selection_revision is not None or job_evidence_id is not None
+        ):
+            _published_job_snapshot(
+                job_id,
+                selection_revision=selection_revision,
+                job_evidence_id=job_evidence_id,
+            )
+        job = _apply_pack_job(
+            job_id,
+            frozen_snapshot=workspace.job_snapshot if workspace is not None else None,
+            selection_revision=(selection_revision if workspace is None else None),
+            job_evidence_id=(job_evidence_id if workspace is None else None),
+        )
+        stored_master = repo.get_master()
+        master_ready = False
+        master_text = master_source.extracted_text if master_source is not None else ""
+        if (
+            master_source is not None
+            and stored_master is not None
+            and stored_master.source_sha256 == master_source.sha256
+        ):
+            try:
+                semantic = MasterResumeDocument.model_validate(stored_master.semantic_document)
+            except ValidationError:
+                semantic = None
+            if semantic is not None:
+                master_text = semantic.semantic_text
+                master_ready = (
+                    stored_master.semantic_status == "confirmed"
+                    and semantic.confirmed_by_user
+                )
+        saved = workspace.apply_pack if workspace is not None else {}
+        assistant = saved.get("assistant")
+        pack = assistant if isinstance(assistant, dict) and "_error" not in assistant else {}
+        pack_error = (
+            str(assistant.get("_error"))
+            if isinstance(assistant, dict) and assistant.get("_error")
+            else None
+        )
+        visual_review = saved.get("visual_review")
+        if not isinstance(visual_review, dict):
+            visual_review = {}
+        preparation_notes = saved.get("preparation_notes")
+        if not isinstance(preparation_notes, list):
+            preparation_notes = []
+        pdf_url = None
+        if workspace is not None and workspace.pdf_path and workspace.pdf_sha256:
+            pdf_url = (
+                f"/api/resume-workspaces/{workspace.id}/pdf"
+                f"?v={workspace.pdf_sha256[:12]}"
+            )
         return templates.TemplateResponse(
-            request, "recommended.html",
+            request,
+            "apply_pack.html",
             _ctx(
                 request,
-                candidates=feed,
-                total_pool=len(candidates),
-                filtered_count=len(filtered),
-                scored_count=len(scored),
-                unscored_count=len(unscored),
-                green_count=green_n,
-                yellow_count=yellow_n,
-                red_count=red_n,
-                today_chats=today_chats,
-                chat_daily_cap=80,
-                chat_warn_threshold=70,
-                runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
-                # W17 — recruit type filter state
-                active_filter=filter_param,
-                recruit_counts=recruit_counts,
-                recruit_type_labels=RECRUIT_LABEL_ZH,
-                # W18 — source / company diversity + cycle keywords
-                source_counts=source_counts,
-                non_big_companies=non_big_companies[:10],
-                big_co_count=sum(1 for c in candidates if c["company"] in big_co_set),
-                cycle_keywords=keyword_explanations,
-                user_keyword_includes=user_kw_inc,
-                user_keyword_excludes=user_kw_exc,
+                job=job,
+                selection_binding={
+                    "selection_revision": job.get("selection_result_revision"),
+                    "job_evidence_id": job.get("job_evidence_id"),
+                },
+                workspace=workspace,
+                pdf_url=pdf_url,
+                editor_note=str(saved.get("editor_note") or ""),
+                preparation_notes=preparation_notes,
+                visual_review=visual_review,
+                master_available=master_source is not None,
+                master_ready=master_ready,
+                master_text=master_text,
+                pack=pack,
+                error=pack_error,
+                workspace_creation_blocked=(
+                    workspace is None and job.get("live_source_status") == "closed"
+                ),
                 active_tab="recommended",
             ),
         )
 
+    @app.post("/api/jobs/{job_id}/resume-workspace/start")
+    def start_resume_workspace(
+        job_id: int,
+        selection_revision: int | None = Form(None),
+        job_evidence_id: int | None = Form(None),
+    ) -> RedirectResponse:
+        try:
+            job_snapshot = _apply_pack_job(
+                job_id,
+                selection_revision=selection_revision,
+                job_evidence_id=job_evidence_id,
+            )
+            _ensure_new_workspace_allowed(job_snapshot)
+            _resume_workflow().start(
+                job_id,
+                job_snapshot=job_snapshot,
+            )
+        except HTTPException:
+            raise
+        except ResumeWorkspaceError as exc:
+            raise HTTPException(409, str(exc)) from None
+        except Exception as exc:
+            log.exception("resume workspace start failed: %s", exc)
+            raise HTTPException(500, f"简历生成失败: {exc}") from None
+        return RedirectResponse(f"/jobs/{job_id}/apply-pack", status_code=303)
+
+    @app.post("/api/jobs/{job_id}/resume-workspace/confirm-master")
+    def confirm_master_and_start(
+        job_id: int,
+        semantic_text: str = Form(...),
+        selection_revision: int | None = Form(None),
+        job_evidence_id: int | None = Form(None),
+    ) -> RedirectResponse:
+        job_snapshot = _apply_pack_job(
+            job_id,
+            selection_revision=selection_revision,
+            job_evidence_id=job_evidence_id,
+        )
+        _ensure_new_workspace_allowed(job_snapshot)
+        if master_source is None:
+            raise HTTPException(409, "未加载 master PDF，请先配置 OFFERGUIDE_RESUME_PDF")
+        text = semantic_text.strip()
+        if not text:
+            raise HTTPException(400, "master 简历文本不能为空")
+        semantic = MasterResumeDocument(
+            source_sha256=master_source.sha256,
+            semantic_text=text,
+            confirmed_by_user=True,
+        )
+        ResumeWorkspaceRepository(store).save_master(
+            source_path=master_source.source_path,
+            source_sha256=master_source.sha256,
+            extracted_text=master_source.extracted_text,
+            semantic_document=semantic.model_dump(mode="json"),
+            confirmed=True,
+        )
+        try:
+            _resume_workflow().start(
+                job_id,
+                job_snapshot=job_snapshot,
+            )
+        except ResumeWorkspaceError as exc:
+            raise HTTPException(409, str(exc)) from None
+        except Exception as exc:
+            log.exception("resume workspace start after master confirmation failed: %s", exc)
+            raise HTTPException(500, f"简历生成失败: {exc}") from None
+        return RedirectResponse(f"/jobs/{job_id}/apply-pack", status_code=303)
+
+    @app.post("/api/jobs/{job_id}/resume-workspace/revise")
+    def revise_resume_workspace(
+        job_id: int,
+        feedback: str = Form(...),
+    ) -> RedirectResponse:
+        try:
+            _resume_workflow().revise(job_id, feedback=feedback)
+        except HTTPException:
+            raise
+        except ResumeWorkspaceError as exc:
+            raise HTTPException(409, str(exc)) from None
+        except Exception as exc:
+            log.exception("resume workspace revision failed: %s", exc)
+            raise HTTPException(500, f"简历修改失败: {exc}") from None
+        return RedirectResponse(f"/jobs/{job_id}/apply-pack", status_code=303)
+
+    @app.post("/api/jobs/{job_id}/resume-workspace/rerender")
+    def rerender_resume_workspace(job_id: int) -> RedirectResponse:
+        try:
+            _resume_workflow().rerender(job_id)
+        except HTTPException:
+            raise
+        except ResumeWorkspaceError as exc:
+            raise HTTPException(409, str(exc)) from None
+        except Exception as exc:
+            log.exception("resume workspace rerender failed: %s", exc)
+            raise HTTPException(500, f"简历重新排版失败: {exc}") from None
+        return RedirectResponse(f"/jobs/{job_id}/apply-pack", status_code=303)
+    _grounding_labels = {
+        "job_description": "冻结 JD",
+        "submitted_resume": "实际提交简历",
+        "project_vault": "项目事实",
+        "preparation_note": "需准备能力",
+    }
+
+    def _interview_material_view(
+        subject: InterviewResearchSubject,
+    ) -> dict[str, Any]:
+        # Keep the last complete result visible while a refreshed result is built.
+        # Publication is atomic, so staleness is a status banner rather than a
+        # reason to replace useful Q&A with an empty page.
+        published = subject.current_material
+        if published is None:
+            return {
+                "status": None,
+                "answers": [],
+                "sources": [],
+                "result_revision": 0,
+                "updated_at": None,
+            }
+
+        assessments = {
+            str(item.get("evidence_id")): item.get("assessment")
+            for item in subject.source_assessments
+            if item.get("is_current")
+            and isinstance(item.get("assessment"), dict)
+        }
+        evidence_ids: list[str] = []
+        for answer in published.answer_set.answers:
+            for citation in answer.source_citations:
+                if citation.evidence_id not in evidence_ids:
+                    evidence_ids.append(citation.evidence_id)
+
+        sources: dict[str, dict[str, Any]] = {}
+        for evidence_id in evidence_ids:
+            assessment = assessments.get(evidence_id) or {}
+            try:
+                evidence = interview_source_store.get(int(evidence_id))
+            except (ValueError, EvidenceNotFoundError):
+                sources[evidence_id] = {
+                    "evidence_id": evidence_id,
+                    "title": "来源记录目前不可读取",
+                    "saved_url": None,
+                    "external_url": None,
+                    "rationale": str(assessment.get("rationale") or ""),
+                }
+                continue
+            sources[evidence_id] = {
+                "evidence_id": evidence_id,
+                "title": evidence.title or evidence.final_url,
+                "saved_url": (
+                    f"/interview-research/{subject.application_id}/workspaces/"
+                    f"{subject.submitted_workspace_id}/sources/{evidence_id}"
+                ),
+                "external_url": (
+                    evidence.final_url
+                    if evidence.final_url.startswith(("http://", "https://"))
+                    else None
+                ),
+                "rationale": str(assessment.get("rationale") or ""),
+            }
+
+        answers: list[dict[str, Any]] = []
+        for index, answer in enumerate(published.answer_set.answers, start=1):
+            citations = []
+            for citation in answer.source_citations:
+                source = sources.get(citation.evidence_id)
+                citations.append({
+                    "label": source["title"] if source else "已引用面经",
+                    "saved_url": source.get("saved_url") if source else None,
+                    "external_url": source.get("external_url") if source else None,
+                    "quote": citation.quote,
+                })
+            grounding = [
+                {
+                    "label": _grounding_labels.get(item.kind, item.kind),
+                    "quote": item.quote,
+                }
+                for item in answer.grounding
+            ]
+            answers.append({
+                "number": index,
+                "question": answer.question,
+                "answer": answer.answer,
+                "citations": citations,
+                "grounding": grounding,
+            })
+
+        return {
+            "status": published.answer_set.status,
+            "answers": answers,
+            "sources": [sources[evidence_id] for evidence_id in evidence_ids],
+            "result_revision": published.result_revision,
+            "updated_at": _julian_to_human(published.created_at),
+        }
+
+    @app.get(
+        "/interview-research/{application_id}/workspaces/"
+        "{submitted_workspace_id}/sources/{evidence_id}",
+        response_class=HTMLResponse,
+    )
+    def interview_research_source_view(
+        application_id: int,
+        submitted_workspace_id: int,
+        evidence_id: int,
+        request: Request,
+    ) -> Any:
+        source_subject_id = (
+            f"application:{application_id}:workspace:{submitted_workspace_id}"
+        )
+        with store.connect() as conn:
+            linked = conn.execute(
+                "SELECT 1 FROM source_subject_evidence "
+                "WHERE subject_kind = 'interview_research' AND subject_id = ? "
+                "AND evidence_id = ? LIMIT 1",
+                (source_subject_id, evidence_id),
+            ).fetchone()
+            if linked is None:
+                linked = conn.execute(
+                    "SELECT 1 FROM interview_research_source_links "
+                    "WHERE workspace_id = ? AND evidence_id = ? LIMIT 1",
+                    (submitted_workspace_id, str(evidence_id)),
+                ).fetchone()
+            target = conn.execute(
+                "SELECT 1 FROM interview_research_contexts "
+                "WHERE workspace_id = ? AND application_id = ?",
+                (submitted_workspace_id, application_id),
+            ).fetchone()
+        if linked is None or target is None:
+            raise HTTPException(404, "interview source not found")
+        try:
+            evidence = interview_source_store.get(evidence_id)
+        except EvidenceNotFoundError:
+            raise HTTPException(404, "interview source not found") from None
+        external_url = (
+            evidence.final_url
+            if evidence.final_url.startswith(("http://", "https://"))
+            else None
+        )
+        return templates.TemplateResponse(
+            request,
+            "interview_source.html",
+            _ctx(
+                request,
+                evidence=evidence,
+                external_url=external_url,
+                provenance_label={
+                    "web": "公开网页正文",
+                    "user_provided": "用户提供",
+                }.get(evidence.provenance, "保存的面经原文"),
+                fetched_at=_format_julian_time(evidence.fetched_at),
+                active_tab="recommended",
+            ),
+        )
+
+    @app.get("/jobs/{job_id}/post-apply-pack", response_class=HTMLResponse)
+    def post_apply_pack_view(job_id: int, request: Request) -> Any:
+        """Show the sole current research result for the frozen submission."""
+        application_id = _application_for_job(job_id, create=False)
+        if application_id is None:
+            raise HTTPException(409, "这个岗位还没有真实投递记录")
+        actual_job_id, workspace = _submitted_interview_target(application_id)
+        if actual_job_id != job_id:
+            raise HTTPException(409, "投递记录与岗位不匹配")
+        subject = interview_repository.ensure_subject(application_id, workspace.id)
+
+        invocation = None
+        if research_agents is not None:
+            invocation = _maybe_enqueue_interview_research(
+                application_id=application_id,
+                workspace_id=workspace.id,
+                trigger_reason="post-application page opened",
+                force=False,
+            )
+            invocation = research_agents.latest_interview_invocation(
+                application_id=application_id,
+                workspace_id=workspace.id,
+            ) or invocation
+
+        submitted = workspace.job_snapshot
+        job = {
+            "id": job_id,
+            "title": str(submitted.get("title") or ""),
+            "company": str(submitted.get("company") or ""),
+            "location": str(submitted.get("location") or ""),
+            "url": str(submitted.get("url") or ""),
+            "raw_text": str(submitted.get("raw_text") or ""),
+            "source": str(submitted.get("source") or ""),
+        }
+        return templates.TemplateResponse(
+            request,
+            "post_apply_pack.html",
+            _ctx(
+                request,
+                job=job,
+                application_id=application_id,
+                submitted_workspace=workspace,
+                submitted_at_label=_format_julian_time(workspace.submitted_at),
+                subject=subject,
+                material=_interview_material_view(subject),
+                material_is_stale=subject.current_material_is_stale,
+                agent_run=_invocation_view(invocation),
+                agent_ready=research_agents is not None,
+                active_tab="recommended",
+            ),
+        )
+
+    @app.post("/interview-research/{application_id}/refresh")
+    def refresh_interview_research(application_id: int) -> RedirectResponse:
+        if research_agents is None:
+            raise HTTPException(409, "面经研究 Agent 尚未配置")
+        job_id, workspace = _submitted_interview_target(application_id)
+        _maybe_enqueue_interview_research(
+            application_id=application_id,
+            workspace_id=workspace.id,
+            trigger_reason="user requested interview research refresh",
+            force=True,
+        )
+        return RedirectResponse(
+            f"/jobs/{job_id}/post-apply-pack", status_code=303
+        )
+
+    @app.post("/interview-research/{application_id}/sources")
+    def add_interview_research_source(
+        application_id: int,
+        text: str = Form(...),
+        title: str = Form(""),
+        source_url: str = Form(""),
+    ) -> RedirectResponse:
+        if research_agents is None:
+            raise HTTPException(409, "面经研究 Agent 尚未配置")
+        body = text.strip()
+        if not body:
+            raise HTTPException(400, "粘贴的面经正文不能为空")
+        job_id, workspace = _submitted_interview_target(application_id)
+        try:
+            research_agents.add_interview_source(
+                application_id=application_id,
+                workspace_id=workspace.id,
+                text=body,
+                title=title.strip() or "用户提供的面经",
+                source_url=source_url.strip() or None,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except InterviewResearchConflictError as exc:
+            raise HTTPException(409, str(exc)) from None
+        _maybe_enqueue_interview_research(
+            application_id=application_id,
+            workspace_id=workspace.id,
+            trigger_reason="user provided interview source",
+            force=True,
+        )
+        return RedirectResponse(
+            f"/jobs/{job_id}/post-apply-pack", status_code=303
+        )
+
+    @app.get(
+        "/api/research-agent-invocations/{invocation_id}",
+        response_class=JSONResponse,
+    )
+    def research_agent_invocation_status(invocation_id: str) -> Any:
+        """Return one durable Agent status for stable, non-refreshing UI polling."""
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT id, agent_name, subject_kind, subject_id, status, message, "
+                "error_text, unresolved_json, updated_at "
+                "FROM research_agent_invocations WHERE id = ?",
+                (invocation_id,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(404, "Agent 运行记录不存在")
+        status = str(row[4])
+        labels = {
+            "queued": "等待 Agent 开始",
+            "running": "Agent 正在研究",
+            "published": "已更新当前结果",
+            "unchanged": "当前结果无需更新",
+            "blocked": "暂时缺少足够证据",
+            "stale": "上下文已变化，本次结果未发布",
+            "failed": "Agent 运行失败",
+        }
+        unresolved: list[str] = []
+        with contextlib.suppress(json.JSONDecodeError, TypeError):
+            parsed = json.loads(str(row[7] or "[]"))
+            if isinstance(parsed, list):
+                unresolved = [str(value) for value in parsed if str(value).strip()]
+
+        result_url = _research_invocation_result_url(str(row[2]), str(row[3]))
+
+        payload = {
+            "id": str(row[0]),
+            "agent_name": str(row[1]),
+            "subject_kind": str(row[2]),
+            "status": status,
+            "status_label": labels.get(status, status),
+            "message": str(row[5] or ""),
+            "error": str(row[6]) if row[6] else None,
+            "unresolved": unresolved,
+            "updated_at": _format_julian_time(float(row[8])),
+            "terminal": status not in {"queued", "running"},
+            "result_changed": status == "published",
+            "result_url": result_url,
+        }
+        return JSONResponse(
+            payload,
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
+
+    @app.get("/recommended", response_class=HTMLResponse)
+    def recommended_view(request: Request) -> Any:
+        """Render only the current selection published by JobDiscoveryAgent."""
+        repository = (
+            getattr(research_agents, "job_repository", None)
+            or JobDiscoveryRepository(store)
+        )
+        search_context = repository.get_search_context()
+        current = repository.get_current_selection()
+        jobs: list[dict[str, Any]] = []
+        with store.connect() as conn:
+            workspace_job_ids = {
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT DISTINCT a.job_id FROM resume_workspaces AS rw "
+                    "JOIN applications AS a ON a.id = rw.application_id"
+                ).fetchall()
+            }
+        if current is not None:
+            for item in current.items:
+                evidence = item.job_evidence
+                if evidence is None or evidence.job_id is None:
+                    continue
+                live_evidence = repository.get_job_evidence(item.job_evidence_id)
+                live_status = (
+                    live_evidence.source_status if live_evidence is not None else "unknown"
+                )
+                live_checked_at = (
+                    live_evidence.checked_at if live_evidence is not None else evidence.checked_at
+                )
+                live_last_seen_at = (
+                    live_evidence.last_seen_at
+                    if live_evidence is not None
+                    else evidence.last_seen_at
+                )
+                has_workspace = evidence.job_id in workspace_job_ids
+                jobs.append({
+                    "job_id": evidence.job_id,
+                    "job_evidence_id": item.job_evidence_id,
+                    "title": evidence.title,
+                    "company": evidence.company,
+                    "location": evidence.location or "",
+                    "url": evidence.canonical_url,
+                    "source": evidence.source_name,
+                    "recruitment_type": evidence.recruitment_type,
+                    "page_time_information": evidence.page_time_information,
+                    "checked_at": _format_julian_time(live_checked_at),
+                    "last_seen_at": _format_julian_time(live_last_seen_at),
+                    "source_status": live_status,
+                    "is_closed": live_status == "closed",
+                    "has_workspace": has_workspace,
+                    "open_status": {
+                        "open": "上次检查时可见",
+                        "closed": "上次检查显示已关闭",
+                        "unknown": "上次检查未能确认开放状态",
+                    }.get(live_status, "上次检查未能确认开放状态"),
+                    "raw_text": evidence.jd_text,
+                    "why_worth_attention": item.why_worth_attention,
+                    "concerns": item.concerns,
+                    "unknowns": item.unknowns,
+                    "grounding_quotes": [
+                        quote.model_dump(mode="json")
+                        for quote in getattr(item, "grounding_quotes", [])
+                    ],
+                    "apply_pack_url": (
+                        f"/jobs/{evidence.job_id}/apply-pack"
+                        if has_workspace
+                        else (
+                            None
+                            if live_status == "closed"
+                            else (
+                                f"/jobs/{evidence.job_id}/apply-pack"
+                                f"?selection_revision={current.result_revision}"
+                                f"&job_evidence_id={item.job_evidence_id}"
+                            )
+                        )
+                    ),
+                })
+        invocation = (
+            research_agents.latest_job_invocation()
+            if research_agents is not None
+            else None
+        )
+        return templates.TemplateResponse(
+            request,
+            "recommended.html",
+            _ctx(
+                request,
+                search_context=(
+                    {
+                        "revision": search_context.revision,
+                        "intent_text": search_context.intent,
+                        "hard_constraints": search_context.hard_constraints,
+                        "feedback": search_context.feedback,
+                    }
+                    if search_context is not None
+                    else None
+                ),
+                selection=(
+                    {
+                        "context_revision": current.context_revision,
+                        "result_revision": current.result_revision,
+                        "summary": current.coverage_summary,
+                        "evidence_gaps": current.evidence_gaps,
+                        "published_at": _format_julian_time(current.published_at),
+                        "jobs": jobs,
+                    }
+                    if current is not None
+                    else None
+                ),
+                selection_is_stale=(
+                    current is not None
+                    and search_context is not None
+                    and current.context_revision != search_context.revision
+                ),
+                agent_run=_invocation_view(invocation),
+                agent_ready=research_agents is not None,
+                active_tab="recommended",
+            ),
+        )
+
+    @app.post("/job-search/context")
+    def update_job_search_context(
+        intent_text: str = Form(...),
+        context_revision: int = Form(0),
+        hard_constraints_text: str = Form(""),
+    ) -> Any:
+        if research_agents is None:
+            raise HTTPException(503, "找岗 Agent 尚未配置")
+        intent = intent_text.strip()
+        if not intent:
+            raise HTTPException(400, "当前找岗意图不能为空")
+        current_context = research_agents.job_repository.get_search_context()
+        expected_revision = context_revision or None
+        if current_context is not None and expected_revision is None:
+            raise HTTPException(409, "找岗意图已经存在，请刷新页面后再保存")
+        hard_constraints = [
+            line.strip()
+            for line in hard_constraints_text.splitlines()
+            if line.strip()
+        ]
+        try:
+            research_agents.replace_job_search_context(
+                intent,
+                hard_constraints=hard_constraints,
+                expected_revision=expected_revision,
+            )
+        except JobDiscoveryRevisionConflict as exc:
+            raise HTTPException(409, f"找岗意图已被更新，请刷新页面：{exc}") from None
+        research_agents.enqueue_job_discovery(
+            trigger_reason="user saved the current job-search intent"
+        )
+        return RedirectResponse("/recommended", status_code=303)
+
+    @app.post("/job-search/run")
+    def run_job_search_agent() -> Any:
+        if research_agents is None:
+            raise HTTPException(503, "找岗 Agent 尚未配置")
+        research_agents.enqueue_job_discovery(trigger_reason="user requested refresh")
+        return RedirectResponse("/recommended", status_code=303)
+
+    @app.post("/job-search/jobs/{job_id}/dismiss")
+    def dismiss_recommended_job(
+        job_id: int,
+        selection_revision: int = Form(...),
+        job_evidence_id: int = Form(...),
+        context_revision: int = Form(...),
+    ) -> Any:
+        if research_agents is None:
+            raise HTTPException(503, "找岗 Agent 尚未配置")
+        current = research_agents.job_repository.get_selection_revision(
+            selection_revision
+        )
+        evidence = next(
+            (
+                item.job_evidence
+                for item in (current.items if current is not None else ())
+                if (
+                    item.job_evidence is not None
+                    and item.job_evidence.job_id == job_id
+                    and item.job_evidence_id == job_evidence_id
+                )
+            ),
+            None,
+        )
+        if evidence is None:
+            raise HTTPException(404, f"job#{job_id} 不在当前岗位证据中")
+        try:
+            research_agents.append_job_feedback(
+                f"暂不考虑具体岗位：{evidence.company} · {evidence.title}（job#{job_id}）",
+                expected_revision=context_revision,
+            )
+        except JobDiscoveryRevisionConflict as exc:
+            raise HTTPException(409, f"找岗意图已被更新，请刷新页面：{exc}") from None
+        research_agents.enqueue_job_discovery(
+            trigger_reason="user dismissed one specific job"
+        )
+        return RedirectResponse("/recommended", status_code=303)
+
+    @app.post("/job-search/jobs/{job_id}/report-closed")
+    def report_recommended_job_closed(
+        job_id: int,
+        selection_revision: int = Form(...),
+        job_evidence_id: int = Form(...),
+    ) -> Any:
+        repository = (
+            getattr(research_agents, "job_repository", None)
+            or JobDiscoveryRepository(store)
+        )
+        _published_job_snapshot(
+            job_id,
+            selection_revision=selection_revision,
+            job_evidence_id=job_evidence_id,
+        )
+        updated = repository.record_user_closed_report(job_evidence_id)
+        if updated is None or updated.job_id != job_id:
+            raise HTTPException(409, "岗位证据已变化，请刷新页面后重试")
+        return RedirectResponse("/recommended", status_code=303)
+
+    @app.post("/job-search/feedback/{feedback_index}")
+    def update_job_search_feedback(
+        feedback_index: int,
+        feedback: str = Form(...),
+        context_revision: int = Form(...),
+    ) -> Any:
+        if research_agents is None:
+            raise HTTPException(503, "找岗 Agent 尚未配置")
+        try:
+            research_agents.update_job_feedback(
+                feedback_index,
+                feedback,
+                expected_revision=context_revision,
+            )
+        except JobDiscoveryRevisionConflict as exc:
+            raise HTTPException(409, f"找岗意图已被更新，请刷新页面：{exc}") from None
+        except (IndexError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from None
+        research_agents.enqueue_job_discovery(
+            trigger_reason="user edited visible job-search feedback"
+        )
+        return RedirectResponse("/recommended", status_code=303)
+
+    @app.post("/job-search/feedback/{feedback_index}/remove")
+    def remove_job_search_feedback(
+        feedback_index: int,
+        context_revision: int = Form(...),
+    ) -> Any:
+        if research_agents is None:
+            raise HTTPException(503, "找岗 Agent 尚未配置")
+        try:
+            research_agents.remove_job_feedback(
+                feedback_index,
+                expected_revision=context_revision,
+            )
+        except JobDiscoveryRevisionConflict as exc:
+            raise HTTPException(409, f"找岗意图已被更新，请刷新页面：{exc}") from None
+        except IndexError as exc:
+            raise HTTPException(400, str(exc)) from None
+        research_agents.enqueue_job_discovery(
+            trigger_reason="user removed visible job-search feedback"
+        )
+        return RedirectResponse("/recommended", status_code=303)
     @app.get("/metrics", response_class=HTMLResponse)
     def metrics_view(request: Request) -> Any:
         """W15.19 — Dogfood metrics dashboard.
@@ -1860,44 +2221,28 @@ def create_app(
         from ..agent_runtime import _schema as _hs
         _hs.init_agent_runtime_schema(store)
 
-        # Daemon status (same logic as home in W14, kept here)
         with store.connect() as conn:
-            recent_daemons = conn.execute(
-                "SELECT id, job_name, started_at, ended_at, status, "
-                "       summary_json, error_text "
-                "FROM daemon_runs ORDER BY started_at DESC LIMIT 30"
-            ).fetchall()
             recent_harness = conn.execute(
                 "SELECT id, trigger_kind, trigger_detail, started_at, "
                 "       ended_at, iterations, status, final_text, "
                 "       tool_calls_json, cost_usd, error_text "
                 "FROM harness_runs ORDER BY started_at DESC LIMIT 30"
             ).fetchall()
-            scheduled = conn.execute(
-                "SELECT id, fire_at, reason, fired_at, requested_by_run_id "
-                "FROM harness_scheduled_wakes ORDER BY fire_at DESC LIMIT 30"
-            ).fetchall()
             events = conn.execute(
                 "SELECT id, kind, job_id, note, source, created_at "
                 "FROM harness_events ORDER BY id DESC LIMIT 30"
             ).fetchall()
-
-        daemons_view = []
-        for r in recent_daemons:
-            summary = {}
-            with contextlib.suppress(Exception):
-                summary = json.loads(r[5] or "{}")
-            daemons_view.append({
-                "id": int(r[0]), "job_name": r[1],
-                "started_at": r[2], "ended_at": r[3],
-                "status": r[4], "summary": summary,
-                "error_text": r[6],
-            })
         harness_view = []
         for r in recent_harness:
-            tcs = []
+            tcs: list[Any] = []
             with contextlib.suppress(Exception):
-                tcs = json.loads(r[8] or "[]")
+                raw_tool_calls = json.loads(r[8] or "[]")
+                if isinstance(raw_tool_calls, list):
+                    tcs = raw_tool_calls
+                elif isinstance(raw_tool_calls, dict):
+                    calls = raw_tool_calls.get("calls")
+                    if isinstance(calls, list):
+                        tcs = calls
             harness_view.append({
                 "id": int(r[0]), "trigger_kind": r[1],
                 "trigger_detail": (r[2] or "")[:200],
@@ -1908,11 +2253,6 @@ def create_app(
                 "cost_usd": float(r[9] or 0.0),
                 "error_text": r[10],
             })
-        scheduled_view = [
-            {"id": int(r[0]), "fire_at": r[1], "reason": r[2],
-             "fired_at": r[3], "requested_by_run_id": r[4]}
-            for r in scheduled
-        ]
         events_view = [
             {"id": int(r[0]), "kind": r[1], "job_id": r[2],
              "note": (r[3] or "")[:120], "source": r[4], "created_at": r[5]}
@@ -1923,9 +2263,7 @@ def create_app(
             "debug.html",
             _ctx(
                 request,
-                daemons=daemons_view,
                 harness_runs=harness_view,
-                scheduled_wakes=scheduled_view,
                 harness_events=events_view,
                 runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
                 active_tab="debug",
@@ -1946,7 +2284,21 @@ def create_app(
         """
         from .. import pipeline_view as pv_mod
 
-        view = pv_mod.build(store)
+        view = pv_mod.build(store, pending_job_ids=_pipeline_pending_job_ids())
+        pipeline_apply_urls = _application_entry_urls(
+            {
+                card.job_id
+                for cards in view.columns.values()
+                for card in cards
+                if card.status in {"scanned", "considered"}
+            }
+        )
+        application_ids = {
+            card.application_id
+            for cards in view.columns.values()
+            for card in cards
+            if card.application_id is not None
+        }
         return templates.TemplateResponse(
             request,
             "pipeline.html",
@@ -1957,53 +2309,14 @@ def create_app(
                 stage_color=pv_mod.stage_color,
                 render_age=pv_mod.render_age,
                 transition_options=pv_mod.transition_options,
+                pipeline_apply_urls=pipeline_apply_urls,
+                pipeline_application_resources=_application_resources(application_ids),
                 active_tab="pipeline",
             ),
         )
 
-    @app.post("/api/pipeline/jobs/manual", response_class=HTMLResponse)
-    def pipeline_add_manual_job(
-        request: Request,
-        raw_text: str = Form(...),
-        title: str | None = Form(None),
-        company: str | None = Form(None),
-        location: str | None = Form(None),
-        url: str | None = Form(None),
-    ) -> Any:
-        """W14.11: paste-a-JD bootstrap path. The W13.1 cleanup deleted
-        /quick-eval thinking "扩展抓 + agent discover_jobs 自动" was enough,
-        but real walk-through showed: fresh DB + no extension installed = no
-        way to get a JD into the system at all → tailor / apply / agent all
-        sit empty. This restores a single-form path: paste raw JD text →
-        creates a jobs row → redirect to /apply/<id> so the user lands
-        directly on "generate a 投递包".
-        """
-        from ..platforms import manual
-
-        cleaned = (raw_text or "").strip()
-        if len(cleaned) < 50:
-            raise HTTPException(
-                400, "JD 太短 (< 50 字), 没法生成有用的投递包",
-            )
-        try:
-            rj = manual.from_text(
-                cleaned,
-                title=(title or None),
-                company=(company or None),
-                location=(location or None),
-                url=(url or None),
-            )
-        except ValueError as e:
-            raise HTTPException(400, str(e)) from None
-        was_new, job_id = scout.ingest(store, rj)
-        # Whether new or duplicate, jump straight to /apply so the user
-        # always sees forward motion (matches what they were after).
-        return RedirectResponse(
-            f"/apply/{job_id}", status_code=303,
-        )
-
     @app.post(
-        "/api/pipeline/applications/{app_id}/event",
+       "/api/pipeline/applications/{app_id}/event",
         response_class=HTMLResponse,
     )
     def pipeline_log_event(
@@ -2018,7 +2331,7 @@ def create_app(
         from ..state_machine import sync_status
 
         valid_kinds = {
-            "submitted", "viewed", "replied", "assessment",
+            "viewed", "replied", "assessment",
             "interview", "rejected", "offer", "withdrawn",
         }
         if kind not in valid_kinds:
@@ -2028,9 +2341,8 @@ def create_app(
         except Exception as e:
             raise HTTPException(400, f"failed to record: {e}") from None
         sync_status(store, app_id, kind)
-
         # Rebuild + find the updated card so we can re-render it
-        view = pv_mod.build(store)
+        view = pv_mod.build(store, pending_job_ids=_pipeline_pending_job_ids())
         card = None
         new_stage = None
         for stage_key, cards in view.columns.items():
@@ -2054,63 +2366,8 @@ def create_app(
                 stage_color=pv_mod.stage_color,
                 render_age=pv_mod.render_age,
                 transition_options=pv_mod.transition_options,
-            ),
-        )
-
-    @app.post("/api/pipeline/jobs/{job_id}/submit", response_class=HTMLResponse)
-    def pipeline_submit_job(
-        request: Request,
-        job_id: int,
-    ) -> Any:
-        """Promote a 'scanned' job to 'applied' by creating an
-        application row + recording a submitted event.
-
-        The kanban surfaces this as the only transition available on
-        scanned cards. After this, the row leaves 'scanned' and shows
-        up in 'applied'.
-        """
-        from .. import application_events as ae
-        from .. import pipeline_view as pv_mod
-
-        with store.connect() as conn:
-            row = conn.execute(
-                "SELECT id FROM jobs WHERE id = ?", (job_id,)
-            ).fetchone()
-            if row is None:
-                raise HTTPException(404, f"job {job_id} not found")
-            existing = conn.execute(
-                "SELECT id FROM applications WHERE job_id = ?", (job_id,)
-            ).fetchone()
-            if existing:
-                app_id = int(existing[0])
-            else:
-                cur = conn.execute(
-                    "INSERT INTO applications(job_id, status) "
-                    "VALUES (?, 'applied') RETURNING id",
-                    (job_id,),
-                )
-                app_id = int(cur.fetchone()[0])
-
-        ae.record(store, application_id=app_id, kind="submitted", source="manual")
-
-        view = pv_mod.build(store)
-        # Card is now in 'applied' — find and render it
-        card = next(
-            (c for c in view.columns["applied"] if c.application_id == app_id),
-            None,
-        )
-        if card is None:
-            return HTMLResponse("")
-        return templates.TemplateResponse(
-            request,
-            "_kanban_card.html",
-            _ctx(
-                request,
-                card=card,
-                stage_key="applied",
-                stage_color=pv_mod.stage_color,
-                render_age=pv_mod.render_age,
-                transition_options=pv_mod.transition_options,
+                pipeline_apply_urls=_application_entry_urls({card.job_id}),
+                pipeline_application_resources=_application_resources({app_id}),
             ),
         )
 
@@ -2137,125 +2394,6 @@ def create_app(
             ),
         )
 
-    @app.get("/compare", response_class=HTMLResponse)
-    def compare_view(request: Request, company: str = "") -> Any:
-        """List companies with ≥2 jobs; show comparison form for one company.
-
-        W15.17 — surfaces source attribution for the app limit so the UI
-        can render "this is just a community estimate, let agent research"
-        instead of a confident number that's likely wrong.
-        """
-        from ..briefs import app_limit_with_attribution
-
-        company_groups = _list_company_groups(store)
-
-        target_jobs: list[dict] | None = None
-        limit_answer = None
-        if company:
-            target_jobs = _list_jobs_for_company(store, company)
-            limit_answer = app_limit_with_attribution(store, company)
-
-        return templates.TemplateResponse(
-            request,
-            "compare.html",
-            _ctx(
-                request,
-                company_groups=company_groups,
-                selected_company=company,
-                target_jobs=target_jobs,
-                target_limit=limit_answer.limit if limit_answer else None,
-                limit_answer=limit_answer,  # full structured answer for UI
-                active_tab="compare",
-            ),
-        )
-
-    @app.post("/compare/run", response_class=HTMLResponse)
-    def compare_run(
-        request: Request,
-        company: str = Form(...),
-        application_limit: str = Form(""),
-        job_ids: list[str] = Form(...),  # noqa: B008
-    ) -> Any:
-        """Run compare_jobs SKILL on selected jobs."""
-        if profile is None:
-            return templates.TemplateResponse(
-                request, "_compare_result.html",
-                _ctx(request, error="未加载简历——设 OFFERGUIDE_RESUME_PDF 后重启。"),
-            )
-        if runtime is None:
-            return templates.TemplateResponse(
-                request, "_compare_result.html",
-                _ctx(request, error="未配置 LLM——设 DEEPSEEK_API_KEY 后重启。"),
-            )
-
-        # Resolve job_ids → full job records
-        try:
-            ids = [int(s) for s in job_ids if s]
-        except ValueError:
-            raise HTTPException(400, "job_ids must be integers") from None
-        if len(ids) < 2:
-            return templates.TemplateResponse(
-                request, "_compare_result.html",
-                _ctx(request, error="至少要选 2 个职位才有比较的意义。"),
-            )
-        if len(ids) > 10:
-            return templates.TemplateResponse(
-                request, "_compare_result.html",
-                _ctx(request, error="一次最多比较 10 个职位（避免 LLM 上下文过载）。"),
-            )
-
-        rows = _list_jobs_by_ids(store, ids)
-        import json as _json
-        jobs_json = _json.dumps(
-            [
-                {"job_id": r["id"], "title": r["title"] or "(无标题)",
-                 "raw_text": r["raw_text"][:1500],
-                 "source": r["source"]}
-                for r in rows
-            ],
-            ensure_ascii=False,
-        )
-
-        # Find SKILL spec
-        spec = next((s for s in skills if s.name == "compare_jobs"), None)
-        if spec is None:
-            return templates.TemplateResponse(
-                request, "_compare_result.html",
-                _ctx(request, error="compare_jobs SKILL 未加载，检查 skills/ 目录。"),
-            )
-
-        try:
-            result = runtime.invoke(
-                spec,
-                {
-                    "company": company,
-                    "user_profile": profile.raw_resume_text,
-                    "jobs_json": jobs_json,
-                },
-            )
-        except LLMError as e:
-            return templates.TemplateResponse(
-                request, "_compare_result.html",
-                _ctx(request, error=f"LLM 调用失败: {e}"),
-            )
-
-        # Build a job_id → full job record lookup so the template can
-        # link rankings back to the source jobs
-        job_by_id = {r["id"]: r for r in rows}
-
-        return templates.TemplateResponse(
-            request,
-            "_compare_result.html",
-            _ctx(
-                request,
-                comparison=result.parsed,
-                run_id=result.skill_run_id,
-                job_by_id=job_by_id,
-                company=company,
-                application_limit_user=application_limit,
-            ),
-        )
-
     @app.get("/applications", response_class=HTMLResponse)
     def applications_view(request: Request) -> Any:
         rows = _list_applications_with_events(store)
@@ -2266,6 +2404,9 @@ def create_app(
             _ctx(
                 request,
                 applications=rows,
+                application_resources=_application_resources(
+                    {int(row["id"]) for row in rows}
+                ),
                 active_count=active,
                 terminal_count=len(rows) - active,
                 active_tab="applications",
@@ -2282,7 +2423,7 @@ def create_app(
         from ..state_machine import sync_status
 
         valid_kinds = {
-            "submitted", "viewed", "replied", "assessment",
+            "viewed", "replied", "assessment",
             "interview", "rejected", "offer", "withdrawn",
         }
         if kind not in valid_kinds:
@@ -2292,7 +2433,6 @@ def create_app(
         except Exception as e:
             raise HTTPException(400, f"failed to record: {e}") from None
         sync_status(store, app_id, kind)
-
         # Re-render only this row so HTMX can swap it in place
         rows = _list_applications_with_events(store, where_id=app_id)
         if not rows:
@@ -2300,7 +2440,11 @@ def create_app(
         return templates.TemplateResponse(
             request,
             "_application_card.html",
-            _ctx(request, app=rows[0]),
+            _ctx(
+                request,
+                app=rows[0],
+                application_resources=_application_resources({app_id}),
+            ),
         )
 
     @app.get("/stories", response_class=HTMLResponse)
@@ -2444,7 +2588,7 @@ def create_app(
         from .. import project_vault
         from ..agentic.search import build_default_search
 
-        llm = runtime._llm if runtime is not None else None
+        llm = getattr(runtime, "_llm", None) if runtime is not None else None
         search = None
         try:
             search = build_default_search()
@@ -2478,57 +2622,6 @@ def create_app(
             request,
             "_project_market_context.html",
             _ctx(request, market_draft=draft),
-        )
-
-    @app.get("/interviews", response_class=HTMLResponse)
-    def interviews_view(request: Request, company: str = "") -> Any:
-        """List 面经 corpus + paste-in form for adding more."""
-        companies = _list_interview_companies(store)
-        experiences = (
-            _list_interview_experiences(store, company=company)
-            if company
-            else _list_interview_experiences(store, limit=20)
-        )
-        return templates.TemplateResponse(
-            request, "interviews.html",
-            _ctx(
-                request,
-                companies=companies,
-                experiences=experiences,
-                selected_company=company,
-                active_tab="interviews",
-            ),
-        )
-
-    @app.post("/api/interviews/paste", response_class=HTMLResponse)
-    def interviews_paste(
-        request: Request,
-        company: str = Form(...),
-        raw_text: str = Form(...),
-        source: str = Form("manual_paste"),
-        role_hint: str = Form(""),
-        source_url: str = Form(""),
-    ) -> Any:
-        from .. import interview_corpus
-        if not company.strip() or not raw_text.strip():
-            raise HTTPException(400, "company 和 raw_text 都必填")
-        try:
-            was_new, exp_id = interview_corpus.insert(
-                store,
-                company=company.strip(),
-                raw_text=raw_text.strip(),
-                source=source.strip() or "manual_paste",
-                role_hint=role_hint.strip() or None,
-                source_url=source_url.strip() or None,
-            )
-        except ValueError as e:
-            raise HTTPException(400, str(e)) from None
-
-        # Return the updated list fragment for HTMX swap
-        experiences = _list_interview_experiences(store, company=company.strip())
-        return templates.TemplateResponse(
-            request, "_interview_list.html",
-            _ctx(request, experiences=experiences, just_added=exp_id, was_new=was_new),
         )
 
     @app.post("/api/email/classify", response_class=JSONResponse)
@@ -2619,62 +2712,6 @@ def create_app(
                 for r in regex_results
             ],
         }
-
-    @app.post("/api/agent/sweep", response_class=JSONResponse)
-    def agent_sweep_endpoint(payload: SweepPayload) -> dict:
-        """Run a meta-agent sweep on one company.
-
-        Combines application summary (always) + agentic 面经 collection
-        (when LLM + search are configured). Use this instead of asking
-        the user to manually paste 面经.
-        """
-        from ..agentic import build_default_search, sweep_company
-        from ..llm import LLMClient
-
-        llm: LLMClient | None = None
-        if settings.deepseek_api_key:
-            llm = LLMClient(
-                api_key=settings.deepseek_api_key,
-                base_url=settings.deepseek_base_url,
-                default_model=settings.default_model,
-            )
-
-        search = build_default_search() if payload.do_corpus else None
-
-        result = sweep_company(
-            payload.company,
-            store=store,
-            llm=llm,
-            search=search,
-            do_corpus=payload.do_corpus,
-            role_hint=payload.role_hint or None,
-        )
-
-        return {
-            "company": result.company,
-            "application_summary": result.application_summary,
-            "interview_corpus": (
-                {
-                    "queries_run": result.interview_corpus.queries_run,
-                    "hits_seen": result.interview_corpus.hits_seen,
-                    "hits_evaluated": result.interview_corpus.hits_evaluated,
-                    "inserted": result.interview_corpus.inserted,
-                    "skipped_dup": result.interview_corpus.skipped_dup,
-                    "skipped_low_quality": result.interview_corpus.skipped_low_quality,
-                    "notes": result.interview_corpus.notes,
-                }
-                if result.interview_corpus
-                else None
-            ),
-            "notes": result.notes,
-        }
-
-    # ─────────────────────────── W13 central agent loop ───────────────────────
-    # Model in the driver's seat: model decides which SKILL to call (via OpenAI
-    # tool-calling), when to stop. The /agent page is the user-facing surface;
-    # the SSE endpoint streams every event (state_snapshot / thinking /
-    # tool_call / tool_result / critique / final) so user sees the agent
-    # think + act in real time.
 
     @app.get("/agent", response_class=HTMLResponse)
     def agent_page(request: Request) -> Any:
@@ -2782,7 +2819,8 @@ def create_app(
             memory_store=MemoryStore(root=default_worldview_dir(settings)),
             llm=llm, runtime=runtime, skills=skills,
             search=_search, notifier=notifier,
-            user_profile_text=profile.raw_resume_text if profile else None,
+            user_profile_text=_effective_master_text(),
+            research_agents=research_agents,
         )
         trigger = TriggerEvent(
             kind=trigger_kind,
@@ -3263,313 +3301,6 @@ def create_app(
         )
         return {"action": "failed", "ok": ok}
 
-    # ─────────────────────── W13.4 apply assistant ────────────────────────
-    # The actual job-search value: turn a tailored resume + scored job into a
-    # paste-ready application package (Boss直聘 self-intro + form Q/A +
-    # submission strategy). User opens /apply/<job_id> → one-click copy each
-    # piece → goes to Boss/牛客 with everything ready.
-
-    @app.get("/apply", response_class=HTMLResponse)
-    def apply_index(request: Request) -> Any:
-        """W14.11: /apply (no id) — used to be a 404 that confused fresh
-        users who clicked "Apply" expecting to see a job picker. Now
-        redirect to /pipeline where they can pick a job (or paste one)."""
-        return RedirectResponse("/pipeline", status_code=303)
-
-    @app.get("/apply/{job_id}", response_class=HTMLResponse)
-    def apply_view(request: Request, job_id: int) -> Any:
-        """Render the apply package for one job. Generates on first visit
-        if no cached SKILL output exists; subsequent visits show the cached run.
-        """
-        with store.connect() as conn:
-            job_row = conn.execute(
-                "SELECT id, company, title, location, source, url, raw_text "
-                "FROM jobs WHERE id = ?", (job_id,),
-            ).fetchone()
-        if job_row is None:
-            raise HTTPException(404, f"job#{job_id} not found")
-
-        job = {
-            "id": job_row[0], "company": job_row[1], "title": job_row[2],
-            "location": job_row[3], "source": job_row[4], "url": job_row[5],
-            "raw_text": job_row[6],
-        }
-        application_plan = build_application_plan(job)
-
-        # Find the most recent apply_assistant run for this job (cached package)
-        package_dict = None
-        package_run_id = None
-        try:
-            with store.connect() as conn:
-                row = conn.execute(
-                    "SELECT id, output_json FROM skill_runs "
-                    "WHERE skill_name='apply_assistant' "
-                    "  AND input_json LIKE ? "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    (f'%"company": "{job["company"]}"%',),
-                ).fetchone()
-            if row:
-                package_run_id = row[0]
-                package_dict = json_loads(row[1])
-        except Exception:
-            pass
-
-        # Existing applications for this job (lifecycle status)
-        with store.connect() as conn:
-            apps = conn.execute(
-                "SELECT id, status, applied_at, last_status_change "
-                "FROM applications WHERE job_id = ? ORDER BY id DESC",
-                (job_id,),
-            ).fetchall()
-        applications = [
-            {"id": r[0], "status": r[1], "applied_at": r[2], "last_change": r[3]}
-            for r in apps
-        ]
-
-        return templates.TemplateResponse(
-            request, "apply.html",
-            _ctx(
-                request, job=job,
-                package=package_dict, package_run_id=package_run_id,
-                application_plan=application_plan,
-                applications=applications,
-                profile_loaded=profile is not None,
-                runtime_ready=runtime is not None and bool(settings.deepseek_api_key),
-                active_tab="apply",
-            ),
-        )
-
-    @app.post("/api/apply/{job_id}/generate", response_class=JSONResponse)
-    def apply_generate(job_id: int) -> dict:
-        """Trigger apply_assistant SKILL for this job.
-
-        Synchronous (10-30s LLM). Returns the generated package as JSON for
-        the UI to render in place. Cached afterwards (subsequent /apply/N
-        page loads find this skill_run via input_json LIKE).
-        """
-        if runtime is None or profile is None:
-            raise HTTPException(
-                400,
-                "Need both runtime + profile (OFFERGUIDE_LLM_API_KEY + OFFERGUIDE_RESUME_PDF)",
-            )
-        spec = next((s for s in skills if s.name == "apply_assistant"), None)
-        if spec is None:
-            raise HTTPException(500, "apply_assistant SKILL not loaded")
-
-        with store.connect() as conn:
-            row = conn.execute(
-                "SELECT company, title, raw_text FROM jobs WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-        if row is None:
-            raise HTTPException(404, f"job#{job_id} not found")
-        company, title, raw_text = row
-
-        if not raw_text or len(raw_text) < 200:
-            raise HTTPException(
-                400,
-                f"job#{job_id} raw_text too thin ({len(raw_text or '')}字), "
-                "先 enrich 或人工补全 JD",
-            )
-
-        try:
-            result = runtime.invoke(
-                spec,
-                {
-                    "company": company or "?",
-                    "role_focus": title or "?",
-                    "job_text": raw_text,
-                    "user_profile": profile.raw_resume_text,
-                },
-            )
-        except LLMError as e:
-            raise HTTPException(502, f"LLM 调用失败: {e}") from None
-
-        return {
-            "skill_run_id": result.skill_run_id,
-            "package": result.parsed,
-            "raw_text": result.raw_text if result.parsed is None else None,
-        }
-
-    @app.post("/api/apply/{job_id}/mark", response_class=JSONResponse)
-    def apply_mark(job_id: int, status: str = Form(...)) -> dict:
-        """User marks an application status (submitted / hr_viewed / replied / rejected).
-
-        Updates applications table + writes an application_event for audit.
-        Drives the W13.x feedback loop: app_outcome signals fan to evolution.
-        """
-        VALID_STATES = {
-            "considered", "submitted", "hr_viewed", "replied",
-            "interview", "offer", "rejected", "withdrawn",
-        }
-        if status not in VALID_STATES:
-            raise HTTPException(400, f"unknown status '{status}'; valid: {sorted(VALID_STATES)}")
-
-        with store.connect() as conn:
-            existing = conn.execute(
-                "SELECT id FROM applications WHERE job_id = ? ORDER BY id DESC LIMIT 1",
-                (job_id,),
-            ).fetchone()
-            if existing is None:
-                cur = conn.execute(
-                    "INSERT INTO applications(job_id, status, applied_at) "
-                    "VALUES (?, ?, julianday('now'))",
-                    (job_id, status),
-                )
-                app_id = int(cur.lastrowid or 0)
-            else:
-                app_id = int(existing[0])
-                conn.execute(
-                    "UPDATE applications SET status = ?, "
-                    "  last_status_change = julianday('now') "
-                    "WHERE id = ?",
-                    (status, app_id),
-                )
-            # Event log entry
-            event_kind = {
-                "submitted": "submitted", "hr_viewed": "viewed",
-                "replied": "replied", "interview": "interview",
-                "offer": "offer", "rejected": "rejected",
-                "withdrawn": "withdrawn",
-            }.get(status, "submitted")
-            conn.execute(
-                "INSERT INTO application_events(application_id, kind, source) "
-                "VALUES (?, ?, 'manual')",
-                (app_id, event_kind),
-            )
-
-        # W20.5 — multi-SKILL outcome attribution.
-        # Pre-W20.5: only apply_assistant got credit (hardcoded skill_version=0.1.0).
-        # Real chain for an application:
-        #   score_match (找到岗) → tailor_resume (改简历)
-        #   → apply_assistant (写自我介绍) → prepare_interview (面试准备)
-        # All 4 SKILLs participated. Outcome should fan to all of them via
-        # the harness_events linking SKILL run_ids ↔ job_id (written by
-        # _exec_score_match for score_match and _link_skill_to_job_and_signal
-        # for apply_assistant + prepare_interview).
-        try:
-            from .. import evolution as _evo
-            outcome_map = {
-                "offer": "offer", "interview": "interview",
-                "replied": "interview",  # reply ~= positive
-                "rejected": "rejected",
-                # 'submitted' / 'hr_viewed' too early to score
-            }
-            outcome = outcome_map.get(status)
-            if outcome:
-                # W20.5 — find all SKILL runs that touched this job via
-                # harness_events (kind 'scored' / 'apply_pack_generated' /
-                # 'post_apply_pack_generated'). harness_events table may not
-                # exist in fresh fixtures — init it here defensively (idempotent)
-                # and fall back to apply_assistant only-attribution if so.
-                try:
-                    from ..agent_runtime import _schema as _hs
-                    _hs.init_agent_runtime_schema(store)
-                except Exception:
-                    pass
-                with store.connect() as conn:
-                    skill_rows = conn.execute(
-                        "SELECT DISTINCT json_extract(note, '$.skill_run_id') as srid, "
-                        "       json_extract(note, '$.skill_name') as sn "
-                        "FROM harness_events "
-                        "WHERE job_id = ? AND kind IN "
-                        "  ('scored', 'apply_pack_generated', 'post_apply_pack_generated') "
-                        "  AND json_extract(note, '$.skill_run_id') IS NOT NULL",
-                        (job_id,),
-                    ).fetchall()
-                    # Map skill_run_id → skill_version
-                    seen_runs: set[int] = set()
-                    for srid_raw, sn_raw in skill_rows:
-                        if srid_raw is None:
-                            continue
-                        srid = int(srid_raw)
-                        if srid in seen_runs:
-                            continue
-                        seen_runs.add(srid)
-                        sn = str(sn_raw) if sn_raw else None
-                        # Look up version + (if we don't have skill_name) name
-                        sr = conn.execute(
-                            "SELECT skill_name, skill_version "
-                            "FROM skill_runs WHERE id = ?",
-                            (srid,),
-                        ).fetchone()
-                        if not sr:
-                            continue
-                        skill_name = sn or str(sr[0])
-                        skill_version = str(sr[1])
-                        try:
-                            _evo.record_app_outcome(
-                                store,
-                                skill_name=skill_name,
-                                skill_version=skill_version,
-                                skill_run_id=srid,
-                                outcome=outcome,  # type: ignore[arg-type]
-                                weight=1.0,
-                            )
-                        except Exception as e:
-                            log.debug(
-                                "app_outcome write for %s#%d failed: %s",
-                                skill_name, srid, e,
-                            )
-                # Fallback if NO SKILL events found (job created from
-                # user paste with no SKILL chain) — at least keep old behavior
-                # of attributing to apply_assistant
-                if not skill_rows:
-                    _evo.record_app_outcome(
-                        store, skill_name="apply_assistant",
-                        skill_version="0.1.0", skill_run_id=None,
-                        outcome=outcome,  # type: ignore[arg-type]
-                        weight=0.5,  # lower weight since attribution is fuzzy
-                    )
-        except Exception as e:
-            log.debug("apply outcome signal write failed: %s", e)
-
-        # W14 联动: outcome → user_facts. Terminal outcomes (offer/rejected) are
-        # high-quality preference signals — extract them as user_facts so future
-        # agent runs see them in the snapshot's user_facts section. This closes
-        # the loop: agent suggests → user marks outcome → fact lands → agent
-        # respects in future suggestions.
-        try:
-            from .. import user_facts as _uf
-            with store.connect() as conn:
-                row = conn.execute(
-                    "SELECT j.company, j.title FROM applications a "
-                    "LEFT JOIN jobs j ON j.id = a.job_id WHERE a.id = ?",
-                    (app_id,),
-                ).fetchone()
-            if row and row[0]:
-                company, title = row
-                fact_text = None
-                kind = None
-                confidence = 0.85
-                if status == "offer":
-                    fact_text = f"用户拿到 offer: {company} {title or ''} 岗位"
-                    kind = "experience"
-                    confidence = 1.0
-                elif status == "rejected":
-                    fact_text = (
-                        f"用户被 {company} {title or ''} 岗位拒了 "
-                        f"(future agent 推类似岗位时降优先级)"
-                    )
-                    kind = "company_signal"
-                    confidence = 0.85
-                elif status == "interview":
-                    fact_text = f"用户进入 {company} {title or ''} 面试阶段"
-                    kind = "experience"
-                    confidence = 0.95
-                if fact_text and kind:
-                    _uf.add_fact(
-                        store,
-                        fact_text=fact_text, kind=kind, confidence=confidence,
-                        source_skill="apply_lifecycle",
-                        entities=[company] + ([title] if title else []),
-                    )
-        except Exception as e:
-            log_mod = __import__("logging").getLogger(__name__)
-            log_mod.debug("apply outcome → user_facts failed: %s", e)
-
-        return {"app_id": app_id, "status": status}
-
     @app.get("/agent/runs/{run_id}", response_class=HTMLResponse)
     def agent_run_detail(request: Request, run_id: int) -> Any:
         """Read a persisted harness_runs row + render its trajectory.
@@ -3610,10 +3341,8 @@ def create_app(
             artifact_rows = conn.execute(
                 "SELECT id, kind, job_id, note, created_at "
                 "FROM harness_events "
-                "WHERE note LIKE ? AND kind IN ("
-                "  'tailor_resume_generated', 'interview_prep_generated', "
-                "  'project_record_saved', 'project_assessed'"
-                ") "
+                "WHERE note LIKE ? "
+                "AND kind IN ('project_record_saved', 'project_assessed') "
                 "ORDER BY created_at DESC LIMIT 20",
                 (f"%\"agent_run_id\": {run_id}%",),
             ).fetchall()
@@ -3675,806 +3404,6 @@ def create_app(
             ),
         )
 
-    @app.get("/cover-letter/{run_id}.html", response_class=HTMLResponse)
-    def cover_letter_print(request: Request, run_id: int) -> Any:
-        """Print-ready standalone HTML page for one cover letter run.
-
-        User opens ⌘P / Save as PDF in their browser to get a real document.
-        Borrowed from Career-Ops' Playwright HTML→PDF approach (we skip
-        the Playwright dep and let the browser do the print).
-        """
-        with store.connect() as conn:
-            row = conn.execute(
-                "SELECT skill_name, output_json FROM skill_runs WHERE id = ?",
-                (run_id,),
-            ).fetchone()
-        if row is None or row[0] != "write_cover_letter":
-            raise HTTPException(404, f"no write_cover_letter run with id {run_id}")
-        try:
-            cover = json_loads(row[1])
-        except (json.JSONDecodeError, TypeError):
-            raise HTTPException(500, "stored cover letter output is corrupt") from None
-
-        return templates.TemplateResponse(
-            request, "cover_letter_print.html",
-            _ctx(request, cover=cover, run_id=run_id),
-        )
-
-    @app.get("/tailor", response_class=HTMLResponse)
-    def tailor_view(request: Request, job_id: str = "") -> Any:
-        """简历微调入口页 — 选 JD + 显示 master resume + 一键 tailor.
-
-        W14: 同时列出 data/tailored/ 里已有的 docx 文件 (按 mtime 排倒序),
-        让用户能直接预览 / 下载 / 重做, 不必每次重新跑 LLM。
-        """
-        from pathlib import Path as _Path
-
-        from .. import briefs as briefs_mod  # noqa: F401 (potential import cycle guard)
-
-        # List recent jobs that have raw_text >= 200 chars (real JD body, not just metadata)
-        with store.connect() as conn:
-            jobs_rows = conn.execute(
-                "SELECT id, title, company, location, source, length(raw_text) AS L "
-                "FROM jobs WHERE length(raw_text) >= 200 "
-                "ORDER BY fetched_at DESC LIMIT 30"
-            ).fetchall()
-        jobs = [
-            {"id": r[0], "title": r[1] or "(无标题)", "company": r[2] or "?",
-             "location": r[3] or "", "source": r[4], "raw_text_len": r[5]}
-            for r in jobs_rows
-        ]
-        master_resume_text = profile.raw_resume_text if profile else ""
-        latest_agent_tailor = _latest_agent_tailor_result(store)
-
-        # W14: existing tailored docx history
-        existing_tailored: list[dict] = []
-        tailored_dir = _Path("data/tailored")
-        if tailored_dir.exists():
-            for f in sorted(
-                tailored_dir.glob("*.docx"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )[:20]:
-                existing_tailored.append({
-                    "filename": f.name,
-                    "size_kb": f.stat().st_size // 1024,
-                    "mtime": f.stat().st_mtime,
-                })
-
-        return templates.TemplateResponse(
-            request, "tailor.html",
-            _ctx(
-                request,
-                jobs=jobs,
-                selected_job_id=job_id,
-                master_resume=master_resume_text,
-                latest_agent_tailor=latest_agent_tailor,
-                existing_tailored=existing_tailored,
-                active_tab="tailor",
-            ),
-        )
-
-    @app.post("/api/tailor/docx", response_class=HTMLResponse)
-    def tailor_docx_run(
-        request: Request,
-        job_id: str = Form(...),
-    ) -> Any:
-        """Real .docx tailoring — preserves Word format end-to-end.
-
-        Reads the user's master resume (must be .docx via OFFERGUIDE_RESUME_PDF),
-        the selected job's JD text, runs ``docx_tailor.tailor_docx()`` with
-        real LLM, and saves the output to ``data/tailored/<job_id>_<ts>.docx``.
-        Renders a result fragment with summary + change_log + download link.
-        """
-        import time as _time
-        from pathlib import Path as _Path
-
-        from ..skills.tailor_resume.docx_tailor import tailor_docx
-
-        if profile is None or not profile.source_pdf:
-            return templates.TemplateResponse(
-                request, "_tailor_docx_result.html",
-                _ctx(request, error="没加载简历——设 OFFERGUIDE_RESUME_PDF 后重启"),
-            )
-        # W14.8: direct attribute access (not getattr) so pyright narrows the
-        # `str | None` to `str` after the truthy check above.
-        master_path = _Path(profile.source_pdf)
-        if master_path.suffix.lower() != ".docx":
-            return templates.TemplateResponse(
-                request, "_tailor_docx_result.html",
-                _ctx(request, error=(
-                    "DOCX tailoring 要求 master 简历是 .docx 格式。"
-                    f"现在是 {master_path.suffix}。把 OFFERGUIDE_RESUME_PDF "
-                    "指向 .docx 文件后重启。"
-                )),
-            )
-        if runtime is None:
-            return templates.TemplateResponse(
-                request, "_tailor_docx_result.html",
-                _ctx(request, error="未配置 LLM——设 OFFERGUIDE_LLM_API_KEY 后重启"),
-            )
-
-        try:
-            jid = int(job_id)
-        except ValueError:
-            return templates.TemplateResponse(
-                request, "_tailor_docx_result.html",
-                _ctx(request, error="job_id 必须是整数"),
-            )
-
-        with store.connect() as conn:
-            row = conn.execute(
-                "SELECT title, company, raw_text FROM jobs WHERE id = ?", (jid,),
-            ).fetchone()
-        if row is None:
-            return templates.TemplateResponse(
-                request, "_tailor_docx_result.html",
-                _ctx(request, error=f"找不到 job #{jid}"),
-            )
-        title, company, job_text = row
-        company = (company or "").strip() or "(未知公司)"
-
-        # Build output filename + path
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_company = company.replace("/", "_").replace(" ", "_")[:20]
-        output_dir = _Path("data/tailored")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_filename = f"tailored_{safe_company}_{ts}.docx"
-        output_path = output_dir / output_filename
-
-        try:
-            # Use the runtime's LLM directly (it's the same instance)
-            llm = runtime._llm
-            result = tailor_docx(
-                input_path=master_path,
-                output_path=output_path,
-                jd_text=job_text,
-                company=company,
-                role_focus=title or "",
-                master_resume_text=profile.raw_resume_text,
-                llm=llm,
-            )
-        except Exception as e:
-            return templates.TemplateResponse(
-                request, "_tailor_docx_result.html",
-                _ctx(request, error=f"tailor_docx 失败: {e}"),
-            )
-
-        return templates.TemplateResponse(
-            request, "_tailor_docx_result.html",
-            _ctx(
-                request,
-                docx_result=result,
-                summary=result.summary(),
-                changes=result.changes,
-                skipped=result.skipped[:10],  # cap display
-                download_filename=output_filename,
-                job_title=title, job_company=company,
-                _time=_time,  # for cache-bust query
-            ),
-        )
-
-    @app.get("/api/tailor/preview/{filename}")
-    def tailor_preview(filename: str) -> Any:
-        """Legacy mammoth-HTML preview path — now redirects to libreoffice PDF.
-
-        Mammoth flattens tab/space-based multi-column layout (master 用
-        \\t 实现的"学校 ... 时间"两栏) into a single line, losing the
-        resume's visual structure. The libreoffice PDF path renders
-        the docx 100% faithfully (multi-column, headshot, fonts all
-        preserved). Keep the URL alive for any saved links / bookmarks,
-        but route through the faithful renderer.
-        """
-        from fastapi.responses import RedirectResponse
-
-        if "/" in filename or "\\" in filename or ".." in filename:
-            raise HTTPException(400, "invalid filename")
-        if not filename.endswith(".docx"):
-            raise HTTPException(400, "not a docx")
-        return RedirectResponse(url=f"/api/tailor/pdf/{filename}", status_code=307)
-
-    @app.get("/api/tailor/pdf/{filename}")
-    def tailor_pdf(filename: str) -> Any:
-        """Convert .docx to PDF via libreoffice (if installed) and serve it.
-
-        Returns 503 if libreoffice not available — UI then suggests user
-        use the HTML preview's ⌘P / Ctrl-P print-to-PDF instead.
-        """
-        from pathlib import Path as _Path
-
-        from fastapi.responses import FileResponse
-
-        if "/" in filename or "\\" in filename or ".." in filename:
-            raise HTTPException(400, "invalid filename")
-        if not filename.endswith(".docx"):
-            raise HTTPException(400, "not a docx")
-
-        path = _Path("data/tailored") / filename
-        if not path.exists():
-            raise HTTPException(404, "file not found")
-
-        try:
-            from ..skills.tailor_resume.preview import soffice_to_pdf
-            pdf_path = soffice_to_pdf(path, _Path("data/tailored/pdf"))
-        except Exception as e:
-            raise HTTPException(500, f"pdf conversion failed: {e}") from None
-
-        if pdf_path is None:
-            raise HTTPException(
-                503,
-                "libreoffice not installed; use the HTML preview's "
-                "⌘P / Ctrl-P → 'Save as PDF' instead",
-            )
-
-        return FileResponse(
-            str(pdf_path),
-            media_type="application/pdf",
-            filename=pdf_path.name,
-        )
-
-    @app.get("/api/tailor/download/{filename}")
-    def tailor_download(filename: str) -> Any:
-        """Serve a previously-tailored .docx for download.
-
-        Filename validation: must match the format we wrote
-        (``tailored_<company>_<ts>.docx``) — refuse path traversal.
-        """
-        from pathlib import Path as _Path
-
-        from fastapi.responses import FileResponse
-
-        # Defense in depth: filename must not contain path separators
-        if "/" in filename or "\\" in filename or ".." in filename:
-            raise HTTPException(400, "invalid filename")
-        if not filename.endswith(".docx"):
-            raise HTTPException(400, "not a docx")
-
-        path = _Path("data/tailored") / filename
-        if not path.exists():
-            raise HTTPException(404, "file not found (regenerate?)")
-        return FileResponse(
-            str(path),
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            filename=filename,
-        )
-
-    @app.post("/api/tailor/run", response_class=HTMLResponse)
-    def tailor_run(
-        request: Request,
-        job_id: str = Form(...),
-    ) -> Any:
-        """Invoke tailor_resume SKILL on selected job + master resume + (optional) profile."""
-        if profile is None:
-            return templates.TemplateResponse(
-                request, "_tailor_result.html",
-                _ctx(request, error="未加载简历——设 OFFERGUIDE_RESUME_PDF 后重启。"),
-            )
-        if runtime is None:
-            return templates.TemplateResponse(
-                request, "_tailor_result.html",
-                _ctx(request, error="未配置 LLM——设 BASE_URL/TOKEN 后重启。"),
-            )
-        try:
-            jid = int(job_id)
-        except ValueError:
-            return templates.TemplateResponse(
-                request, "_tailor_result.html",
-                _ctx(request, error="job_id 必须是整数"),
-            )
-
-        with store.connect() as conn:
-            row = conn.execute(
-                "SELECT title, company, raw_text FROM jobs WHERE id = ?", (jid,)
-            ).fetchone()
-        if row is None:
-            return templates.TemplateResponse(
-                request, "_tailor_result.html",
-                _ctx(request, error=f"找不到 job #{jid}"),
-            )
-        title, company, job_text = row
-        company = (company or "").strip() or "(未知公司)"
-
-        # Optional successful_profile lookup — best-effort
-        from .. import corpus_quality
-        successful_profile_json = "{}"
-        if company:
-            samples = corpus_quality.fetch_high_quality(
-                store, company=company, limit=5,
-            )
-            if samples:
-                # Try to find an existing successful_profile run we can reuse
-                with store.connect() as conn:
-                    sp_row = conn.execute(
-                        "SELECT output_json FROM skill_runs "
-                        "WHERE skill_name = 'successful_profile' "
-                        "  AND input_json LIKE ? "
-                        "ORDER BY created_at DESC LIMIT 1",
-                        (f'%"{company}"%',),
-                    ).fetchone()
-                if sp_row:
-                    successful_profile_json = sp_row[0]
-
-        spec = next((s for s in skills if s.name == "tailor_resume"), None)
-        if spec is None:
-            return templates.TemplateResponse(
-                request, "_tailor_result.html",
-                _ctx(request, error="tailor_resume SKILL 未加载"),
-            )
-
-        try:
-            from .. import project_vault as _pv
-            result = runtime.invoke(
-                spec,
-                {
-                    "master_resume": _pv.append_to_profile_text(
-                        store, profile.raw_resume_text, max_project_chars=3500,
-                    ),
-                    "job_text": job_text,
-                    "company": company,
-                    "successful_profile_json": successful_profile_json,
-                },
-            )
-        except LLMError as e:
-            return templates.TemplateResponse(
-                request, "_tailor_result.html",
-                _ctx(request, error=f"tailor_resume LLM 失败: {e}"),
-            )
-
-        return templates.TemplateResponse(
-            request, "_tailor_result.html",
-            _ctx(
-                request,
-                tailored=result.parsed or {},
-                run_id=result.skill_run_id,
-                job_title=title, job_company=company,
-            ),
-        )
-
-    @app.get("/mock", response_class=HTMLResponse)
-    def mock_view(request: Request) -> Any:
-        """Mock interview 入口 — 选公司 + role + 启动 turn-based 会话。
-
-        会话状态保存在 URL query / form 里 (无 session 中间件), turn_history
-        作为 hidden input 在每次 POST 来回传递。简单可靠。
-        """
-        return templates.TemplateResponse(
-            request, "mock.html",
-            _ctx(request, active_tab="mock"),
-        )
-
-    @app.post("/api/mock/turn", response_class=HTMLResponse)
-    def mock_turn(
-        request: Request,
-        company: str = Form(...),
-        role_focus: str = Form(""),
-        turn_history_json: str = Form("[]"),
-        last_user_answer: str = Form(""),
-    ) -> Any:
-        """Run one mock_interview turn. Returns the next-question + eval card."""
-        if profile is None:
-            return templates.TemplateResponse(
-                request, "_mock_turn.html",
-                _ctx(request, error="未加载简历——先设 OFFERGUIDE_RESUME_PDF"),
-            )
-        if runtime is None:
-            return templates.TemplateResponse(
-                request, "_mock_turn.html",
-                _ctx(request, error="未配置 LLM——先设 BASE_URL/TOKEN"),
-            )
-        if not company.strip():
-            return templates.TemplateResponse(
-                request, "_mock_turn.html",
-                _ctx(request, error="company 必填"),
-            )
-
-        # Pull latest prepare_interview run for this company (优先用预测题)
-        prep_questions_json = "[]"
-        with store.connect() as conn:
-            prep_row = conn.execute(
-                "SELECT output_json FROM skill_runs "
-                "WHERE skill_name = 'prepare_interview' "
-                "  AND input_json LIKE ? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (f'%"{company.strip()}"%',),
-            ).fetchone()
-        if prep_row:
-            try:
-                pj = json_loads(prep_row[0])
-                prep_questions_json = json_dumps(pj.get("expected_questions", []))
-            except (json.JSONDecodeError, KeyError, TypeError):
-                pass
-
-        spec = next((s for s in skills if s.name == "mock_interview"), None)
-        if spec is None:
-            return templates.TemplateResponse(
-                request, "_mock_turn.html",
-                _ctx(request, error="mock_interview SKILL 未加载"),
-            )
-
-        try:
-            result = runtime.invoke(
-                spec,
-                {
-                    "company": company.strip(),
-                    "role_focus": role_focus.strip(),
-                    "user_resume": profile.raw_resume_text,
-                    "prep_questions_json": prep_questions_json,
-                    "turn_history_json": turn_history_json,
-                    "last_user_answer": last_user_answer,
-                },
-            )
-        except LLMError as e:
-            return templates.TemplateResponse(
-                request, "_mock_turn.html",
-                _ctx(request, error=f"mock_interview LLM 失败: {e}"),
-            )
-
-        parsed = result.parsed or {}
-
-        # Append to turn_history if there was a previous question to evaluate
-        new_history: list[dict] = []
-        try:
-            new_history = json_loads(turn_history_json)
-        except (json.JSONDecodeError, TypeError):
-            new_history = []
-        if last_user_answer.strip() and parsed.get("evaluation_of_last_answer"):
-            new_history.append({
-                "question": parsed["evaluation_of_last_answer"]["question"],
-                "user_answer": last_user_answer.strip(),
-                "evaluation": parsed["evaluation_of_last_answer"],
-            })
-
-        # When complete, auto-feed transcript to post_interview_reflection
-        reflection_run_id = None
-        if parsed.get("session_status") == "complete" and new_history:
-            transcript = _mock_history_to_transcript(
-                new_history, company.strip(),
-            )
-            refl_spec = next(
-                (s for s in skills if s.name == "post_interview_reflection"), None,
-            )
-            if refl_spec is not None:
-                try:
-                    refl = runtime.invoke(
-                        refl_spec,
-                        {
-                            "company": company.strip(),
-                            "prep_questions_json": prep_questions_json,
-                            "actual_transcript": transcript,
-                        },
-                    )
-                    reflection_run_id = refl.skill_run_id
-                except LLMError:
-                    pass  # non-fatal
-
-        return templates.TemplateResponse(
-            request, "_mock_turn.html",
-            _ctx(
-                request,
-                turn=parsed,
-                run_id=result.skill_run_id,
-                company=company.strip(),
-                role_focus=role_focus.strip(),
-                turn_history_json=json_dumps(new_history, ensure_ascii=False),
-                reflection_run_id=reflection_run_id,
-            ),
-        )
-
-    @app.get("/profile/{company}", response_class=HTMLResponse)
-    def profile_view(request: Request, company: str, role: str = "") -> Any:
-        """成功者画像 + 简历 gap 投递前 briefing 页面。
-
-        渲染流程：
-        1. ``corpus_quality.fetch_high_quality`` 拉公司 + 角色匹配的高质量样本
-        2. 调用 ``successful_profile`` SKILL 合成画像
-        3. 调用 ``profile_resume_gap`` SKILL 对比简历，输出 4 桶 gap
-
-        如果样本数 < 1，提示用户去 sweep 或先粘几条面经；
-        如果 LLM/profile 未配置，给降级提示但仍展示样本数据。
-        """
-        from .. import corpus_quality
-
-        samples = corpus_quality.fetch_high_quality(
-            store, company=company, role_hint=role or None, limit=8,
-        )
-
-        # 数据不足，直接渲染空状态
-        if not samples:
-            return templates.TemplateResponse(
-                request, "profile_briefing.html",
-                _ctx(
-                    request,
-                    company=company,
-                    role=role,
-                    samples=[],
-                    profile_result=None,
-                    gap_result=None,
-                    error="样本不足——还没有该公司的高质量面经/offer 帖。"
-                          "去 /interviews 粘几条，或运行 corpus_refresh 任务。",
-                    active_tab="profile",
-                ),
-            )
-
-        if profile is None or runtime is None:
-            return templates.TemplateResponse(
-                request, "profile_briefing.html",
-                _ctx(
-                    request,
-                    company=company,
-                    role=role,
-                    samples=samples,
-                    profile_result=None,
-                    gap_result=None,
-                    error="未配置简历或 LLM——只能展示样本，无法合成画像。",
-                    active_tab="profile",
-                ),
-            )
-
-        # Find SKILLs
-        profile_spec = next(
-            (s for s in skills if s.name == "successful_profile"), None,
-        )
-        gap_spec = next(
-            (s for s in skills if s.name == "profile_resume_gap"), None,
-        )
-        if profile_spec is None or gap_spec is None:
-            return templates.TemplateResponse(
-                request, "profile_briefing.html",
-                _ctx(
-                    request, company=company, role=role, samples=samples,
-                    profile_result=None, gap_result=None,
-                    error="successful_profile / profile_resume_gap SKILL 未加载",
-                    active_tab="profile",
-                ),
-            )
-
-        # Run successful_profile
-        samples_for_skill = [
-            {
-                "id": s["id"],
-                "content_kind": s["content_kind"],
-                "raw_text": (s["raw_text"] or "")[:3000],  # cap to keep prompt small
-                "source": s["source"],
-                "source_url": s["source_url"] or "",
-                "quality_score": s["quality_score"],
-            }
-            for s in samples
-        ]
-        profile_result = None
-        profile_run_id = None
-        try:
-            sp = runtime.invoke(
-                profile_spec,
-                {
-                    "company": company,
-                    "role_hint": role or "",
-                    "high_quality_samples_json": json_dumps(samples_for_skill),
-                },
-            )
-            profile_result = sp.parsed or {}
-            profile_run_id = sp.skill_run_id
-        except LLMError as e:
-            return templates.TemplateResponse(
-                request, "profile_briefing.html",
-                _ctx(
-                    request, company=company, role=role, samples=samples,
-                    profile_result=None, gap_result=None,
-                    error=f"successful_profile 调用失败: {e}",
-                    active_tab="profile",
-                ),
-            )
-
-        # Run profile_resume_gap
-        gap_result = None
-        gap_run_id = None
-        try:
-            gr = runtime.invoke(
-                gap_spec,
-                {
-                    "successful_profile_json": json_dumps(profile_result),
-                    "user_resume": profile.raw_resume_text,
-                },
-            )
-            gap_result = gr.parsed or {}
-            gap_run_id = gr.skill_run_id
-        except LLMError as e:
-            # Profile rendered, gap missing — degrade gracefully
-            return templates.TemplateResponse(
-                request, "profile_briefing.html",
-                _ctx(
-                    request, company=company, role=role, samples=samples,
-                    profile_result=profile_result, profile_run_id=profile_run_id,
-                    gap_result=None,
-                    error=f"profile_resume_gap 调用失败: {e}",
-                    active_tab="profile",
-                ),
-            )
-
-        return templates.TemplateResponse(
-            request, "profile_briefing.html",
-            _ctx(
-                request,
-                company=company,
-                role=role,
-                samples=samples,
-                profile_result=profile_result,
-                profile_run_id=profile_run_id,
-                gap_result=gap_result,
-                gap_run_id=gap_run_id,
-                active_tab="profile",
-            ),
-        )
-
-    @app.get("/reflect", response_class=HTMLResponse)
-    def reflect_view(request: Request) -> Any:
-        """Page where the user submits an interview transcript for analysis."""
-        with store.connect() as conn:
-            recent_runs = conn.execute(
-                "SELECT id, skill_name, skill_version, "
-                "(julianday('now') - created_at) * 86400 AS age_seconds "
-                "FROM skill_runs WHERE skill_name IN "
-                "('prepare_interview', 'deep_project_prep') "
-                "ORDER BY created_at DESC LIMIT 20"
-            ).fetchall()
-        prep_runs = [
-            {
-                "id": r[0], "skill": r[1], "version": r[2],
-                "when_ago": _humanize_age(float(r[3] or 0)),
-            }
-            for r in recent_runs
-        ]
-        return templates.TemplateResponse(
-            request, "reflect.html",
-            _ctx(request, prep_runs=prep_runs, active_tab="reflect"),
-        )
-
-    @app.post("/api/reflect/run", response_class=HTMLResponse)
-    def reflect_run(
-        request: Request,
-        company: str = Form(...),
-        prep_run_id: str = Form(""),
-        actual_transcript: str = Form(...),
-        auto_apply_stories: str = Form(""),  # checkbox value
-        auto_apply_brief: str = Form(""),
-    ) -> Any:
-        """Run post_interview_reflection SKILL on the transcript + previous prep.
-
-        When auto_apply_* checkboxes are set, automatically:
-        - Insert suggested_stories into behavioral_stories table
-        - Append brief_delta.interview_style_addition to company_briefs
-        """
-        if profile is None:
-            return templates.TemplateResponse(
-                request, "_reflect_result.html",
-                _ctx(request, error="未加载简历——设 OFFERGUIDE_RESUME_PDF 后重启。"),
-            )
-        if runtime is None:
-            return templates.TemplateResponse(
-                request, "_reflect_result.html",
-                _ctx(request, error="未配置 LLM——设 DEEPSEEK_API_KEY 后重启。"),
-            )
-        if not company.strip() or not actual_transcript.strip():
-            return templates.TemplateResponse(
-                request, "_reflect_result.html",
-                _ctx(request, error="company 和 actual_transcript 都必填。"),
-            )
-
-        # Pull the prep run output to seed prep_questions_json
-        prep_questions: list[dict] = []
-        if prep_run_id.strip():
-            try:
-                rid = int(prep_run_id)
-                with store.connect() as conn:
-                    row = conn.execute(
-                        "SELECT skill_name, output_json FROM skill_runs WHERE id = ?",
-                        (rid,),
-                    ).fetchone()
-                if row:
-                    skill_name, out_json = row
-                    try:
-                        out = json_loads(out_json)
-                    except Exception:
-                        out = {}
-                    if skill_name == "prepare_interview":
-                        prep_questions = out.get("expected_questions", [])
-                    elif skill_name == "deep_project_prep":
-                        # Flatten probing questions across projects + cross + behavioral
-                        prep_questions = []
-                        for proj in (out.get("projects_analyzed") or []):
-                            prep_questions.extend(proj.get("probing_questions", []))
-                        prep_questions.extend(out.get("cross_project_questions", []))
-                        prep_questions.extend(out.get("behavioral_questions_tailored", []))
-            except (ValueError, KeyError):
-                pass
-
-        # Find SKILL spec
-        spec = next((s for s in skills if s.name == "post_interview_reflection"), None)
-        if spec is None:
-            return templates.TemplateResponse(
-                request, "_reflect_result.html",
-                _ctx(request, error="post_interview_reflection SKILL 未加载。"),
-            )
-
-        try:
-            result = runtime.invoke(
-                spec,
-                {
-                    "company": company.strip(),
-                    "prep_questions_json": json_dumps(prep_questions),
-                    "actual_transcript": actual_transcript.strip(),
-                },
-            )
-        except LLMError as e:
-            return templates.TemplateResponse(
-                request, "_reflect_result.html",
-                _ctx(request, error=f"LLM 调用失败: {e}"),
-            )
-
-        parsed = result.parsed or {}
-
-        # Auto-apply: insert suggested stories
-        applied_stories: list[int] = []
-        if auto_apply_stories and parsed.get("suggested_stories"):
-            from .. import story_bank
-            for s in parsed["suggested_stories"]:
-                try:
-                    new_story = story_bank.insert(
-                        store,
-                        title=s.get("title", "(no title)"),
-                        situation=s.get("suggested_situation", ""),
-                        task=s.get("suggested_task", ""),
-                        action=s.get("suggested_action", ""),
-                        result=s.get("suggested_result", ""),
-                        reflection=s.get("suggested_reflection") or None,
-                        tags=s.get("suggested_tags", []),
-                        confidence=0.5,
-                    )
-                    applied_stories.append(new_story.id)
-                except (ValueError, KeyError):
-                    pass
-
-        # Auto-apply: brief delta
-        brief_updated = False
-        if auto_apply_brief and parsed.get("brief_delta"):
-            from .. import briefs as briefs_mod
-            existing = briefs_mod.get_brief(store, company.strip())
-            delta = parsed["brief_delta"]
-            addition = (delta.get("interview_style_addition") or "").strip()
-            new_signals = list(delta.get("new_recent_signals") or [])
-            conf_adj = float(delta.get("confidence_adjustment") or 0.0)
-            if existing:
-                # Merge: append addition + extend signals + adjust confidence
-                merged_style = existing.brief.interview_style
-                if addition and addition not in merged_style:
-                    sep = " · " if merged_style.strip() else ""
-                    merged_style = f"{merged_style.strip()}{sep}{addition}"
-                merged_signals = list(existing.brief.recent_signals) + new_signals
-                merged_signals = list(dict.fromkeys(merged_signals))[:8]
-                from ..briefs import CompanyBrief, _upsert
-                new_brief = CompanyBrief(
-                    summary=existing.brief.summary,
-                    current_app_limit=existing.brief.current_app_limit,
-                    interview_style=merged_style,
-                    recent_signals=merged_signals,
-                    hiring_trend=existing.brief.hiring_trend,
-                    confidence=max(0.0, min(1.0, existing.brief.confidence + conf_adj)),
-                )
-                _upsert(store, company.strip(), new_brief)
-                brief_updated = True
-
-        return templates.TemplateResponse(
-            request, "_reflect_result.html",
-            _ctx(
-                request,
-                reflection=parsed,
-                run_id=result.skill_run_id,
-                company=company.strip(),
-                applied_stories=applied_stories,
-                brief_updated=brief_updated,
-            ),
-        )
-
     @app.post("/api/applications/{app_id}/events/ics", response_class=JSONResponse)
     def applications_log_ics(
         app_id: int,
@@ -4483,50 +3412,92 @@ def create_app(
         """Upload an ICS calendar file → record interview event(s)."""
         from .. import application_events as ae
         from .. import ics_parser
-        from ..state_machine import sync_status
 
-        events = ics_parser.parse_ics(ics_text)
+        try:
+            events = ics_parser.parse_ics(ics_text)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
         chosen = ics_parser.select_first_interview(events)
+        if chosen is None:
+            chosen = next(
+                (
+                    event
+                    for event in events
+                    if event.calendar_action == "cancelled"
+                    and ae.has_calendar_uid(
+                        store,
+                        application_id=app_id,
+                        uid=event.uid,
+                    )
+                ),
+                None,
+            )
         if chosen is None:
             raise HTTPException(
                 400,
                 "ICS file did not contain a recognizable interview event "
-                "(no 面试/interview keyword in summary/description).",
+                "or a cancellation matching an existing interview UID.",
+            )
+        if not chosen.uid:
+            raise HTTPException(400, "ICS interview event is missing its required UID.")
+        calendar_action = chosen.calendar_action
+        if calendar_action == "unsupported":
+            raise HTTPException(
+                400,
+                f"ICS METHOD {chosen.method!r} does not publish, schedule, or cancel an interview.",
             )
 
-        occurred_at = (
-            ics_parser.datetime_to_julianday(chosen.dtstart_utc)
-            if chosen.dtstart_utc
-            else None
-        )
-        try:
-            ae.record(
-                store,
-                application_id=app_id,
-                kind="interview",
-                source="calendar",
-                occurred_at=occurred_at,
-                payload={
-                    "summary": chosen.summary[:200],
-                    "scheduled_at": (
-                        chosen.dtstart_utc.isoformat()
-                        if chosen.dtstart_utc
-                        else None
-                    ),
-                    "description": chosen.description[:500],
-                    "ics_event_count": len(events),
-                },
-            )
-        except Exception as e:
-            raise HTTPException(400, f"failed to record: {e}") from None
-        sync_status(store, app_id, "interview")
-
-        return {
-            "ok": True,
-            "application_id": app_id,
+        payload = {
+            "summary": chosen.summary,
+            "description": chosen.description,
+            "round": chosen.round,
             "scheduled_at": (
                 chosen.dtstart_utc.isoformat() if chosen.dtstart_utc else None
             ),
+            "scheduled_at_local": (
+                chosen.dtstart_local.isoformat() if chosen.dtstart_local else None
+            ),
+            "scheduled_date": (
+                chosen.dtstart_date.isoformat() if chosen.dtstart_date else None
+            ),
+            "scheduled_tzid": chosen.dtstart_tzid,
+            "ics_status": chosen.status,
+            "ics_method": chosen.method,
+            "ics_text": ics_text,
+            "ics_event_count": len(events),
+        }
+
+        try:
+            outcome = ae.record_calendar_event(
+                store,
+                application_id=app_id,
+                uid=chosen.uid,
+                sequence=chosen.sequence,
+                action=calendar_action,
+                payload=payload,
+            )
+        except Exception as e:
+            raise HTTPException(400, f"failed to record: {e}") from None
+        return {
+            "ok": True,
+            "application_id": app_id,
+            "event_kind": outcome.event.kind,
+            "calendar_action": calendar_action,
+            "calendar_record_state": outcome.state,
+            "recorded": outcome.created,
+            "uid": chosen.uid,
+            "sequence": chosen.sequence,
+            "round": chosen.round,
+            "scheduled_at": (
+                chosen.dtstart_utc.isoformat() if chosen.dtstart_utc else None
+            ),
+            "scheduled_at_local": (
+                chosen.dtstart_local.isoformat() if chosen.dtstart_local else None
+            ),
+            "scheduled_date": (
+                chosen.dtstart_date.isoformat() if chosen.dtstart_date else None
+            ),
+            "scheduled_tzid": chosen.dtstart_tzid,
             "summary": chosen.summary,
         }
 
@@ -4534,21 +3505,6 @@ def create_app(
     def dashboard_view(request: Request) -> Any:
         from fastapi.responses import RedirectResponse as _R
         return _R(url="/", status_code=301)  # W21 redesign: merged into Mission Control
-        from .. import briefs as briefs_mod
-        return templates.TemplateResponse(
-            request,
-            "dashboard.html",
-            _ctx(
-                request,
-                stats=_full_stats(store),
-                funnel=_application_funnel(store),
-                evolutions=_recent_evolutions(store, limit=10),
-                recent_runs=_recent_skill_runs(store, limit=10),
-                briefs=briefs_mod.list_briefs(store, limit=10),
-                daemon_health=_daemon_health(store),
-                active_tab="dashboard",
-            ),
-        )
 
     # /chat removed in W13.1 — replaced by /agent (W13 central agent loop).
     # The old handler dispatched a hardcoded LangGraph (W4 graph.py) over the
@@ -4639,16 +3595,13 @@ def create_app(
 
         return RedirectResponse("/", status_code=303)
 
-    # ── Browser extension ingest endpoint ──────────────────────────────
-
     @app.get("/api/search/test", response_class=JSONResponse)
     def search_test() -> dict:
         """Run a canary query against each search backend, return health.
 
-        UI uses this to tell the user "your search backend is reachable"
-        BEFORE relying on it for daily corpus_refresh sweeps. National
-        firewalls can block DDG; Bing might serve CAPTCHA on certain
-        IPs; Tavily depends on API key. This endpoint surfaces all 3.
+        This diagnoses the same search backends available to the two research
+        Agents. Firewalls can block DDG, Bing may serve a CAPTCHA, and Tavily
+        depends on an API key; this endpoint exposes those real failures.
         """
         import os as _os
 
@@ -4695,47 +3648,66 @@ def create_app(
         return resp
 
     @app.get("/api/extension/package", response_class=JSONResponse)
-    def extension_get_package(company: str) -> JSONResponse:
-        """Return the most recent apply_assistant package for a company.
-
-        Used by the browser extension content script — when user is on a
-        Boss直聘 / 牛客 page, the extension sniffs company name from
-        title and asks here for a paste-ready package.
-
-        Looks up via skill_runs.input_json LIKE filter (a bit hacky but
-        the pre-W13.x schema doesn't index by company; would need a
-        join through jobs to do better, leave for later).
-        """
+    def extension_get_package(company: str, job_id: int | None = None) -> JSONResponse:
+        """Return the package attached to an exact current resume workspace."""
         company = (company or "").strip()
         if not company:
             return _ext_response(404, {"error": "company required"})
         with store.connect() as conn:
-            row = conn.execute(
-                "SELECT s.id, s.output_json, j.id "
-                "FROM skill_runs s "
-                "LEFT JOIN jobs j ON j.company = ? "
-                "WHERE s.skill_name = 'apply_assistant' "
-                "  AND s.input_json LIKE ? "
-                "ORDER BY s.created_at DESC LIMIT 1",
-                (company, f'%"company": "{company}"%'),
-            ).fetchone()
-        if row is None:
-            return _ext_response(404, {
-                "error": "no apply package",
-                "hint": f"先去 OfferGuide /apply/<job_id> 跑 apply_assistant 给 {company} 准备一份",
-            })
-        run_id, output_json, job_id = row
+            rows = conn.execute(
+                "SELECT rw.id, rw.apply_pack_json, j.id, rw.status, j.title "
+                "FROM resume_workspaces rw "
+                "JOIN applications a ON a.id = rw.application_id "
+                "JOIN jobs j ON j.id = a.job_id "
+                "WHERE j.company = ? AND (? IS NULL OR j.id = ?) "
+                "ORDER BY rw.updated_at DESC",
+                (company, job_id, job_id),
+            ).fetchall()
+        if not rows:
+            return _ext_response(
+                404,
+                {
+                    "error": "no reviewed application workspace",
+                    "hint": f"先在 OfferGuide 为 {company} 的具体岗位完成投递包",
+                },
+            )
+        if len(rows) > 1 and job_id is None:
+            return _ext_response(
+                409,
+                {
+                    "error": "multiple workspaces for this company; job_id is required",
+                    "matches": [
+                        {
+                            "workspace_id": int(row[0]),
+                            "job_id": int(row[2]),
+                            "title": str(row[4] or f"job#{row[2]}"),
+                        }
+                        for row in rows
+                    ],
+                },
+            )
+        workspace_id, raw_pack, selected_job_id, status, _title = rows[0]
         try:
-            package = json_loads(output_json)
+            stored = json_loads(raw_pack or "{}")
         except (json.JSONDecodeError, TypeError):
-            return _ext_response(500, {"error": "stored package is corrupt"})
-        return _ext_response(200, {
-            "skill_run_id": run_id,
-            "package": package,
-            "job_id": job_id,
-            "company": company,
-        })
-
+            return _ext_response(500, {"error": "stored workspace package is corrupt"})
+        package = stored.get("assistant") if isinstance(stored, dict) else None
+        if not isinstance(package, dict) or package.get("_error"):
+            return _ext_response(409, {"error": "workspace has no usable application copy"})
+        try:
+            package = ApplicationPackage.model_validate(package).model_dump(mode="json")
+        except ValidationError:
+            return _ext_response(409, {"error": "workspace application copy is invalid"})
+        return _ext_response(
+            200,
+            {
+                "workspace_id": int(workspace_id),
+                "workspace_status": str(status),
+                "package": package,
+                "job_id": int(selected_job_id),
+                "company": company,
+            },
+        )
     def _ext_response(status: int, body: dict) -> JSONResponse:
         """Wrap with CORS headers (extension origin is the platform site, not localhost)."""
         resp = JSONResponse(body, status_code=status)
@@ -4743,492 +3715,7 @@ def create_app(
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         return resp
 
-    @app.post("/api/extension/ingest", response_class=JSONResponse)
-    def extension_ingest(payload: ExtensionJDPayload) -> dict:
-        """Accept JD data from the Boss browser extension and ingest as a job."""
-        raw_text_parts = [payload.description]
-        if payload.tags:
-            raw_text_parts.append("标签: " + ", ".join(payload.tags))
-        raw_text = "\n".join(raw_text_parts).strip()
-        if not raw_text:
-            raise HTTPException(400, "empty JD text")
-
-        extras: dict = {}
-        if payload.salary:
-            extras["salary"] = payload.salary
-        if payload.tags:
-            extras["tags"] = payload.tags
-
-        rj = RawJob(
-            source="boss_extension",
-            source_id=_extract_boss_id(payload.url) if payload.url else None,
-            url=payload.url,
-            title=payload.title,
-            company=payload.company,
-            location=payload.location,
-            raw_text=raw_text,
-            extras=extras,
-        )
-        is_new, job_id = scout.ingest(store, rj)
-        return {"is_new": is_new, "job_id": job_id}
-
-    @app.post("/api/extension/bulk_ingest", response_class=JSONResponse)
-    def extension_bulk_ingest(payload: ExtensionListPayload) -> dict:
-        """W15.18 — accept BOSS 推荐列表 from extension. Bulk ingest N jobs.
-
-        用户在 BOSS 自己刷岗位 → 扩展抓推荐列表 → 一键 sync 整页 N 个岗位
-        到 OfferGuide. Agent 拿到后自动 score / 排序 / 主动通知.
-
-        这是 W15.17 用户反馈"没自动找岗位项目就没用"的回应 — 因为国内
-        BOSS/牛客 反爬严重不能 zero-touch crawl, 走"用户开 BOSS 我帮 sync"
-        的合法路径 (用户自己账号, 自己看到的页面).
-
-        每个 item 行 description 是空的 (列表页不展开 JD 全文), 只入
-        title/company/salary/location/tags. 后续用户点感兴趣的可去 JD 详情
-        页用 /api/extension/ingest 补 description.
-        """
-        items = payload.items or []
-        if not items:
-            raise HTTPException(400, "items 不能为空")
-        if len(items) > 200:
-            raise HTTPException(400, f"items 太多 ({len(items)}, max 200)")
-
-        inserted = 0
-        duplicate = 0
-        new_job_ids: list[int] = []
-        skipped_reasons: list[str] = []
-
-        for item in items:
-            if not (item.title and item.company):
-                skipped_reasons.append(
-                    f"缺 title/company: {item.title!r} / {item.company!r}"
-                )
-                continue
-            # description 在列表模式是空的, 用 title + company + tags 当 raw_text
-            # 这样 dedup 还能 work (scout.ingest 用 url + content_hash)
-            raw_text_parts = [
-                f"# {item.title}",
-                f"公司: {item.company}",
-            ]
-            if item.salary:
-                raw_text_parts.append(f"薪资: {item.salary}")
-            if item.location:
-                raw_text_parts.append(f"地点: {item.location}")
-            if item.tags:
-                raw_text_parts.append("标签: " + ", ".join(item.tags))
-            raw_text_parts.append(
-                "(从 BOSS 推荐列表抓的, 详情未展开 — 后续点 JD 详情可补全)"
-            )
-            raw_text = "\n".join(raw_text_parts)
-
-            extras: dict = {"from_list_capture": True}
-            if item.salary:
-                extras["salary"] = item.salary
-            if item.tags:
-                extras["tags"] = item.tags
-
-            rj = RawJob(
-                source="boss_extension_list",
-                source_id=_extract_boss_id(item.url) if item.url else None,
-                url=item.url or None,
-                title=item.title,
-                company=item.company,
-                location=item.location,
-                raw_text=raw_text,
-                extras=extras,
-            )
-            try:
-                is_new, job_id = scout.ingest(store, rj)
-            except Exception as e:
-                skipped_reasons.append(f"{item.company}/{item.title}: {e}")
-                continue
-            if is_new:
-                inserted += 1
-                new_job_ids.append(job_id)
-            else:
-                duplicate += 1
-
-        # Fire harness event so agent's next wake notices new jobs to score
-        try:
-            from ..agent_runtime import fire_event
-            if inserted > 0:
-                fire_event(
-                    store,
-                    event_kind="user_paste_jd",  # 借用现有 event kind
-                    detail={
-                        "note": f"BOSS 推荐列表 sync — {inserted} 新 + {duplicate} 重复",
-                        "from_extension": True,
-                        "page_url": payload.page_url,
-                    },
-                )
-        except Exception:
-            pass  # event firing is nice-to-have; ingest must succeed
-
-        return {
-            "inserted": inserted,
-            "duplicate": duplicate,
-            "total": len(items),
-            "job_ids": new_job_ids[:30],
-            "skipped_reasons": skipped_reasons[:5],
-        }
-
-    # ────────────────── W15.20 真半自动: 内联评分 + 一键开场白 ──────────────────
-    #
-    # 这两个 endpoint 是为 content script 设计的 — 用户在 BOSS 详情页浏览时
-    # OfferGuide 浮窗自动调 score_inline (3-8s) 给即时评分; 用户点"写开场白"
-    # 触发 greeting (5-10s) 把 200 字开场白写到剪贴板, 用户审核后粘到 BOSS
-    # 沟通框. **不自动发送** — 半自动 = 用户在环.
-
-    @app.post("/api/extension/score_inline", response_class=JSONResponse)
-    async def extension_score_inline(payload: ExtensionJDPayload) -> Any:
-        """W15.20 — content script 实时打分. 比 evaluate_job 更轻 (跳过 tailor).
-
-        典型场景: 用户在 BOSS JD 详情页, content_script 自动抓 JD 调这个,
-        3-8s 内拿到 score → 在页面右上角浮窗显示. 不阻塞用户浏览.
-
-        返回 slim payload (score + top 3 gap + 简短 verdict), 不返回完整
-        tailor (那是用户点"写开场白"时才需要).
-        """
-        if not settings.deepseek_api_key:
-            return _ext_response(400, {"error": "需要先配 LLM key"})
-        if runtime is None:
-            return _ext_response(400, {"error": "SkillRuntime 未初始化"})
-        if not (payload.description or "").strip():
-            return _ext_response(400, {"error": "JD 描述为空"})
-        if profile is None or not profile.raw_resume_text:
-            return _ext_response(400, {"error": "未配简历, 去 /profile 上传"})
-
-        from ..agent_runtime import (
-            AgentRuntimeDeps,
-            MemoryStore,
-            default_worldview_dir,
-        )
-        from ..agent_runtime import _schema as _hs
-        from ..agent_runtime.evaluate import _fetch_and_ingest, _invoke_skill, _safe_float
-        _hs.init_agent_runtime_schema(store)
-
-        deps = AgentRuntimeDeps(
-            settings=settings, store=store,
-            memory_store=MemoryStore(root=default_worldview_dir(settings)),
-            llm=LLMClient(
-                api_key=settings.deepseek_api_key,
-                base_url=settings.deepseek_base_url,
-                default_model=settings.default_model,
-            ),
-            runtime=runtime, skills=skills,
-            user_profile_text=profile.raw_resume_text,
-            notifier=notifier,
-        )
-
-        # Build raw text from extension payload
-        raw_parts = [payload.description]
-        if payload.title:
-            raw_parts.insert(0, f"# {payload.title}")
-        if payload.company:
-            raw_parts.append(f"公司: {payload.company}")
-        if payload.salary:
-            raw_parts.append(f"薪资: {payload.salary}")
-        if payload.tags:
-            raw_parts.append("标签: " + ", ".join(payload.tags))
-        raw_text = "\n".join(raw_parts).strip()
-
-        import asyncio as _asyncio
-        import time as _time
-        t0 = _time.monotonic()
-        try:
-            # Reuse evaluate's fetch+ingest using the JD text path
-            job_id, fetch_err = await _asyncio.to_thread(
-                _fetch_and_ingest, raw_text, deps,
-                company_hint=payload.company or "",
-                title_hint=payload.title or "",
-            )
-            if fetch_err:
-                return _ext_response(400, {"error": fetch_err})
-
-            # Run only score_match (skip tailor for speed)
-            score_spec = deps.find_skill("score_match")
-            if score_spec is None:
-                return _ext_response(500, {"error": "score_match SKILL 缺失"})
-
-            # W15.22 — verified inputs/outputs against score_match SKILL.md
-            # (inputs: job_text, user_profile; outputs: probability, reasoning,
-            # dimensions, deal_breakers). Pre-W15.22 used wrong keys → ValueError
-            # → 502 every call.
-            from ..agent_runtime.tools import _format_jd_for_skill
-            job_row = {
-                "title": payload.title, "company": payload.company or "",
-                "location": payload.location or "",
-                "raw_text": payload.description,
-            }
-            sr = await _asyncio.to_thread(
-                _invoke_skill, deps, score_spec,
-                inputs={
-                    "job_text": _format_jd_for_skill(job_row)[:4000],
-                    "user_profile": profile.raw_resume_text[:4000],
-                },
-            )
-            if sr is None or sr.parsed is None:
-                raw_str = sr.raw_text[:200] if sr else "(no response)"
-                return _ext_response(502, {
-                    "error": "score 解析失败",
-                    "job_id": job_id,
-                    "raw": raw_str,
-                })
-
-            p = sr.parsed
-            # SKILL outputs probability ∈ [0, 1]; convert to 0-100 for UI.
-            prob_raw = _safe_float(p.get("probability"))
-            score_val = (prob_raw * 100.0) if prob_raw is not None else None
-            # SKILL outputs deal_breakers (hard-stop issues); use as top gaps.
-            breakers = p.get("deal_breakers") or []
-            if not isinstance(breakers, list):
-                breakers = []
-            top_gaps = [str(g)[:80] for g in breakers[:3]]
-            # No strengths field in SKILL output — derive from dimensions
-            dims = p.get("dimensions") or {}
-            top_strengths: list[str] = []
-            if isinstance(dims, dict):
-                for dim_name, dim_val in dims.items():
-                    try:
-                        if float(dim_val) >= 0.7:
-                            top_strengths.append(f"{dim_name}: {round(float(dim_val) * 100)}")
-                    except (TypeError, ValueError):
-                        continue
-                top_strengths = top_strengths[:3]
-
-            # Color-coded verdict for the badge
-            if score_val is None:
-                verdict = "评分缺失"
-                color = "gray"
-            elif score_val >= 30:
-                # 30% reply rate = "强 fit" (BOSS 行业基线 < 5% for cold apply)
-                verdict = "值得投"
-                color = "green"
-            elif score_val >= 15:
-                verdict = "可以试"
-                color = "yellow"
-            else:
-                verdict = "性价比低"
-                color = "red"
-
-            duration_ms = int((_time.monotonic() - t0) * 1000)
-            return _ext_response(200, {
-                "job_id": job_id,
-                "score": round(score_val, 1) if score_val is not None else None,
-                "probability": prob_raw,  # raw 0-1 for callers that want it
-                "verdict": verdict,
-                "color": color,
-                "top_strengths": top_strengths,
-                "top_gaps": top_gaps,
-                "reasoning": (p.get("reasoning") or "")[:600],
-                "dimensions": dims if isinstance(dims, dict) else {},
-                "duration_ms": duration_ms,
-                "cost_usd": round(sr.cost_usd or 0.0, 5),
-            })
-        finally:
-            with contextlib.suppress(Exception):
-                if deps.llm:
-                    deps.llm.close()
-
-    @app.post("/api/extension/greeting", response_class=JSONResponse)
-    async def extension_greeting(request: Request) -> Any:
-        """W15.20 — 一键生成 BOSS 沟通开场白 (200 字内, 用户审核后粘贴).
-
-        Input: {job_id: int} 或 {jd_text, title, company} (前者更快, 后者
-        独立可用). 返回开场白纯文本, 由 content_script 写到用户剪贴板.
-
-        **不自动发送** — 用户必须自己粘到 BOSS 输入框 + 改抬头 + 点发送.
-        OfferGuide 只代写文案, 决策权在用户.
-        """
-        if not settings.deepseek_api_key:
-            return _ext_response(400, {"error": "需要先配 LLM key"})
-        if profile is None or not profile.raw_resume_text:
-            return _ext_response(400, {"error": "未配简历, 去 /profile 上传"})
-
-        body = await request.json()
-        job_id = body.get("job_id")
-        jd_text = (body.get("jd_text") or "").strip()
-        company = (body.get("company") or "").strip()
-        title = (body.get("title") or "").strip()
-
-        if job_id:
-            with store.connect() as conn:
-                row = conn.execute(
-                    "SELECT title, company, raw_text FROM jobs WHERE id = ?",
-                    (job_id,),
-                ).fetchone()
-            if row is None:
-                return _ext_response(404, {"error": f"job#{job_id} 不存在"})
-            title = title or (row[0] or "")
-            company = company or (row[1] or "")
-            jd_text = jd_text or (row[2] or "")
-
-        if not jd_text:
-            return _ext_response(400, {"error": "缺 jd_text 或 job_id"})
-
-        # 直接调 LLM, 不走 SKILL — 这是单点小任务
-        from ..llm import BudgetExceeded, enforce_daily_budget
-        try:
-            enforce_daily_budget(store)
-        except BudgetExceeded as e:
-            return _ext_response(429, {"error": str(e)})
-
-        prompt = (
-            "你是一个帮国内校招求职者写 BOSS 直聘开场白的助手. "
-            "目标: 让 HR 愿意打开简历, 不让人觉得是模板. "
-            "约束:\n"
-            "- 200 字以内 (含标点)\n"
-            "- 第一句别说'您好' — 直接点对方关注的事\n"
-            "- 中段 1 个具体能匹配 JD 的项目/经历点 (从候选简历挑最对口的)\n"
-            "- 末句 1 个轻问句 (不要『期待回复』『感谢』这种)\n"
-            "- 不写薪资 / 工作时间 / 是否能转正这些事 (太敏感, 第一条别问)\n"
-            "- 不要 emoji\n"
-            "- 全中文\n\n"
-            f"## 候选人简历 (摘选):\n{profile.raw_resume_text[:3000]}\n\n"
-            f"## 目标岗位\n职位: {title}\n公司: {company}\n"
-            f"JD:\n{jd_text[:2500]}\n\n"
-            "直接输出开场白正文, 不要任何前言/解释/markdown 标记."
-        )
-
-        llm = LLMClient(
-            api_key=settings.deepseek_api_key,
-            base_url=settings.deepseek_base_url,
-            default_model=settings.default_model,
-        )
-        try:
-            import asyncio as _asyncio
-            resp = await _asyncio.to_thread(
-                llm.chat,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.6,
-                extra={"max_tokens": 400},
-            )
-        finally:
-            with contextlib.suppress(Exception):
-                llm.close()
-
-        text = (resp.content or "").strip()
-        # Trim if model added "好的, 这是开场白:" prefix
-        for prefix in ("开场白:", "开场白：", "正文:", "正文："):
-            if text.startswith(prefix):
-                text = text[len(prefix):].strip()
-
-        # Hard cap at 240 chars (BOSS limit + buffer)
-        if len(text) > 240:
-            text = text[:237] + "..."
-
-        # Try to record it as an event for trail
-        try:
-            with store.connect() as conn:
-                conn.execute(
-                    "INSERT INTO harness_events (kind, job_id, note, source) "
-                    "VALUES (?, ?, ?, 'extension')",
-                    (
-                        "greeting_drafted",
-                        job_id if isinstance(job_id, int) else None,
-                        f"BOSS 开场白 ({len(text)} 字), 由 extension 拉",
-                    ),
-                )
-                conn.commit()
-        except Exception:
-            pass  # event recording is nice-to-have
-
-        return _ext_response(200, {
-            "greeting": text,
-            "length": len(text),
-            "tip": "已生成. content_script 会写到剪贴板, 粘到 BOSS 沟通框, 改改抬头再发.",
-            "cost_usd": round(resp.cost_usd or 0.0, 5),
-        })
-
-    @app.post("/api/extension/probe_dom", response_class=JSONResponse)
-    async def extension_probe_dom(request: Request) -> Any:
-        """W15.21 — DOM 校准探针. 用户在 BOSS 沟通框打开时点 content_script
-        浮窗里的"🔍 抓 DOM"按钮, 把当前页面 + 沟通框区域 outerHTML 发回这里
-        存档, 之后我们靠这些样本写出真正的 selector chain.
-
-        这是元方法: 我没法在没有真账号的情况下凭空猜 BOSS 的 React 组件
-        class 名 (它们是 hash 化的, 每次发版可能变). 让用户帮我抓真样本.
-
-        Body: {url, snippet_kind: 'chat_box'|'job_card'|'send_button',
-               outer_html: str, captured_at: ISO}
-        """
-        body = await request.json()
-        url = (body.get("url") or "")[:500]
-        kind = (body.get("snippet_kind") or "unknown")[:80]
-        html = (body.get("outer_html") or "")
-        if not html:
-            return _ext_response(400, {"error": "outer_html 不能为空"})
-        if len(html) > 200_000:
-            return _ext_response(400, {"error": "html 太大 (max 200KB)"})
-
-        # Save under .offerguide/probes/ for later inspection
-        from pathlib import Path
-        probe_dir = Path(".offerguide/probes")
-        probe_dir.mkdir(parents=True, exist_ok=True)
-        from datetime import UTC
-        from datetime import datetime as _dt
-        stamp = _dt.now(UTC).strftime("%Y%m%d_%H%M%S")
-        fname = f"{stamp}_{kind}.html"
-        try:
-            (probe_dir / fname).write_text(
-                f"<!-- url: {url} | kind: {kind} | captured_at: {body.get('captured_at')} -->\n"
-                + html,
-                encoding="utf-8",
-            )
-        except OSError as e:
-            return _ext_response(500, {"error": f"写文件失败: {e}"})
-
-        # Also record an event for trail
-        try:
-            with store.connect() as conn:
-                conn.execute(
-                    "INSERT INTO harness_events (kind, note, source) "
-                    "VALUES (?, ?, 'extension')",
-                    ("dom_probe", f"BOSS DOM probe ({kind}, {len(html)} bytes) → {fname}"),
-                )
-                conn.commit()
-        except Exception:
-            pass
-
-        return _ext_response(200, {
-            "saved_as": fname,
-            "bytes": len(html),
-            "tip": "感谢帮忙抓样本! 后续 W15.22 会用这些校准 selector",
-        })
-
     return app
-
-
-class ExtensionJDPayload(BaseModel):
-    """Request body from the Boss browser extension (单个 JD 详情)."""
-
-    url: str | None = None
-    title: str = "(untitled)"
-    company: str | None = None
-    location: str | None = None
-    salary: str | None = None
-    description: str
-    tags: list[str] = []
-
-
-class ExtensionListItem(BaseModel):
-    """W15.18 — 1 个岗位卡片 (从 BOSS 推荐列表抓的)."""
-
-    url: str | None = None
-    title: str
-    company: str
-    location: str | None = None
-    salary: str | None = None
-    tags: list[str] = []
-    description: str = ""  # 列表页通常没展开, 默认空
-
-
-class ExtensionListPayload(BaseModel):
-    """W15.18 — 整页推荐列表的批量 ingest payload."""
-
-    page_url: str | None = None
-    items: list[ExtensionListItem]
-    captured_at: str | None = None
 
 
 class EmailClassifyPayload(BaseModel):
@@ -5249,27 +3736,6 @@ class EmailClassifyPayload(BaseModel):
     mode: Literal["regex", "llm", "auto"] = "auto"
 
 
-class SweepPayload(BaseModel):
-    """Request body for /api/agent/sweep — the meta-agent endpoint."""
-
-    company: str
-    role_hint: str | None = None
-    do_corpus: bool = True
-    """When True, the agent searches the web for new 面经 about this
-    company and ingests them. Requires LLM + search backend."""
-
-
-_BOSS_ID_RE = re.compile(r"/job_detail/([^/.]+)")
-
-
-def _extract_boss_id(url: str | None) -> str | None:
-    """Pull the job id from a Boss URL like /job_detail/abc123.html."""
-    if not url:
-        return None
-    m = _BOSS_ID_RE.search(url)
-    return m.group(1) if m else None
-
-
 # ─────────────────────── stats / dashboard helpers ──────────────────
 
 
@@ -5284,7 +3750,6 @@ def _extract_trigger_goal(trigger_detail_json: str | None) -> str:
     if not trigger_detail_json:
         return ""
     try:
-        d = json_dumps  # ensure module imported; if not, parse manually
         import json as _j
         detail = _j.loads(trigger_detail_json)
     except Exception:
@@ -5460,10 +3925,7 @@ def _recent_agent_artifacts(store: Store, *, limit: int = 6) -> list[dict[str, A
                 "SELECT id, kind, job_id, note, "
                 "(julianday('now') - created_at) * 86400 AS age_seconds "
                 "FROM harness_events "
-                "WHERE kind IN ("
-                "  'tailor_resume_generated', 'interview_prep_generated', "
-                "  'project_record_saved', 'project_assessed'"
-                ") "
+                "WHERE kind IN ('project_record_saved', 'project_assessed') "
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -5481,65 +3943,8 @@ def _recent_agent_artifacts(store: Store, *, limit: int = 6) -> list[dict[str, A
     return artifacts
 
 
-def _latest_agent_tailor_result(store: Store) -> dict[str, Any] | None:
-    """Latest tailor_resume artifact produced by Agent Chat, for /tailor."""
-    from ..agent_runtime import _schema as _hs
-
-    try:
-        _hs.init_agent_runtime_schema(store)
-        with store.connect() as conn:
-            rows = conn.execute(
-                "SELECT job_id, note FROM harness_events "
-                "WHERE kind = 'tailor_resume_generated' "
-                "ORDER BY created_at DESC, id DESC LIMIT 20"
-            ).fetchall()
-    except Exception:
-        return None
-
-    for job_id, note in rows:
-        try:
-            payload = json_loads(note or "{}")
-        except Exception:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        srid = payload.get("skill_run_id")
-        if isinstance(srid, str) and srid.isdigit():
-            srid = int(srid)
-        if not isinstance(srid, int):
-            continue
-        try:
-            with store.connect() as conn:
-                row = conn.execute(
-                    "SELECT output_json FROM skill_runs "
-                    "WHERE id = ? AND skill_name = 'tailor_resume'",
-                    (srid,),
-                ).fetchone()
-                job_row = conn.execute(
-                    "SELECT title, company FROM jobs WHERE id = ?",
-                    (job_id,),
-                ).fetchone()
-        except Exception:
-            continue
-        if row is None:
-            continue
-        try:
-            tailored = json_loads(row[0] or "{}")
-        except Exception:
-            continue
-        if not isinstance(tailored, dict):
-            continue
-        return {
-            "run_id": srid,
-            "job_title": (job_row[0] if job_row else "") or f"job#{job_id}",
-            "job_company": (job_row[1] if job_row else "") or "",
-            "tailored": tailored,
-        }
-    return None
-
-
 def _artifact_from_event_row(row: Any) -> dict[str, Any] | None:
-    event_id, kind, job_id, note = row[0], row[1], row[2], row[3]
+    event_id, kind, _job_id, note = row[0], row[1], row[2], row[3]
     try:
         payload = json_loads(note or "{}")
     except Exception:
@@ -5547,26 +3952,6 @@ def _artifact_from_event_row(row: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         payload = {}
 
-    if kind == "tailor_resume_generated":
-        srid = payload.get("skill_run_id")
-        return {
-            "event_id": event_id,
-            "kind": kind,
-            "label": "简历微调",
-            "title": f"job#{job_id} · skill_run#{srid}",
-            "view": payload.get("view") or "/tailor",
-            "detail": "Agent 生成了 truthful change_log 和定向简历产物",
-        }
-    if kind == "interview_prep_generated":
-        srid = payload.get("skill_run_id")
-        return {
-            "event_id": event_id,
-            "kind": kind,
-            "label": "面试准备",
-            "title": f"job#{job_id} · {payload.get('round') or '面试'} · skill_run#{srid}",
-            "view": payload.get("view") or "/reflect",
-            "detail": "Agent 生成了面试重点、预测问题和弱点清单",
-        }
     if kind == "project_record_saved":
         project_id = payload.get("project_id")
         title = payload.get("title") or f"project#{project_id}"
@@ -5704,96 +4089,6 @@ def _julian_to_human(jd: float) -> str:
     return _humanize_age(seconds)
 
 
-def _list_company_groups(store: Store) -> list[dict[str, Any]]:
-    """Companies with ≥ 2 jobs in the DB, with job counts.
-
-    Used by /compare to suggest which groups are worth comparing.
-    Sorted by job count desc.
-    """
-    with store.connect() as conn:
-        rows = conn.execute(
-            "SELECT company, COUNT(*) AS n FROM jobs "
-            "WHERE company IS NOT NULL AND company != '' "
-            "GROUP BY company HAVING COUNT(*) >= 2 ORDER BY n DESC, company ASC"
-        ).fetchall()
-    return [{"company": r[0], "n": r[1]} for r in rows]
-
-
-def _list_jobs_for_company(store: Store, company: str) -> list[dict[str, Any]]:
-    """All jobs in the DB for a company, newest first."""
-    with store.connect() as conn:
-        rows = conn.execute(
-            "SELECT id, title, location, source, raw_text "
-            "FROM jobs WHERE company = ? ORDER BY fetched_at DESC, id DESC",
-            (company,),
-        ).fetchall()
-    return [
-        {
-            "id": r[0], "title": r[1], "location": r[2],
-            "source": r[3], "raw_text": r[4] or "",
-        }
-        for r in rows
-    ]
-
-
-def _list_interview_companies(store: Store) -> list[dict[str, Any]]:
-    """Companies with stored 面经, with counts."""
-    with store.connect() as conn:
-        rows = conn.execute(
-            "SELECT company, COUNT(*) FROM interview_experiences "
-            "GROUP BY company ORDER BY COUNT(*) DESC, company ASC"
-        ).fetchall()
-    return [{"company": r[0], "n": r[1]} for r in rows]
-
-
-def _list_interview_experiences(
-    store: Store, *, company: str | None = None, limit: int = 50
-) -> list[dict[str, Any]]:
-    """Recent 面经, optionally filtered by company."""
-    with store.connect() as conn:
-        if company:
-            rows = conn.execute(
-                "SELECT id, company, role_hint, raw_text, source, source_url, created_at "
-                "FROM interview_experiences WHERE company LIKE ? "
-                "ORDER BY created_at DESC LIMIT ?",
-                (f"%{company}%", limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id, company, role_hint, raw_text, source, source_url, created_at "
-                "FROM interview_experiences ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-    return [
-        {
-            "id": r[0], "company": r[1], "role_hint": r[2], "raw_text": r[3],
-            "source": r[4], "source_url": r[5], "created_at": r[6],
-        }
-        for r in rows
-    ]
-
-
-def _list_jobs_by_ids(store: Store, ids: list[int]) -> list[dict[str, Any]]:
-    """Fetch a specific set of jobs by id, in input order."""
-    if not ids:
-        return []
-    placeholders = ",".join("?" * len(ids))
-    with store.connect() as conn:
-        rows = conn.execute(
-            f"SELECT id, title, company, location, source, raw_text "
-            f"FROM jobs WHERE id IN ({placeholders})",
-            tuple(ids),
-        ).fetchall()
-    by_id = {
-        r[0]: {
-            "id": r[0], "title": r[1], "company": r[2], "location": r[3],
-            "source": r[4], "raw_text": r[5] or "",
-        }
-        for r in rows
-    }
-    return [by_id[i] for i in ids if i in by_id]
-
-
 def _search_guidance_message() -> str:
     """One-line guidance shown next to /api/search/test results."""
     import os as _os
@@ -5806,92 +4101,6 @@ def _search_guidance_message() -> str:
     )
 
 
-def _daemon_health(store: Store) -> list[dict[str, Any]]:
-    """Per-job health summary for /dashboard 'daemon 健康' card.
-
-    For each known job name, find the latest daemon_runs row and report:
-    last_run_when (humanized), last_status, last_summary_str, run_count,
-    error_count_24h. If a job has no rows ever, status = 'never'.
-
-    The 7 known job names are hardcoded — order matches the daily timeline.
-    """
-    import json as _json
-
-    job_names = (
-        "extract_facts",   # 02:00
-        "discover_jobs",   # 06:30
-        "jd_enrich",       # 06:45
-        "corpus_classify", # 07:00
-        "silence_check",   # 09:00
-        "corpus_refresh",  # Mon 08:00
-        "brief_update",    # 23:00
-    )
-    out: list[dict[str, Any]] = []
-    with store.connect() as conn:
-        for name in job_names:
-            latest = conn.execute(
-                "SELECT started_at, ended_at, status, summary_json, error_text "
-                "FROM daemon_runs WHERE job_name = ? "
-                "ORDER BY started_at DESC LIMIT 1",
-                (name,),
-            ).fetchone()
-            count24h = conn.execute(
-                "SELECT COUNT(*), SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) "
-                "FROM daemon_runs WHERE job_name = ? "
-                "  AND started_at >= julianday('now', '-1 day')",
-                (name,),
-            ).fetchone()
-            run_count = int(count24h[0] or 0) if count24h else 0
-            err_count = int(count24h[1] or 0) if count24h else 0
-            if latest is None:
-                out.append({
-                    "name": name, "status": "never", "last_run_when": "—",
-                    "last_summary_str": "从未运行 — daemon 可能没启动",
-                    "run_count_24h": 0, "error_count_24h": 0,
-                })
-                continue
-            started_at, ended_at, status, summary_json, error_text = latest
-            try:
-                age_seconds = (
-                    (_to_julian(__import__('datetime').datetime.now(tz=UTC))
-                     - float(started_at)) * 86400
-                )
-            except Exception:
-                age_seconds = 0
-            try:
-                summary = _json.loads(summary_json) if summary_json else {}
-            except Exception:
-                summary = {}
-            summary_str = (
-                ", ".join(f"{k}={v}" for k, v in list(summary.items())[:5])
-                if summary else (error_text or "(no summary)")
-            )
-            out.append({
-                "name": name, "status": status,
-                "last_run_when": _humanize_age(age_seconds),
-                "last_summary_str": summary_str,
-                "run_count_24h": run_count,
-                "error_count_24h": err_count,
-            })
-    return out
-
-
-def _mock_history_to_transcript(history: list[dict], company: str) -> str:
-    """Render mock interview turns as a transcript that
-    post_interview_reflection's expects."""
-    lines = [f"{company} mock interview transcript ({len(history)} 轮):", ""]
-    for i, turn in enumerate(history, 1):
-        q = turn.get("question") or "(无题)"
-        a = turn.get("user_answer") or "(无答)"
-        ev = turn.get("evaluation") or {}
-        score = ev.get("score") or 0
-        lines.append(f"## 第 {i} 题 — {q}")
-        lines.append(f"答: {a}")
-        lines.append(f"  agent 评分: {score:.2f}")
-        lines.append("")
-    return "\n".join(lines)
-
-
 def _to_julian(dt) -> float:
     """Calendar UTC datetime → SQLite julianday float."""
     a = (14 - dt.month) // 12
@@ -5900,6 +4109,39 @@ def _to_julian(dt) -> float:
     jdn = dt.day + (153 * m + 2) // 5 + 365 * y + y // 4 - y // 100 + y // 400 - 32045
     frac = (dt.hour - 12) / 24 + dt.minute / 1440 + dt.second / 86400
     return jdn + frac
+
+
+def _format_julian_time(value: float | None) -> str:
+    """Render a SQLite Julian timestamp without exposing storage details."""
+    if value is None:
+        return ""
+    timestamp = (float(value) - 2_440_587.5) * 86_400
+    return datetime.fromtimestamp(timestamp, tz=UTC).astimezone().strftime(
+        "%Y-%m-%d %H:%M"
+    )
+
+
+def _invocation_view(invocation: Any | None) -> dict[str, Any] | None:
+    if invocation is None:
+        return None
+    labels = {
+        "queued": "等待 Agent 开始",
+        "running": "Agent 正在研究",
+        "published": "已更新当前结果",
+        "unchanged": "当前结果无需更新",
+        "blocked": "暂时缺少足够证据",
+        "stale": "上下文已变化，本次结果未发布",
+        "failed": "Agent 运行失败",
+    }
+    return {
+        "id": invocation.id,
+        "status": invocation.status,
+        "status_label": labels.get(invocation.status, invocation.status),
+        "message": invocation.message,
+        "updated_at": _format_julian_time(invocation.updated_at),
+        "error": invocation.error_text,
+        "unresolved": list(invocation.unresolved),
+    }
 
 
 # -------------------- entry point used by `python -m offerguide.ui.web` --------------------
@@ -5913,14 +4155,16 @@ def main() -> None:
     store = Store(settings.db_path)
     store.init_schema()
 
-    profile: UserProfile | None = None
+    master_source: MasterResumeSource | None = None
     if settings.resume_pdf and settings.resume_pdf.exists():
-        profile = load_resume_pdf(settings.resume_pdf)
+        master_source = load_resume_pdf(settings.resume_pdf)
 
     skills_root = Path(__file__).parent.parent / "skills"
     skills = discover_skills(skills_root)
 
+    llm: LLMClient | None = None
     runtime: SkillRuntime | None = None
+    text_resume_editor: ResumeEditor | None = None
     if settings.deepseek_api_key:
         llm = LLMClient(
             api_key=settings.deepseek_api_key,
@@ -5928,43 +4172,35 @@ def main() -> None:
             default_model=settings.default_model,
         )
         runtime = SkillRuntime(llm, store)
+        text_resume_editor = ResumeEditor(llm)
+
+    visual_resume_editor: ResumeEditor | None = None
+    if settings.vision_api_key and settings.vision_base_url and settings.vision_model:
+        vision_llm = LLMClient(
+            api_key=settings.vision_api_key,
+            base_url=settings.vision_base_url,
+            default_model=settings.vision_model,
+        )
+        visual_resume_editor = ResumeEditor(vision_llm)
 
     notifier = make_notifier(settings)
+    research_agents = (
+        ResearchAgentService(settings=settings, store=store, llm=llm)
+        if llm is not None
+        else None
+    )
 
     app = create_app(
         settings=settings,
         store=store,
-        profile=profile,
+        master_source=master_source,
         skills=skills,
         runtime=runtime,
+        resume_editor=text_resume_editor,
+        visual_resume_editor=visual_resume_editor,
         notifier=notifier,
+        research_agents=research_agents,
     )
-
-    # W14.12 — start the autonomous scheduler in-process so users get
-    # ambient agent behavior just by running `python -m offerguide.ui.web`.
-    # Previously the scheduler was a separate `python -m offerguide.autonomous`
-    # process; users typically forgot to start it, leading to "agent doesn't
-    # do anything" complaints. We spawn it on a background thread that lives
-    # for the web process's lifetime. Disable with OFFERGUIDE_NO_SCHEDULER=1.
-    sched_status = "disabled (OFFERGUIDE_NO_SCHEDULER=1)"
-    if os.environ.get("OFFERGUIDE_NO_SCHEDULER") != "1" and settings.deepseek_api_key:
-        try:
-            import threading
-
-            from ..autonomous.scheduler import build_agent_wake_scheduler
-
-            def _run_scheduler() -> None:
-                try:
-                    sched = build_agent_wake_scheduler(settings=settings)
-                    sched.run_blocking()  # AutonomousScheduler API
-                except Exception as e:
-                    log.exception("scheduler thread crashed: %s", e)
-
-            t = threading.Thread(target=_run_scheduler, daemon=True, name="og-scheduler")
-            t.start()
-            sched_status = "running (in-process thread)"
-        except Exception as e:
-            sched_status = f"failed to start: {e}"
 
     print(f"\n✦ OfferGuide UI on http://{settings.web_host}:{settings.web_port}")
     print(f"  resume    = {settings.resume_pdf or '(none — set OFFERGUIDE_RESUME_PDF)'}")
@@ -5972,7 +4208,16 @@ def main() -> None:
         f"  llm       = {'configured' if settings.deepseek_api_key else 'NOT configured (set DEEPSEEK_API_KEY)'}"
     )
     print(f"  notify    = {settings.notify_channel} ({'ready' if settings.notify_ready() else 'fallback console'})")
-    print(f"  scheduler = {sched_status}")
+    print(
+        "  research  = "
+        + (
+            "configured; background refresh disabled"
+            if research_agents is not None and settings.disable_background_agents
+            else "configured; JobDiscoveryAgent background refresh enabled"
+            if research_agents is not None
+            else "NOT configured (LLM key required)"
+        )
+    )
     uvicorn.run(app, host=settings.web_host, port=settings.web_port, log_level="info")
 
 

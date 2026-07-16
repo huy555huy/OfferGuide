@@ -33,6 +33,21 @@
     word-wrap: break-word;
     color: var(--text-muted);
 }
+@media (max-width: 720px) {
+    .dbg-table, .dbg-table tbody, .dbg-table tr, .dbg-table td { display: block; width: 100%; }
+    .dbg-table thead { display: none; }
+    .dbg-table tr { padding: 0.55rem 0; border-bottom: 1px solid var(--border-soft); }
+    .dbg-table td {
+        display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); gap: 0.5rem;
+        padding: 0.35rem 0; border: 0; overflow-wrap: anywhere;
+    }
+    .dbg-table td::before {
+        content: attr(data-label); color: var(--text-muted);
+        font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+    }
+    .dbg-table .pill { justify-self: start; }
+    .dbg-table .text-wrap { max-width: none; }
+}
 </style>
 
 <div class="card">
@@ -47,7 +62,7 @@
 <div class="card dbg-section">
     <h2>Harness Runs (最近 30)</h2>
     {% if not harness_runs %}
-    <div class="empty">还没跑过 harness — 等 cron tick 或在 home chat 发条消息.</div>
+    <div class="empty">还没有主 Agent 对话记录。</div>
     {% else %}
     <table class="dbg-table">
         <thead>
@@ -64,16 +79,16 @@
         <tbody>
         {% for r in harness_runs %}
         <tr>
-            <td>#{{ r.id }}</td>
-            <td><code>{{ r.trigger_kind }}</code><br><span class="muted small">{{ r.trigger_detail }}</span></td>
-            <td><span class="pill {% if r.status == 'ok' %}low{% elif r.status == 'error' %}high{% else %}medium{% endif %}">{{ r.status }}</span></td>
-            <td>{{ r.iterations }}</td>
-            <td>${{ "%.4f"|format(r.cost_usd) }}</td>
-            <td class="text-wrap">
+            <td data-label="ID">#{{ r.id }}</td>
+            <td data-label="触发"><code>{{ r.trigger_kind }}</code><br><span class="muted small">{{ r.trigger_detail }}</span></td>
+            <td data-label="状态"><span class="pill {% if r.status == 'ok' %}low{% elif r.status == 'error' %}high{% else %}medium{% endif %}">{{ r.status }}</span></td>
+            <td data-label="步数">{{ r.iterations }}</td>
+            <td data-label="成本">${{ "%.4f"|format(r.cost_usd) }}</td>
+            <td class="text-wrap" data-label="结果">
                 {% if r.error_text %}<span style="color: var(--danger);">{{ r.error_text }}</span>
                 {% else %}{{ r.final_text }}{% endif %}
             </td>
-            <td class="text-wrap">
+            <td class="text-wrap" data-label="工具调用">
                 {% for tc in r.tool_calls %}<div><code>{{ tc[:80] }}</code></div>{% endfor %}
             </td>
         </tr>
@@ -83,36 +98,7 @@
     {% endif %}
 </div>
 
-{# ─────────── 2. Scheduled wakes (agent's own self-scheduling) ─────────── #}
-
-<div class="card dbg-section">
-    <h2>Agent 自定的 Scheduled Wakes</h2>
-    {% if not scheduled_wakes %}
-    <div class="empty">Agent 还没 schedule 过任何 future wake.</div>
-    {% else %}
-    <table class="dbg-table">
-        <thead>
-            <tr><th>id</th><th>fire_at (julianday)</th><th>原因</th><th>fired?</th><th>来自 run</th></tr>
-        </thead>
-        <tbody>
-        {% for w in scheduled_wakes %}
-        <tr>
-            <td>#{{ w.id }}</td>
-            <td><code>{{ "%.5f"|format(w.fire_at) }}</code></td>
-            <td class="text-wrap">{{ w.reason }}</td>
-            <td>
-                {% if w.fired_at %}<span class="pill low">已 fire</span>
-                {% else %}<span class="pill medium">pending</span>{% endif %}
-            </td>
-            <td>{% if w.requested_by_run_id %}<code>run #{{ w.requested_by_run_id }}</code>{% endif %}</td>
-        </tr>
-        {% endfor %}
-        </tbody>
-    </table>
-    {% endif %}
-</div>
-
-{# ─────────── 3. Harness events (lifecycle) ─────────── #}
+{# ─────────── 2. Harness events (lifecycle) ─────────── #}
 
 <div class="card dbg-section">
     <h2>Harness Events (最近 30)</h2>
@@ -126,41 +112,11 @@
         <tbody>
         {% for e in harness_events %}
         <tr>
-            <td>#{{ e.id }}</td>
-            <td><code>{{ e.kind }}</code></td>
-            <td>{% if e.job_id %}<a href="/pipeline#job-{{ e.job_id }}">job#{{ e.job_id }}</a>{% endif %}</td>
-            <td class="text-wrap">{{ e.note }}</td>
-            <td><span class="pill {% if e.source == 'user' %}low{% else %}middle{% endif %}">{{ e.source }}</span></td>
-        </tr>
-        {% endfor %}
-        </tbody>
-    </table>
-    {% endif %}
-</div>
-
-{# ─────────── 4. Daemon runs (W14 cron telemetry) ─────────── #}
-
-<div class="card dbg-section">
-    <h2>W14 Daemon Runs (最近 30) — Mission Control source-of-truth</h2>
-    {% if not daemons %}
-    <div class="empty">还没 daemon 跑过. cron 可能没启动.</div>
-    {% else %}
-    <table class="dbg-table">
-        <thead>
-            <tr><th>id</th><th>job_name</th><th>status</th><th>summary</th><th>error</th></tr>
-        </thead>
-        <tbody>
-        {% for d in daemons %}
-        <tr>
-            <td>#{{ d.id }}</td>
-            <td><code>{{ d.job_name }}</code></td>
-            <td><span class="pill {% if d.status == 'ok' %}low{% elif d.status == 'error' %}high{% else %}medium{% endif %}">{{ d.status }}</span></td>
-            <td class="text-wrap">
-                {% if d.summary %}
-                {% for k, v in d.summary.items() %}<div><code>{{ k }}</code>={{ (v|string)[:80] }}</div>{% endfor %}
-                {% endif %}
-            </td>
-            <td class="text-wrap">{% if d.error_text %}<span style="color: var(--danger);">{{ d.error_text }}</span>{% endif %}</td>
+            <td data-label="ID">#{{ e.id }}</td>
+            <td data-label="类型"><code>{{ e.kind }}</code></td>
+            <td data-label="岗位">{% if e.job_id %}<a href="/pipeline#job-{{ e.job_id }}">job#{{ e.job_id }}</a>{% endif %}</td>
+            <td class="text-wrap" data-label="备注">{{ e.note }}</td>
+            <td data-label="来源"><span class="pill {% if e.source == 'user' %}low{% else %}middle{% endif %}">{{ e.source }}</span></td>
         </tr>
         {% endfor %}
         </tbody>

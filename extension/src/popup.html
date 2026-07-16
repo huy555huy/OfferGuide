@@ -17,9 +17,6 @@
     .row:last-child { border-bottom: none; }
     .label { color: #79716a; font-size: 12px; }
     .value { font-family: monospace; font-weight: 600; }
-    .warning { background: #fbf0e8; padding: 8px 10px;
-               border-radius: 6px; font-size: 11px;
-               margin-top: 8px; color: #b85f44; }
     .safety {
       background: #e8efe6; padding: 8px 10px;
       border-radius: 6px; font-size: 11px; margin-top: 8px;
@@ -42,22 +39,14 @@
     <span class="value" id="health-status">检查中...</span>
   </div>
   <div class="row">
-    <span class="label">本小时复制次数</span>
-    <span class="value" id="copy-count">—</span>
-  </div>
-  <div class="row">
     <span class="label">支持平台</span>
-    <span class="value">Boss · 牛客</span>
+    <span class="value">登录态网页 · 投递辅助</span>
   </div>
 
   <div class="safety">
-    🔒 <strong>安全承诺</strong>: 本扩展仅把 OfferGuide 准备好的内容
-    复制到剪贴板。绝不替你点提交、发送或导航。所有操作都需要你手动确认。
-  </div>
-
-  <div class="warning">
-    ⚠ <strong>风控提醒</strong>: 单一平台短时间内大量复制 + 粘贴 + 提交
-    可能被判定为机器行为。建议每条建议至少手动改 1-2 个字, 节奏自然。
+    <strong>边界</strong>: 扩展可以按本地 Agent 的请求在后台打开一个只读页面，
+    保存渲染后的正文后关闭该标签页；不会返回 cookie 或 storage，也不会点击、
+    填写、发送或提交。投递始终由你确认并完成。
   </div>
 
   <div style="margin-top: 12px;">

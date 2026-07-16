@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}来源 · {{ evidence.title }}{% endblock %}
+{% block crumb %}面试来源{% endblock %}
+{% block content %}
+
+<style>
+.source-reader { max-width: 920px; margin: 0 auto; }
+.source-reader header { padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+.source-reader h1 { margin: 0 0 0.4rem; font-size: 1.35rem; line-height: 1.35; }
+.source-reader-meta { color: var(--text-muted); font-size: 0.78rem; line-height: 1.55; }
+.source-reader-meta a { color: var(--primary); text-decoration: none; }
+.source-body {
+    margin: 1rem 0; padding: 0; color: var(--text-secondary); font: inherit;
+    line-height: 1.72; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.source-back { color: var(--text-muted); font-size: 0.8rem; text-decoration: none; }
+</style>
+
+<article class="source-reader">
+    <header>
+        <h1>{{ evidence.title }}</h1>
+        <div class="source-reader-meta">
+            {{ provenance_label }} · 保存于 {{ fetched_at }}
+            {% if external_url %} · <a href="{{ external_url }}" target="_blank" rel="noopener noreferrer">打开原网页</a>{% endif %}
+        </div>
+    </header>
+    <pre class="source-body">{{ evidence.text_content }}</pre>
+    <a class="source-back" href="/pipeline">返回投递进度</a>
+</article>
+
+{% endblock %}

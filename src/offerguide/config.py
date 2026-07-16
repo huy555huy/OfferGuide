@@ -18,7 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from .llm.client import DEFAULT_DEEPSEEK_BASE, DEFAULT_MODEL
+
 NotifyChannel = Literal["console", "feishu", "telegram"]
+DEFAULT_INTERVIEW_RESEARCH_MODEL = DEFAULT_MODEL
 
 log = logging.getLogger(__name__)
 
@@ -86,8 +89,12 @@ class Settings:
     # (DeepSeek native, ccvibe Claude proxy, OpenRouter, one-api, etc.).
     # See ``Settings.from_env`` for the env-var fallback chain.
     deepseek_api_key: str | None = None
-    deepseek_base_url: str = "https://api.deepseek.com"
-    default_model: str = "claude-sonnet-4-6"
+    deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE
+    default_model: str = DEFAULT_MODEL
+    interview_research_model: str | None = None
+    vision_api_key: str | None = None
+    vision_base_url: str | None = None
+    vision_model: str | None = None
 
     # Notification — at most one of feishu/telegram is used per send,
     # picked from `notify_channel` (or per-call override).
@@ -103,7 +110,7 @@ class Settings:
     # Web UI
     web_host: str = "127.0.0.1"
     web_port: int = 8000
-    disable_ambient_crawl: bool = False
+    disable_background_agents: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -118,6 +125,8 @@ class Settings:
 
         LLM credentials accept three naming schemes for compatibility:
 
+        - ``OFFERGUIDE_LLM_API_KEY`` / ``OFFERGUIDE_LLM_BASE_URL`` —
+          OfferGuide's canonical names
         - ``DEEPSEEK_API_KEY`` / ``DEEPSEEK_BASE_URL`` — OfferGuide's
           original env names, kept for backwards compatibility
         - ``TOKEN`` / ``BASE_URL`` — short user-friendly names that
@@ -149,7 +158,7 @@ class Settings:
             or os.environ.get("DEEPSEEK_BASE_URL")
             or os.environ.get("BASE_URL")
             or os.environ.get("OPENAI_BASE_URL")
-            or "https://api.deepseek.com"
+            or DEFAULT_DEEPSEEK_BASE
         )
         # Strip stray quote chars (smart-quote copy-paste hazard)
         for ch in ("”", "“", '"', "'", "´"):
@@ -161,15 +170,25 @@ class Settings:
         notify_channel: NotifyChannel = (
             notify_raw if notify_raw in ("console", "feishu", "telegram") else "console"  # type: ignore[assignment]
         )
+        default_model = (
+            os.environ.get("OFFERGUIDE_LLM_MODEL")
+            or os.environ.get("OFFERGUIDE_DEFAULT_MODEL")
+            or os.environ.get("MODEL")
+            or DEFAULT_MODEL
+        )
+        interview_research_model = os.environ.get(
+            "OFFERGUIDE_INTERVIEW_RESEARCH_MODEL"
+        )
+        if not interview_research_model:
+            interview_research_model = default_model
         return cls(
             deepseek_api_key=api_key,
             deepseek_base_url=base_url,
-            default_model=(
-                os.environ.get("OFFERGUIDE_LLM_MODEL")
-                or os.environ.get("OFFERGUIDE_DEFAULT_MODEL")
-                or os.environ.get("MODEL")
-                or "claude-sonnet-4-6"
-            ),
+            default_model=default_model,
+            interview_research_model=interview_research_model,
+            vision_api_key=os.environ.get("OFFERGUIDE_VISION_API_KEY") or None,
+            vision_base_url=os.environ.get("OFFERGUIDE_VISION_BASE_URL") or None,
+            vision_model=os.environ.get("OFFERGUIDE_VISION_MODEL") or None,
             feishu_webhook_url=os.environ.get("FEISHU_WEBHOOK_URL") or None,
             telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN") or None,
             telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID") or None,
@@ -182,9 +201,8 @@ class Settings:
             ),
             web_host=os.environ.get("OFFERGUIDE_HOST", "127.0.0.1"),
             web_port=int(os.environ.get("OFFERGUIDE_PORT", "8000")),
-            disable_ambient_crawl=(
-                os.environ.get("OFFERGUIDE_NO_AMBIENT") == "1"
-                or os.environ.get("OFFERGUIDE_NO_SCHEDULER") == "1"
+            disable_background_agents=(
+                os.environ.get("OFFERGUIDE_NO_BACKGROUND_AGENTS") == "1"
             ),
         )
 

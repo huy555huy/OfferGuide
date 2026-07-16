@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 import offerguide
 from offerguide.config import Settings
 from offerguide.llm import LLMResponse
-from offerguide.profile import UserProfile
 from offerguide.skills import SkillRuntime, discover_skills
 from offerguide.ui.notify import ConsoleNotifier
 from offerguide.ui.web import create_app
@@ -25,19 +24,25 @@ SKILLS_ROOT = Path(__file__).parent.parent / "src/offerguide/skills"
 
 
 @pytest.fixture
-def app_client(tmp_path):
+def app_client(tmp_path, master_resume_source_factory):
     store = offerguide.Store(tmp_path / "ext.db")
     store.init_schema()
     skills = discover_skills(SKILLS_ROOT)
     s = Settings(deepseek_api_key="x", default_model="stub")
+
     class _StubLLM:
         def chat(self, messages, **kw):
             return LLMResponse(content="{}", model="stub")
+
     runtime = SkillRuntime(llm=_StubLLM(), store=store)
-    profile = UserProfile(raw_resume_text="x", source_pdf="/tmp/x.pdf")
+    profile = master_resume_source_factory("x")
     app = create_app(
-        settings=s, store=store, profile=profile,
-        skills=skills, runtime=runtime, notifier=ConsoleNotifier(),
+        settings=s,
+        store=store,
+        master_source=profile,
+        skills=skills,
+        runtime=runtime,
+        notifier=ConsoleNotifier(),
     )
     return TestClient(app), store
 
@@ -63,38 +68,100 @@ class TestExtensionAPI:
         assert resp.status_code == 404
         body = resp.json()
         assert "hint" in body
-        assert "apply_assistant" in body["hint"]
+        assert "NeverHeardOfThem" in body["hint"]
+        assert "具体岗位" in body["hint"]
 
-    def test_get_package_returns_existing_skill_run(self, app_client):
+    def test_get_package_returns_exact_resume_workspace(self, app_client):
         client, store = app_client
-        # Seed a skill_run that looks like an apply_assistant output
+        package = {
+            "message": "current application message",
+            "form_answers": [],
+            "pre_submit_checks": [],
+        }
         with store.connect() as conn:
-            conn.execute(
-                "INSERT INTO jobs(source, source_id, url, title, company, "
-                "  raw_text, content_hash) VALUES ('m','j1','x','t','字节跳动','x','h1')"
+            job_id = int(
+                conn.execute(
+                    "INSERT INTO jobs(source, source_id, url, title, company, "
+                    "raw_text, content_hash) VALUES ('m','j1','x','t','字节跳动','x','h1') "
+                    "RETURNING id"
+                ).fetchone()[0]
             )
-            output = json.dumps({
-                "company": "字节跳动",
-                "self_intro_snippet": {"text": "self intro text", "platform_hint": "boss_zhipin", "rationale": "x"},
-                "qa_templates": [],
-                "submission_strategy": {"best_time_window": "x", "follow_up_plan": "y", "expected_response_window_days": 7},
-                "pre_submit_checklist": [],
-                "skip_reasons": [],
-                "confidence": 0.85,
-            }, ensure_ascii=False)
-            inputs = json.dumps({"company": "字节跳动", "job_text": "x", "user_profile": "y"}, ensure_ascii=False)
-            conn.execute(
-                "INSERT INTO skill_runs(skill_name, skill_version, input_hash, "
-                "  input_json, output_json) VALUES (?,?,?,?,?)",
-                ("apply_assistant", "0.1.0", "h", inputs, output),
+            application_id = int(
+                conn.execute(
+                    "INSERT INTO applications(job_id, status) VALUES (?, 'considered') RETURNING id",
+                    (job_id,),
+                ).fetchone()[0]
             )
-        resp = client.get("/api/extension/package?company=字节跳动")
+            workspace_id = int(
+                conn.execute(
+                    "INSERT INTO resume_workspaces("
+                    "application_id, job_snapshot_json, master_source_sha256, apply_pack_json"
+                    ") VALUES (?, ?, ?, ?) RETURNING id",
+                    (
+                        application_id,
+                        json.dumps({"job_id": job_id, "company": "字节跳动"}),
+                        "a" * 64,
+                        json.dumps({"assistant": package}, ensure_ascii=False),
+                    ),
+                ).fetchone()[0]
+            )
+
+        resp = client.get(f"/api/extension/package?company=字节跳动&job_id={job_id}")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["package"]["company"] == "字节跳动"
+        assert data["package"]["message"] == "current application message"
         assert data["company"] == "字节跳动"
-        assert data["job_id"] == 1
-        assert "self_intro_snippet" in data["package"]
+        assert data["job_id"] == job_id
+        assert data["workspace_id"] == workspace_id
+        assert data["workspace_status"] == "draft"
+        assert set(data["package"]) == {"message", "form_answers", "pre_submit_checks"}
+        with store.connect() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM skill_runs").fetchone()[0] == 0
+
+    def test_multiple_company_workspaces_return_choices_instead_of_guessing(
+        self,
+        app_client,
+    ) -> None:
+        client, store = app_client
+        package = {
+            "message": "Current message",
+            "form_answers": [],
+            "pre_submit_checks": [],
+        }
+        with store.connect() as conn:
+            for index, title in enumerate(("Agent 实习", "模型实习"), start=1):
+                job_id = int(
+                    conn.execute(
+                        "INSERT INTO jobs(source, title, company, raw_text, content_hash) "
+                        "VALUES ('manual', ?, '同一公司', 'JD', ?) RETURNING id",
+                        (title, f"same-company-{index}"),
+                    ).fetchone()[0]
+                )
+                application_id = int(
+                    conn.execute(
+                        "INSERT INTO applications(job_id, status) "
+                        "VALUES (?, 'considered') RETURNING id",
+                        (job_id,),
+                    ).fetchone()[0]
+                )
+                conn.execute(
+                    "INSERT INTO resume_workspaces("
+                    "application_id, job_snapshot_json, master_source_sha256, apply_pack_json"
+                    ") VALUES (?, ?, ?, ?)",
+                    (
+                        application_id,
+                        json.dumps({"job_id": job_id}),
+                        "a" * 64,
+                        json.dumps({"assistant": package}, ensure_ascii=False),
+                    ),
+                )
+
+        response = client.get("/api/extension/package?company=同一公司")
+
+        assert response.status_code == 409
+        matches = response.json()["matches"]
+        assert {match["title"] for match in matches} == {"Agent 实习", "模型实习"}
+        assert all(set(match) == {"workspace_id", "job_id", "title"} for match in matches)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -116,8 +183,8 @@ class TestFunnelView:
         with store.connect() as conn:
             for i in range(5):
                 conn.execute(
-                    "INSERT INTO jobs(source, raw_text, content_hash) "
-                    "VALUES ('m', ?, ?)", ("x" * 250, f"h{i}"),
+                    "INSERT INTO jobs(source, raw_text, content_hash) VALUES ('m', ?, ?)",
+                    ("x" * 250, f"h{i}"),
                 )
                 conn.execute(
                     "INSERT INTO applications(job_id, status) VALUES (?, 'submitted')",
@@ -127,7 +194,8 @@ class TestFunnelView:
             for app_id in [1, 2, 3]:
                 conn.execute(
                     "INSERT INTO application_events(application_id, kind, source) "
-                    "VALUES (?, 'viewed', 'manual')", (app_id,),
+                    "VALUES (?, 'viewed', 'manual')",
+                    (app_id,),
                 )
             # 1 got 'replied'
             conn.execute(
@@ -146,7 +214,11 @@ class TestFunnelView:
                 conn.execute(
                     "INSERT INTO jobs(source, company, raw_text, content_hash) "
                     "VALUES ('m', ?, ?, ?)",
-                    (company, "x" * 250, f"h_{company}_{conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]}"),
+                    (
+                        company,
+                        "x" * 250,
+                        f"h_{company}_{conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]}",
+                    ),
                 )
             # 3 apps total
             for jid in [1, 2, 3]:
@@ -200,9 +272,7 @@ class TestPortfolioPage:
                 "INSERT INTO jobs(source, company, raw_text, content_hash) "
                 "VALUES ('m', 'PrivateCorp', 'x' * 250, 'h1')"
             )
-            conn.execute(
-                "INSERT INTO applications(job_id, status) VALUES (1, 'applied')"
-            )
+            conn.execute("INSERT INTO applications(job_id, status) VALUES (1, 'applied')")
         resp = client.get("/portfolio")
         # None of these should leak to portfolio
         assert "REAL_NAME" not in resp.text
@@ -218,13 +288,17 @@ class TestPortfolioPage:
         """
         client, store = app_client
         from offerguide.evolution.signals import record_user_thumbs
+
         for _ in range(3):
             record_user_thumbs(
-                store, skill_name="score_match", skill_version="0.1.0",
-                skill_run_id=None, thumbs=1,
+                store,
+                skill_name="example_skill",
+                skill_version="0.1.0",
+                skill_run_id=None,
+                thumbs=1,
             )
         resp = client.get("/portfolio")
-        assert "score_match" in resp.text
+        assert "example_skill" in resp.text
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -239,22 +313,29 @@ class TestPromptCaching:
         from offerguide.llm import LLMClient
 
         captured_body: dict = {}
+
         class _StubResp:
             def __init__(self):
                 self.status_code = 200
+
             def json(self):
                 return {
-                    "choices": [{"message": {"content": "ok", "tool_calls": []}, "finish_reason": "stop"}],
+                    "choices": [
+                        {"message": {"content": "ok", "tool_calls": []}, "finish_reason": "stop"}
+                    ],
                     "usage": {"prompt_tokens": 100, "completion_tokens": 20},
                     "model": "claude-sonnet-4-6",
                 }
+
             text = ""
 
         def fake_post(url, headers, json):
             captured_body.update(json)
             return _StubResp()
 
-        client = LLMClient(api_key="x", base_url="https://example.com", default_model="claude-sonnet-4-6")
+        client = LLMClient(
+            api_key="x", base_url="https://example.com", default_model="claude-sonnet-4-6"
+        )
         monkeypatch.setattr(client._http, "post", fake_post)
 
         client.chat_with_tools(
@@ -276,12 +357,16 @@ class TestPromptCaching:
         from offerguide.llm import LLMClient
 
         captured_body: dict = {}
+
         class _StubResp:
             status_code = 200
             text = ""
+
             def json(self):
                 return {
-                    "choices": [{"message": {"content": "x", "tool_calls": []}, "finish_reason": "stop"}],
+                    "choices": [
+                        {"message": {"content": "x", "tool_calls": []}, "finish_reason": "stop"}
+                    ],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1},
                     "model": "x",
                 }

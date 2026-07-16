@@ -1,94 +1,44 @@
-# OfferGuide Helper · 安全的 Boss直聘/牛客 投递辅助
+# OfferGuide Helper
 
-> ⚠ **安全设计是这个扩展的第一原则**。任何操作都要经过用户手动点击,
-> 永远不会替用户点击发送/提交/上传等会触发平台风控的动作。
+这个本地 Chrome / Edge 扩展提供两个互不混用的能力：
 
-## 这个扩展做什么
+1. 在 Boss 直聘或牛客页面读取 OfferGuide 已准备好的当前投递包，用户点击后复制文案。
+2. 当 `JobDiscoveryAgent` 或 `InterviewResearchAgent` 明确请求一个公开 HTTP(S) URL 时，使用用户当前浏览器配置文件中的已有登录会话读取该页，把完整渲染 HTML、可见正文、标题和最终 URL 交回本机 OfferGuide。
 
-当你打开 Boss直聘 / 牛客网的岗位详情页或聊天页, 扩展会:
+第二项解决的是后台 HTTP 请求无法读取登录页或 JavaScript 渲染页面的问题。它不是自动投递工具。
 
-1. 从页面标题嗅探出公司名 (例如 "字节跳动")
-2. 调用本地的 OfferGuide (http://localhost:8000) 看有没有为这家公司
-   准备过 apply_assistant 投递包
-3. 如果有, 在页面右下角浮一个面板, 把投递包的各部分 (自我介绍 / Q&A 模板)
-   放成"复制"按钮
-4. 你点哪个按钮, 那段文字就被复制到剪贴板, 你再去聊天框/表单里手动粘贴
+## 行为边界
 
-**就这样**。扩展不会:
-
-- ❌ 自动填表
-- ❌ 自动点发送 / 提交按钮
-- ❌ 自动滚动 / 导航 / 切换页面
-- ❌ 监听键盘鼠标事件
-- ❌ 修改任何平台 DOM (除了它自己的浮动面板)
-- ❌ 把平台数据回传给 OfferGuide
-
-## 为什么不做"全自动投递"
-
-国内主流求职平台 (Boss直聘 / 牛客 / 智联) 的反 bot 风控非常敏感, 触发
-后果是**封号** —— 不只是这次警告, 而是直接停用账号, 申诉很难恢复。
-
-具体会触发风控的行为:
-
-- Selenium / Playwright headless 浏览器 (navigator.webdriver=true 暴露)
-- 短时间内大量请求 / 操作 (>5 次/分钟)
-- 自动模拟点击 / 自动 dispatchEvent (触发 click 事件而非真鼠标)
-- 同一台机器 + 同一 IP 操作多个账号
-- 给多个 HR 发完全相同的模板信息 (语义 hash 检测)
-- 简历 / 头像短期内频繁更换
-
-我们的设计原则: **凡是会被风控的事, 我们就不做。** 用户用真浏览器
-真鼠标真键盘, 我们只做"把内容传到剪贴板"这种风控**完全不关心**的事。
-
-## 自带的速率限制
-
-即使是"复制到剪贴板"这种安全操作, 扩展也会强制:
-
-- 每分钟最多 5 次复制 (超过显示 "⚠ 太快")
-- 每小时最多 30 次复制 (超过同样停)
-
-这是**额外保险** — 假如你一次面试季要投 50 个岗位, 也别一次刷完。
-真人不会的, agent 用户也不该模仿。
+- 研究请求只能由本机 OfferGuide 服务创建；网页不能要求扩展打开任意 URL。
+- 扩展只接受经过服务端校验的 HTTP(S) URL，并再次拒绝明显的本地或私有目标。
+- 每个研究请求新建一个非活动标签页，只观察加载状态和读取 DOM，不滚动、不点击、不填写、不发送、不提交。
+- 扩展只关闭自己为该请求创建的标签页，不关闭或修改用户原有标签页。
+- 回传数据只包含最终 URL、标题、`documentElement.outerHTML` 和页面可见正文；扩展不会读取或另行返回 cookie、请求头、localStorage、sessionStorage 等浏览器凭据。
+- 页面正文始终以 untrusted evidence 保存。页面里的 prompt、工具调用文字或脚本不能改变 Agent instructions 和工具权限。
+- 页面没有稳定渲染、仍要求登录、正文为空或超过明确大小限制时，请求失败并保留真实原因，不会截断后伪装成完整证据。
+- 系统绝不替用户点击发送或提交。
 
 ## 安装
 
-### 开发模式 (推荐)
+1. 启动本地 OfferGuide：`uv run python -m offerguide.ui.web`。
+2. Chrome / Edge 打开 `chrome://extensions/`，启用开发者模式。
+3. 选择“加载已解压的扩展程序”，指向本仓库的 `extension/` 目录。
+4. 点击扩展图标一次。弹窗显示本地 OfferGuide 为 `ok` 后，后台桥接会自动登记并定期检查 Agent 请求。
 
-1. 启动本地 OfferGuide:
-   ```bash
-   python -m offerguide.ui.web   # 默认 localhost:8000
-   ```
-2. Chrome / Edge 打开 `chrome://extensions/`
-3. 右上角打开 "开发者模式"
-4. "加载已解压的扩展程序" → 选这个 `extension/` 文件夹
-5. 找到扩展图标 (默认会显示在工具栏)
+扩展使用 `http://localhost:8000`。桥接配置只从 loopback 返回，不设置跨站 CORS；后续登记、认领和回传都需要本机服务生成的 access token，并且每个请求还有一次性租约 token。
 
-### Icons
+## 本地 API
 
-`icons/` 目录里没默认图标。你可以自己放 16/32/48/128 像素的 png,
-或者从 manifest.json 删掉 icon 字段 (会显示默认拼图图标)。
+投递包辅助：
 
-## 配套的本地 API
+- `GET /api/extension/ping`
+- `GET /api/extension/package?company=<name>&job_id=<id>`
 
-扩展会跟 OfferGuide 后端的两个端点对话:
+登录态读取桥：
 
-- `GET /api/extension/ping` — 健康检查
-- `GET /api/extension/package?company=<name>` — 拿出最新的 apply
-  package (是用户在 OfferGuide /apply/<job_id> 页面跑过 apply_assistant
-  之后存在 skill_runs 里的)
+- `GET /api/browser-bridge/config`
+- `POST /api/browser-bridge/clients/register`
+- `POST /api/browser-bridge/requests/claim`
+- `POST /api/browser-bridge/requests/<request_id>/complete`
 
-## 使用流程
-
-1. 在 OfferGuide 里 (`/apply/<job_id>`) 跑 apply_assistant 给某个岗位
-   生成投递包
-2. 打开 Boss直聘 / 牛客, 找到这个公司的岗位或 HR 聊天页
-3. 扩展自动嗅探出公司名 + 拉出投递包
-4. 点"复制自我介绍" → 切到 Boss 输入框 → 粘贴 → **手动改 1-2 个字** →
-   **手动**点发送
-5. 投完去 OfferGuide `/apply/<job_id>` 标记 "已提交"
-
-## 隐私
-
-- 只跟 `localhost:8000` 通信, 永远不连 OfferGuide 云端 (没有云端)
-- 永远不读取平台聊天历史 / 个人信息 / cookie
-- 唯一上传给 OfferGuide 的信息是: 公司名 (从页面标题嗅探的)
+浏览器桥接端点不允许网页创建读取请求。Agent 侧的确定性来源工具负责 URL 校验、请求身份和最终 evidence 保存。

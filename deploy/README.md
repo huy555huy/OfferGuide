@@ -1,68 +1,50 @@
 # 部署 OfferGuide
 
-## 启动 web UI（阻塞运行）
+## 单一服务进程
+
+OfferGuide 不再运行独立 autonomous daemon。Web、定期找岗刷新、提交后的面经研究和主 Agent 委托都通过同一个 `ResearchAgentService` 使用 `JobDiscoveryAgent` 与 `InterviewResearchAgent`；额外启动第二套 scheduler 会破坏唯一结果所有权。
+
+安装并启动：
 
 ```bash
-# 一次性 run（重启电脑就停）
-python -m offerguide.ui.web
-# → http://127.0.0.1:8000
+uv sync --extra ui
+uv run python -m offerguide.ui.web
 ```
 
-## 启动 autonomous daemon（后台 7 个 cron job）
+默认地址为 `http://127.0.0.1:8000`。进程停止后页面与后台研究任务都会停止；已经写入 SQLite 的岗位证据、冻结投递和当前材料不会丢失。
 
-OfferGuide 有 7 个 daemon 每天定时跑：
+## 后台 Research Agent
 
-| Job | 时间 | 干什么 |
-|---|---|---|
-| `extract_facts` | 02:00 | 抽 SKILL 输出里的事实进 `user_facts` 长期记忆 |
-| `discover_jobs` | 06:30 | spider 抓 namewyf/Campus2026 等公司入口 |
-| `jd_enrich`     | 06:45 | spider 抓的 thin JD → fetch + LLM 抽 JD 详情 |
-| `corpus_classify` | 07:00 | 给 pending 面经跑 quality 分类器 |
-| `silence_check` | 09:00 | 沉默 ≥ 7/14/30 天的应用提醒 |
-| `corpus_refresh` | Mon 08:00 | DDG 搜面经 + LLM 过滤 + 入库 |
-| `brief_update`  | 23:00 | 维护 `company_briefs` 表 |
+默认情况下，Web lifespan 会定期触发同一个 `JobDiscoveryAgent`；实际提交、面试上下文更新和用户刷新会异步触发绑定当前 submitted workspace 的 `InterviewResearchAgent`。触发器只负责唤醒，不拥有搜索、排序或材料生成逻辑。
 
-### 选项 A：launchd（macOS，推荐）
+开发或诊断时可以关闭后台刷新：
 
 ```bash
-# 1. 编辑 deploy/launchd/com.offerguide.daemon.plist
-#    把 /Users/huy/new_try 替换成你的仓库路径
-#    把 /opt/anaconda3/bin/python 替换成 `which python` 输出
-
-# 2. 安装到 LaunchAgents
-cp deploy/launchd/com.offerguide.daemon.plist ~/Library/LaunchAgents/
-
-# 3. 加载
-launchctl load ~/Library/LaunchAgents/com.offerguide.daemon.plist
-
-# 4. 验证
-launchctl list | grep offerguide
-tail -f /tmp/offerguide.daemon.log
-
-# 卸载
-launchctl unload ~/Library/LaunchAgents/com.offerguide.daemon.plist
+OFFERGUIDE_NO_BACKGROUND_AGENTS=1 uv run python -m offerguide.ui.web
 ```
 
-### 选项 B：tmux + 手跑（开发期）
+这个开关不创建替代 daemon；用户仍可在页面显式请求找岗或面经研究。
+
+## 长期运行
+
+需要 tmux、launchd 或 systemd 托管时，进程管理器只启动同一条 Web 命令。例如开发机可以使用：
 
 ```bash
 tmux new -s offerguide
-python -m offerguide.autonomous run
+uv run python -m offerguide.ui.web
 # Ctrl-B D 把 tmux 放后台
 ```
 
-### 选项 C：systemd（Linux）
-
-写一个 `~/.config/systemd/user/offerguide.service`：
+systemd 示例：
 
 ```ini
 [Unit]
-Description=OfferGuide autonomous daemon
+Description=OfferGuide web and research agents
 
 [Service]
 WorkingDirectory=/path/to/repo
 EnvironmentFile=/path/to/repo/.env
-ExecStart=/usr/bin/python -m offerguide.autonomous run
+ExecStart=/path/to/repo/.venv/bin/python -m offerguide.ui.web
 Restart=on-failure
 RestartSec=30s
 
@@ -70,21 +52,8 @@ RestartSec=30s
 WantedBy=default.target
 ```
 
-然后 `systemctl --user enable --now offerguide`。
+不要再部署 `offerguide.autonomous`、`wake_agent` 或旧 corpus/score jobs；这些入口已退出生产。
 
-## 单次跑某个 job（不启动 daemon）
+## 验证
 
-```bash
-python -m offerguide.autonomous run-once discover_jobs
-python -m offerguide.autonomous run-once jd_enrich
-python -m offerguide.autonomous run-once corpus_classify
-```
-
-## 查看 daemon 是否真在跑
-
-打开 web UI → `/dashboard` → 看「daemon 健康」卡片。每个 job 显示：
-- 上次运行时间
-- 上次结果（counters dict）
-- 下次预计运行时间
-
-如果某个 job 显示「从未运行」，daemon 可能没启动 / 该 job 还没到触发时间。
+打开 `/recommended` 检查当前找岗状态，完成一次实际提交后打开对应投后页面检查面经研究状态。运行记录可以在 Web 调试页查看；真实岗位来源、完整 JD、冻结投递和可打开的面经引用才是链路是否可用的依据。

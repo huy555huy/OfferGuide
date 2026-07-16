@@ -10,6 +10,7 @@ wording, but they are never treated as evidence for the user's own results.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
@@ -56,7 +57,15 @@ class _SearchLike(Protocol):
 
 
 class _LLMLike(Protocol):
-    def chat(self, messages: list[dict[str, str]], **kw: Any) -> Any:
+    def chat(
+        self,
+        messages: Any,
+        *,
+        model: str | None = None,
+        temperature: float = 0.3,
+        json_mode: bool = False,
+        extra: Mapping[str, Any] | None = None,
+    ) -> Any:
         ...
 
 
@@ -420,7 +429,7 @@ def append_to_profile_text(
     *,
     max_project_chars: int = 5000,
 ) -> str:
-    """Append project vault context to a resume/profile prompt input.
+    """Append project vault context to a legacy generic prompt input.
 
     The appended block is explicitly labelled as project facts and guardrails,
     not polished resume text. This keeps existing SKILL input schemas stable

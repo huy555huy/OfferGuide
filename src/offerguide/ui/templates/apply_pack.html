@@ -1,439 +1,653 @@
 {% extends "base.html" %}
 {% block title %}投递包 · {{ job.title }} @ {{ job.company }}{% endblock %}
-{% block crumb %}Pipeline{% endblock %}
+{% block crumb %}投递包{% endblock %}
 {% block topbar_tags %}
 <span class="bracket-tag dim"><span>job#{{ job.id }}</span></span>
-<span class="bracket-tag signal"><span>apply pack</span></span>
+{% if workspace %}
+<span class="bracket-tag {% if workspace.status == 'submitted' %}signal{% else %}dim{% endif %}">
+    <span>{% if workspace.status == 'submitted' %}已提交{% else %}草稿{% endif %}</span>
+</span>
+{% endif %}
 {% endblock %}
 {% block content %}
 
 <style>
-.pack-card {
-    background: var(--bg-elev);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 1rem 1.25rem;
-    margin-bottom: 0.875rem;
-}
-.pack-card h2 {
-    font-family: var(--font-serif);
-    font-size: 1.05rem;
-    margin: 0 0 0.5rem;
-}
-.copy-block {
-    background: var(--bg-subtle);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--radius-sm);
-    padding: 0.75rem 0.875rem;
-    font-family: -apple-system, "PingFang SC", sans-serif;
-    font-size: 0.875rem;
-    line-height: 1.65;
-    white-space: pre-wrap;
-    word-break: break-word;
-    margin-bottom: 0.5rem;
-}
-.copy-btn {
-    font-size: 0.78rem;
-    padding: 0.25rem 0.625rem;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg-elev);
-    cursor: pointer;
-    margin-bottom: 0.875rem;
-}
-.copy-btn:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
-.qa-item {
-    border-top: 1px solid var(--border-soft);
-    padding: 0.625rem 0;
-}
-.qa-item:first-of-type { border-top: none; padding-top: 0; }
-.qa-item .q {
-    font-weight: 600;
-    margin-bottom: 0.25rem;
-}
-.qa-item .cat {
-    display: inline-block;
-    font-size: 0.7rem;
-    padding: 1px 6px;
-    border-radius: 3px;
-    background: var(--bg-subtle);
-    color: var(--text-muted);
-    margin-left: 0.375rem;
-    text-transform: uppercase;
-}
-.qa-item .anti {
-    color: var(--danger);
-    font-size: 0.78rem;
-    margin-top: 0.375rem;
-}
-.checklist li { margin: 0.25rem 0; }
-.skip-banner {
-    background: #fce8e6;
-    border: 1px solid var(--danger);
-    border-radius: var(--radius-sm);
-    padding: 0.875rem 1rem;
-    margin-bottom: 1rem;
-}
-.actions-row {
-    display: flex; gap: 0.625rem; margin-top: 1rem;
-}
-.actions-row a, .actions-row form button {
-    padding: 0.625rem 1rem;
-    border-radius: 5px;
-    border: 1px solid var(--border);
-    background: var(--bg-elev);
-    cursor: pointer;
-    text-decoration: none;
-    color: var(--text);
-    font-size: 0.875rem;
-}
-.actions-row .primary {
-    background: var(--primary); color: #fff; border-color: var(--primary);
-}
-.confidence-bar {
-    display: flex; align-items: center; gap: 0.5rem;
-    font-size: 0.78rem; color: var(--text-muted);
-}
-.plan-grid {
+.apply-page {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(260px, 0.75fr);
-    gap: 0.875rem;
+    gap: 18px;
 }
-@media (max-width: 860px) { .plan-grid { grid-template-columns: 1fr; } }
-.step-list, .field-list { margin: 0; padding-left: 1.25rem; }
-.step-list li { margin: 0.3rem 0; line-height: 1.5; }
-.field-row {
-    border-top: 1px solid var(--border-soft);
-    padding: 0.5rem 0;
+.apply-heading {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 18px;
 }
-.field-row:first-child { border-top: none; padding-top: 0; }
-.field-row .label { font-weight: 600; font-size: 0.86rem; }
-.field-row .hint {
-    font-size: 0.82rem; color: var(--text-secondary);
-    line-height: 1.45; margin-top: 0.15rem;
+.apply-heading h1 {
+    margin: 0;
+    font-family: var(--font-serif);
+    font-size: 24px;
+    font-weight: 500;
+    line-height: 1.25;
+    letter-spacing: 0;
+    overflow-wrap: anywhere;
 }
-.field-row .src { font-size: 0.72rem; color: var(--text-muted); }
+.apply-heading-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+    color: var(--ink-3);
+    font-size: 12.5px;
+}
+.apply-heading-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+.apply-heading-actions form { margin: 0; }
+.workbench {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 390px);
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    background: var(--bg-elev);
+}
+.document-pane,
+.jd-pane {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+.document-pane { border-right: 1px solid var(--line); }
+.pane-toolbar {
+    min-height: 48px;
+    padding: 9px 12px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg);
+}
+.pane-toolbar strong {
+    font-size: 13px;
+    font-weight: 600;
+}
+.pane-toolbar .grow { flex: 1; }
+.pane-status {
+    color: var(--ink-3);
+    font-size: 11.5px;
+    white-space: nowrap;
+}
+.resume-frame {
+    display: block;
+    width: 100%;
+    height: clamp(640px, calc(100vh - 190px), 920px);
+    border: 0;
+    background: #fff;
+}
+.document-missing {
+    height: clamp(520px, calc(100vh - 250px), 760px);
+    display: grid;
+    place-items: center;
+    padding: 28px;
+    color: var(--ink-3);
+    text-align: center;
+    background: var(--bg-subtle);
+}
+.jd-body {
+    height: clamp(640px, calc(100vh - 190px), 920px);
+    padding: 16px 17px 22px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    line-height: 1.72;
+}
+.workspace-empty {
+    min-height: 420px;
+    display: grid;
+    place-items: center;
+    padding: 36px 20px;
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--r);
+    background: var(--bg-elev);
+    text-align: center;
+}
+.workbench .workspace-empty {
+    min-height: clamp(520px, calc(100vh - 250px), 760px);
+    border: 0;
+    border-radius: 0;
+}
+.workspace-empty h2 {
+    margin: 0 0 7px;
+    font-family: var(--font-serif);
+    font-size: 20px;
+    font-weight: 500;
+}
+.workspace-empty p {
+    margin: 0 0 16px;
+    color: var(--ink-3);
+    font-size: 12.5px;
+}
+.master-review {
+    width: min(100%, 760px);
+    padding: 18px;
+    text-align: left;
+}
+.master-review h2,
+.master-review p { text-align: left; }
+.master-review textarea {
+    display: block;
+    width: 100%;
+    min-height: 420px;
+    max-height: 62vh;
+    resize: vertical;
+    padding: 11px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm);
+    background: var(--bg-elev);
+    color: var(--ink);
+    font: 12px/1.62 var(--font-mono);
+}
+.work-section {
+    padding: 18px 0 2px;
+    border-top: 1px solid var(--line);
+}
+.work-section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.work-section h2 {
+    margin: 0;
+    font-family: var(--font-serif);
+    font-size: 18px;
+    font-weight: 500;
+    letter-spacing: 0;
+}
+.edit-layout,
+.material-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 0.72fr);
+    gap: 22px;
+}
+.feedback-form label,
+.subsection-title {
+    display: block;
+    margin-bottom: 7px;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    font-weight: 600;
+}
+.feedback-form textarea {
+    display: block;
+    width: 100%;
+    min-height: 112px;
+    resize: vertical;
+    padding: 10px 11px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm);
+    background: var(--bg-elev);
+    color: var(--ink);
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.55;
+}
+.feedback-form textarea:focus {
+    outline: 2px solid var(--signal-soft);
+    border-color: var(--signal);
+}
+.form-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 9px;
+}
+.editor-note,
+.review-note,
+.frozen-note {
+    padding: 10px 12px;
+    border-left: 2px solid var(--line-strong);
+    background: var(--bg-subtle);
+    color: var(--ink-2);
+    font-size: 12.5px;
+    line-height: 1.6;
+}
+.review-note.error-state { border-left-color: var(--bad); color: var(--bad); }
+.prep-list {
+    margin: 0;
+}
+.prep-list > div {
+    padding: 9px 0;
+    border-top: 1px solid var(--line-soft);
+}
+.prep-list > div:first-child { padding-top: 0; border-top: 0; }
+.prep-list dt {
+    color: var(--ink);
+    font-size: 12.5px;
+    font-weight: 600;
+}
+.prep-list dd {
+    margin: 3px 0 0;
+    color: var(--ink-3);
+    font-size: 12px;
+    line-height: 1.55;
+}
+.copy-unit,
+.qa-row {
+    padding: 11px 0;
+    border-top: 1px solid var(--line-soft);
+}
+.copy-unit:first-child,
+.qa-row:first-child { padding-top: 0; border-top: 0; }
+.copy-label,
+.qa-question {
+    margin-bottom: 6px;
+    color: var(--ink);
+    font-size: 12.5px;
+    font-weight: 600;
+}
+.copy-text {
+    padding: 10px 11px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--bg-subtle);
+    color: var(--ink-2);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 12.5px;
+    line-height: 1.65;
+}
+.copy-line {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 6px;
+}
+.copy-button {
+    padding: 5px 9px;
+    font-size: 11.5px;
+}
+.check-list {
+    margin: 0;
+    padding-left: 19px;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    line-height: 1.62;
+}
+.check-list li { margin: 4px 0; }
+.section-stack {
+    display: grid;
+    gap: 15px;
+}
+.action-error {
+    display: none;
+    margin-top: 8px;
+}
+.action-error.visible { display: block; }
+@media (max-width: 980px) {
+    .workbench { grid-template-columns: minmax(0, 1fr) 320px; }
+    .edit-layout,
+    .material-layout { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+    .apply-heading { grid-template-columns: 1fr; align-items: start; }
+    .apply-heading-actions { justify-content: flex-start; }
+    .workbench { grid-template-columns: 1fr; }
+    .document-pane { border-right: 0; border-bottom: 1px solid var(--line); }
+    .resume-frame,
+    .jd-body { height: 70vh; min-height: 520px; }
+    .pane-status { white-space: normal; }
+}
+@media (max-width: 520px) {
+    .pane-toolbar { align-items: flex-start; flex-wrap: wrap; }
+    .pane-toolbar .grow { display: none; }
+    .apply-heading-actions,
+    .form-actions { align-items: stretch; flex-direction: column; }
+    .apply-heading-actions .btn,
+    .apply-heading-actions button,
+    .form-actions .btn,
+    .form-actions button { width: 100%; justify-content: center; }
+}
 </style>
 
-<div class="card">
-    <h1 style="font-family: var(--font-serif); margin: 0 0 0.375rem;">投递包: {{ job.title }}</h1>
-    <div class="muted small">
-        <strong>{{ job.company }}</strong>
-        {% if job.location %} · {{ job.location }}{% endif %}
-        {% if job.url %} · <a href="{{ job.url }}" target="_blank" rel="noopener">原 JD</a>{% endif %}
-    </div>
-    <div class="muted small" style="margin-top: 0.5rem; line-height: 1.6;">
-        投递主流程: <strong>① 用下面这份针对性简历</strong> →
-        <strong>② 复制投递话术 / 网申 Q&A</strong> →
-        ③ 去原 JD 链接投, OfferGuide 不替你按发送.
-    </div>
-</div>
-
-{# ━━━━━━━━━━━━━━━━ ① 针对此岗的简历微调 ━━━━━━━━━━━━━━━━ #}
-<div class="pack-card" style="border-left: 4px solid var(--primary);">
-    <h2>针对此岗的简历 (第一步)</h2>
-    {% if tailor_error %}
-        <div class="muted small" style="color: var(--danger);">
-            ⚠ 简历微调失败: {{ tailor_error }}
-        </div>
-    {% elif tailored %}
-        {% set lift = (tailored.fit_estimate.after - tailored.fit_estimate.before) if tailored.fit_estimate else 0 %}
-        {% if tailored.fit_estimate %}
-        <div class="muted small" style="margin-bottom: 0.625rem;">
-            命中率预估
-            <strong>{{ "%.0f"|format(tailored.fit_estimate.before * 100) }}% → {{ "%.0f"|format(tailored.fit_estimate.after * 100) }}%</strong>
-            <span style="color: {% if lift >= 0 %}var(--success){% else %}var(--danger){% endif %};">
-                ({% if lift >= 0 %}+{% endif %}{{ "%.0f"|format(lift * 100) }}%)
-            </span>
-            {% if tailored.suggested_filename %}
-                · 建议文件名 <code>{{ tailored.suggested_filename }}</code>
-            {% endif %}
-        </div>
-        {% endif %}
-        {% if tailored.cannot_fake_warnings %}
-        <div style="background: var(--warning-soft); padding: 0.625rem 0.875rem; border-radius: var(--radius-sm); border-left: 3px solid var(--warning); margin-bottom: 0.75rem; font-size: 0.85rem;">
-            自审拒绝改: <ul style="margin: 0.25rem 0 0; padding-left: 1.25rem;">
-                {% for w in tailored.cannot_fake_warnings %}<li>{{ w }}</li>{% endfor %}
-            </ul>
-        </div>
-        {% endif %}
-        <details style="margin-bottom: 0.75rem;">
-            <summary style="cursor: pointer; font-weight: 600;">
-                展开看 tailored markdown ({{ (tailored.tailored_markdown or '')|length }} 字)
-            </summary>
-            <div class="copy-block" style="margin-top: 0.5rem; max-height: 480px; overflow-y: auto; font-family: var(--font-mono); font-size: 0.78rem;" id="tailored-md-block">{{ tailored.tailored_markdown }}</div>
-            <button class="copy-btn" type="button"
-                    onclick="navigator.clipboard.writeText(document.getElementById('tailored-md-block').textContent); this.textContent='已复制'">
-                复制 markdown
-            </button>
-        </details>
-        {% if tailored.change_log %}
-        <details>
-            <summary style="cursor: pointer; font-weight: 600;">
-                改了 {{ tailored.change_log|length }} 处 (展开看 diff)
-            </summary>
-            <div style="margin-top: 0.5rem;">
-                {% for c in tailored.change_log[:12] %}
-                <div style="background: var(--bg-subtle); border-left: 3px solid var(--primary); padding: 0.5rem 0.75rem; margin-bottom: 0.375rem; border-radius: var(--radius-sm); font-size: 0.82rem;">
-                    <strong>{{ c.section }}</strong>
-                    <span class="muted small" style="margin-left: 0.5rem;">[{{ c.kind }}]</span>
-                    <div style="margin-top: 0.25rem;">
-                        <span style="color: var(--danger); text-decoration: line-through; opacity: 0.85;">{{ c.before }}</span>
-                        →
-                        <span style="color: var(--success);">{{ c.after }}</span>
-                    </div>
-                    {% if c.rationale %}
-                    <div class="muted small" style="margin-top: 0.25rem; font-style: italic;">{{ c.rationale }}</div>
-                    {% endif %}
-                </div>
-                {% endfor %}
-            </div>
-        </details>
-        {% endif %}
-        <div class="muted small" style="margin-top: 0.625rem;">
-            如果你要拿到原 .docx 保格式版, 去 <a href="/tailor?job_id={{ job.id }}">/tailor</a> 点 ".docx 版".
-        </div>
-    {% else %}
-        <div class="muted small">SKILL 返回非 JSON, 没法渲染. 可去 <a href="/tailor?job_id={{ job.id }}">/tailor</a> 重试.</div>
-    {% endif %}
-</div>
-
-{% if application_plan %}
-<div class="pack-card">
-    <h2>{% if application_plan.verified_source %}已核验投递路径{% else %}投递路径核验{% endif %} · {{ application_plan.platform_label }}</h2>
-    <div class="plan-grid">
+<div class="apply-page">
+    <header class="apply-heading">
         <div>
-            <div class="muted small" style="line-height: 1.6; margin-bottom: 0.5rem;">
-                {{ application_plan.channel_note }}
-                {% if application_plan.evidence_url %}
-                <br>来源证据: {{ application_plan.evidence_url }}
+            <h1>{{ job.title }}</h1>
+            <div class="apply-heading-meta">
+                <strong>{{ job.company }}</strong>
+                {% if job.location %}<span>{{ job.location }}</span>{% endif %}
+                {% if workspace %}
+                <span class="pill {% if workspace.status == 'submitted' %}approved{% else %}pending{% endif %}">
+                    {% if workspace.status == 'submitted' %}已提交并冻结{% else %}投递草稿{% endif %}
+                </span>
                 {% endif %}
             </div>
-            <ol class="step-list">
-                {% for step in application_plan.steps %}
-                <li>{{ step }}</li>
-                {% endfor %}
-            </ol>
-            {% if application_plan.apply_url %}
-            <div style="margin-top: 0.75rem;">
-                <a href="{{ application_plan.apply_url }}" target="_blank" rel="noopener" class="primary" style="display: inline-block; padding: 0.55rem 0.8rem; border-radius: 5px; background: var(--primary); color: #fff; text-decoration: none;">
-                    {{ application_plan.action_label }} →
-                </a>
-            </div>
+        </div>
+        <div class="apply-heading-actions">
+            {% if job.url %}
+            <a class="btn primary" href="{{ job.url }}" target="_blank" rel="noopener">打开岗位</a>
             {% endif %}
         </div>
-        <div>
-            <strong style="font-size: 0.92rem;">页面要填的东西</strong>
-            <div style="margin-top: 0.375rem;">
-                {% for field in application_plan.fields %}
-                <div class="field-row">
-                    <div class="label">{{ field.label }}</div>
-                    <div class="hint" id="plan-field-{{ loop.index }}">{{ field.value_hint }}</div>
-                    <div class="src">
-                        来源: {{ field.source }}
-                        {% if field.copyable %}
-                        · <button class="copy-btn" data-target="plan-field-{{ loop.index }}" style="margin:0 0 0 0.25rem;">复制</button>
+    </header>
+
+    {% if error %}
+    <div class="error" role="alert">{{ error }}</div>
+    {% endif %}
+    {% if workspace_creation_blocked %}
+    <div class="error" role="alert">
+        该岗位最近一次检查显示已关闭。完整 JD 仍可查看，但不能新建投递工作区。
+    </div>
+    {% endif %}
+
+    {% if not workspace %}
+    <section class="workbench" aria-label="简历与岗位要求对照">
+        <div class="document-pane">
+            <div class="pane-toolbar"><strong>当前简历</strong></div>
+            <div class="workspace-empty">
+                {% if workspace_creation_blocked %}
+                <div>
+                    <h2>岗位已关闭</h2>
+                    <p>如果页面重新开放，请从岗位选择页刷新证据后再准备投递。</p>
+                </div>
+                {% elif not master_available %}
+                <div>
+                    <h2>缺少 master PDF</h2>
+                    <p>配置 OFFERGUIDE_RESUME_PDF 后再生成岗位简历。</p>
+                </div>
+                {% elif not master_ready %}
+                <form class="master-review js-workspace-action" method="post" action="/api/jobs/{{ job.id }}/resume-workspace/confirm-master">
+                    {% if selection_binding.selection_revision and selection_binding.job_evidence_id %}
+                    <input type="hidden" name="selection_revision" value="{{ selection_binding.selection_revision }}">
+                    <input type="hidden" name="job_evidence_id" value="{{ selection_binding.job_evidence_id }}">
+                    {% endif %}
+                    <h2>确认 master 简历文本</h2>
+                    <p>这是从 PDF 提取的内容。检查遗漏或乱码，也可以直接修正，再生成当前岗位简历。</p>
+                    <textarea name="semantic_text" required>{{ master_text }}</textarea>
+                    <div class="form-actions">
+                        <button class="primary" type="submit" data-pending-label="正在生成…">确认并生成</button>
+                    </div>
+                    <div class="error action-error" role="alert"></div>
+                </form>
+                {% else %}
+                <div>
+                    <h2>生成这份岗位简历</h2>
+                    <p>当前岗位还没有简历工作区。</p>
+                    <form class="js-workspace-action" method="post" action="/api/jobs/{{ job.id }}/resume-workspace/start">
+                        {% if selection_binding.selection_revision and selection_binding.job_evidence_id %}
+                        <input type="hidden" name="selection_revision" value="{{ selection_binding.selection_revision }}">
+                        <input type="hidden" name="job_evidence_id" value="{{ selection_binding.job_evidence_id }}">
                         {% endif %}
+                        <button class="primary" type="submit" data-pending-label="正在生成…">开始生成</button>
+                        <div class="error action-error" role="alert"></div>
+                    </form>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        <aside class="jd-pane">
+            <div class="pane-toolbar">
+                <strong>完整 JD</strong>
+                <span class="grow"></span>
+                {% if job.url %}
+                <a class="btn ghost" href="{{ job.url }}" target="_blank" rel="noopener">打开来源</a>
+                {% endif %}
+            </div>
+            <div class="jd-body">{{ job.raw_text or job.description or 'JD 正文未保存。' }}</div>
+        </aside>
+    </section>
+    {% else %}
+    <section class="workbench" aria-label="简历与岗位要求对照">
+        <div class="document-pane">
+            <div class="pane-toolbar">
+                <strong>当前简历</strong>
+                {% if visual_review and visual_review.error %}
+                <span class="pane-status" style="color: var(--bad);">页面审阅失败</span>
+                {% elif visual_review and visual_review.status %}
+                <span class="pane-status">
+                    {% if visual_review.status in ['reviewed', 'ok', 'passed', 'complete', 'completed'] %}
+                    页面审阅完成
+                    {% elif visual_review.status in ['running', 'pending'] %}
+                    正在审阅页面
+                    {% elif visual_review.status == 'not_configured' %}
+                    未配置页面审阅模型
+                    {% elif visual_review.status == 'unavailable' %}
+                    页面审阅不可用
+                    {% elif visual_review.status == 'not_run_after_rerender' %}
+                    模板重排后未重新审阅
+                    {% else %}
+                    {{ visual_review.status }}
+                    {% endif %}
+                </span>
+                {% endif %}
+                <span class="grow"></span>
+                {% if pdf_url %}
+                <a class="btn secondary" href="{{ pdf_url }}" target="_blank" rel="noopener">打开 PDF</a>
+                {% endif %}
+            </div>
+            {% if pdf_url %}
+            <iframe class="resume-frame" src="{{ pdf_url }}#view=FitH" title="{{ job.company }} {{ job.title }} 定制简历 PDF"></iframe>
+            {% else %}
+            <div class="document-missing">当前草稿还没有可查看的 PDF。</div>
+            {% endif %}
+        </div>
+        <aside class="jd-pane">
+            <div class="pane-toolbar">
+                <strong>完整 JD</strong>
+                <span class="grow"></span>
+                {% if job.url %}
+                <a class="btn ghost" href="{{ job.url }}" target="_blank" rel="noopener">打开来源</a>
+                {% endif %}
+            </div>
+            <div class="jd-body">{{ job.raw_text or job.description or 'JD 正文未保存。' }}</div>
+        </aside>
+    </section>
+
+    {% if workspace.status == 'draft' %}
+    <section class="work-section">
+        <div class="work-section-head">
+            <h2>修改当前简历</h2>
+        </div>
+        <div class="edit-layout">
+            <div>
+                <form class="feedback-form js-workspace-action" method="post" action="/api/jobs/{{ job.id }}/resume-workspace/revise">
+                    <label for="resume-feedback">修改意见</label>
+                    <textarea id="resume-feedback" name="feedback" required placeholder="例如：第一页下半部分太空；第二个项目的强调不自然。"></textarea>
+                    <div class="form-actions">
+                        <button class="primary" type="submit" data-pending-label="正在修改…">提交修改</button>
+                        <button class="secondary" type="submit" form="rerender-form" data-pending-label="正在重排…">仅重新排版</button>
+                    </div>
+                    <div class="error action-error" role="alert"></div>
+                </form>
+                <form id="rerender-form" class="js-workspace-action" method="post" action="/api/jobs/{{ job.id }}/resume-workspace/rerender"></form>
+            </div>
+            <div class="section-stack">
+                {% if editor_note %}
+                <div>
+                    <span class="subsection-title">最近一次编辑</span>
+                    <div class="editor-note">{{ editor_note }}</div>
+                </div>
+                {% endif %}
+                {% if visual_review and visual_review.error %}
+                <div>
+                    <span class="subsection-title">页面审阅</span>
+                    <div class="review-note error-state">{{ visual_review.error }}</div>
+                </div>
+                {% endif %}
+                {% if preparation_notes %}
+                <div>
+                    <span class="subsection-title">面试前需要准备</span>
+                    <dl class="prep-list">
+                        {% for item in preparation_notes %}
+                        <div>
+                            <dt>{{ item.claim }}</dt>
+                            {% if item.note %}<dd>{{ item.note }}</dd>{% endif %}
+                        </div>
+                        {% endfor %}
+                    </dl>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </section>
+    {% else %}
+    <section class="work-section">
+        <div class="frozen-note">
+            这份 JD、简历 PDF 和投递材料已冻结。
+            <a href="/jobs/{{ job.id }}/post-apply-pack">查看真实面经问答</a>
+        </div>
+        {% if preparation_notes %}
+        <div style="margin-top: 14px; max-width: 760px;">
+            <span class="subsection-title">面试前需要准备</span>
+            <dl class="prep-list">
+                {% for item in preparation_notes %}
+                <div>
+                    <dt>{{ item.claim }}</dt>
+                    {% if item.note %}<dd>{{ item.note }}</dd>{% endif %}
+                </div>
+                {% endfor %}
+            </dl>
+        </div>
+        {% endif %}
+    </section>
+    {% endif %}
+
+    {% if pack and (pack.message or pack.form_answers or pack.pre_submit_checks) %}
+    <section class="work-section">
+        <div class="work-section-head">
+            <h2>投递话术与网申回答</h2>
+        </div>
+        <div class="material-layout">
+            <div>
+                {% if pack.message %}
+                <div class="copy-unit">
+                    <div class="copy-label">沟通话术</div>
+                    <div class="copy-text" id="application-intro">{{ pack.message }}</div>
+                    <div class="copy-line">
+                        <button class="secondary copy-button" type="button" data-copy-target="application-intro">复制</button>
+                    </div>
+                </div>
+                {% endif %}
+                {% if pack.form_answers %}
+                {% for qa in pack.form_answers %}
+                <div class="qa-row">
+                    <div class="qa-question">{{ qa.question }}</div>
+                    <div class="copy-text" id="application-answer-{{ loop.index }}">{{ qa.answer }}</div>
+                    <div class="copy-line">
+                        <button class="secondary copy-button" type="button" data-copy-target="application-answer-{{ loop.index }}">复制</button>
                     </div>
                 </div>
                 {% endfor %}
+                {% endif %}
+            </div>
+            <div class="section-stack">
+                {% if pack.pre_submit_checks %}
+                <div>
+                    <span class="subsection-title">提交前检查</span>
+                    <ul class="check-list">
+                        {% for item in pack.pre_submit_checks %}
+                        <li><label><input type="checkbox"> {{ item }}</label></li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
             </div>
         </div>
-    </div>
-    {% if application_plan.material_checklist or application_plan.post_apply_actions %}
-    <div style="border-top: 1px solid var(--border-soft); margin-top: 0.75rem; padding-top: 0.625rem; display: grid; grid-template-columns: 1fr 1fr; gap: 0.875rem;">
-        {% if application_plan.material_checklist %}
-        <div>
-            <strong style="font-size: 0.86rem;">投前材料 checklist</strong>
-            <ul class="checklist" style="margin: 0.375rem 0 0 1.1rem; font-size: 0.84rem; line-height: 1.55;">
-                {% for item in application_plan.material_checklist %}
-                <li>{{ item }}</li>
-                {% endfor %}
-            </ul>
-        </div>
-        {% endif %}
-        {% if application_plan.post_apply_actions %}
-        <div>
-            <strong style="font-size: 0.86rem;">投后跟进动作</strong>
-            <ul class="checklist" style="margin: 0.375rem 0 0 1.1rem; font-size: 0.84rem; line-height: 1.55;">
-                {% for item in application_plan.post_apply_actions %}
-                <li>{{ item }}</li>
-                {% endfor %}
-            </ul>
-        </div>
-        {% endif %}
-    </div>
+    </section>
     {% endif %}
-</div>
-{% endif %}
 
-{% if error %}
-<div class="card" style="background: #fce8e6; border-color: var(--danger);">
-    <strong>{{ error }}</strong>
-    {% if raw %}
-    <div class="copy-block" style="margin-top: 0.75rem;">{{ raw }}</div>
-    {% endif %}
-</div>
-{% elif pack %}
-
-{% if pack.skip_reasons %}
-<div class="skip-banner">
-    <strong>这岗 OfferGuide 建议不投:</strong>
-    <ul style="margin: 0.5rem 0 0 1.25rem;">
-        {% for r in pack.skip_reasons %}<li>{{ r }}</li>{% endfor %}
-    </ul>
-</div>
-{% endif %}
-
-<div class="pack-card">
-    <h2>自我介绍话术
-        {% if pack.self_intro_snippet.platform_hint %}
-        <span class="muted small" style="font-size: 0.78rem; font-weight: 400;">
-            ({{ pack.self_intro_snippet.platform_hint }})
-        </span>
-        {% endif %}
-    </h2>
-    <div class="copy-block" id="intro-text">{{ pack.self_intro_snippet.text }}</div>
-    <button class="copy-btn" data-target="intro-text">复制自我介绍</button>
-    <div class="muted small">
-        <em>为什么这么写:</em> {{ pack.self_intro_snippet.rationale }}
-    </div>
-</div>
-
-{% if pack.qa_templates %}
-<div class="pack-card">
-    <h2>网申表单 QA 模板 ({{ pack.qa_templates | length }} 题)</h2>
-    {% for qa in pack.qa_templates %}
-    <div class="qa-item">
-        <div class="q">
-            Q: {{ qa.question }}
-            <span class="cat">{{ qa.category }}</span>
-            {% if qa.personalization_score %}
-            <span class="muted small" style="float: right; font-size: 0.7rem;">
-                personalization: {{ "%.2f"|format(qa.personalization_score) }}
-            </span>
+    <section class="work-section">
+        <div class="actions">
+            {% if workspace.status == 'draft' %}
+            <form class="js-workspace-action js-submit-application" method="post" action="/api/jobs/{{ job.id }}/applied" data-success-url="/jobs/{{ job.id }}/post-apply-pack">
+                <button class="primary" type="submit" data-pending-label="正在冻结…" {% if not pdf_url %}disabled{% endif %}>我已实际提交</button>
+                <div class="error action-error" role="alert"></div>
+            </form>
+            {% else %}
+            <a class="btn primary" href="/jobs/{{ job.id }}/post-apply-pack">查看真实面经问答</a>
             {% endif %}
+            <a class="btn secondary" href="/pipeline">返回申请进度</a>
         </div>
-        <div class="copy-block" id="qa-{{ loop.index }}">{{ qa.answer }}</div>
-        <button class="copy-btn" data-target="qa-{{ loop.index }}">复制答案</button>
-        {% if qa.anti_patterns %}
-        <div class="anti">
-            <strong>别这样写:</strong>
-            <ul style="margin: 0.25rem 0 0 1rem;">
-                {% for ap in qa.anti_patterns %}<li>{{ ap }}</li>{% endfor %}
-            </ul>
-        </div>
-        {% endif %}
-    </div>
-    {% endfor %}
-</div>
-{% endif %}
-
-{% if pack.submission_strategy %}
-<div class="pack-card">
-    <h2>投递策略</h2>
-    <ul class="checklist">
-        {% if pack.submission_strategy.best_time_window %}
-        <li><strong>最佳时间窗:</strong> {{ pack.submission_strategy.best_time_window }}</li>
-        {% endif %}
-        {% if pack.submission_strategy.expected_response_window_days is defined %}
-        <li><strong>预期回复窗口:</strong> {{ pack.submission_strategy.expected_response_window_days }} 天</li>
-        {% endif %}
-        {% if pack.submission_strategy.follow_up_plan %}
-        <li><strong>跟进计划:</strong> {{ pack.submission_strategy.follow_up_plan }}</li>
-        {% endif %}
-    </ul>
-    {% if pack.submission_strategy.platform_specific_tips %}
-    <div style="margin-top: 0.5rem;">
-        <strong>平台注意事项:</strong>
-        <ul style="margin: 0.25rem 0 0 1.25rem;">
-            {% for t in pack.submission_strategy.platform_specific_tips %}<li>{{ t }}</li>{% endfor %}
-        </ul>
-    </div>
+    </section>
     {% endif %}
-</div>
-{% endif %}
-
-{% if pack.pre_submit_checklist %}
-<div class="pack-card">
-    <h2>投前 checklist</h2>
-    <ul class="checklist">
-        {% for item in pack.pre_submit_checklist %}
-        <li><label><input type="checkbox"> {{ item }}</label></li>
-        {% endfor %}
-    </ul>
-</div>
-{% endif %}
-
-<div class="confidence-bar">
-    {% if pack.confidence is defined %}
-    Agent 自信度: <strong>{{ "%.0f"|format(pack.confidence * 100) }}%</strong>
-    {% endif %}
-    {% if duration_ms %}· 用时 {{ "%.1f"|format(duration_ms / 1000) }}s{% endif %}
-    {% if cost_usd %}· cost ${{ "%.4f"|format(cost_usd) }}{% endif %}
-    {% if skill_run_id %}· skill_run_id {{ skill_run_id }}{% endif %}
-</div>
-
-<div class="actions-row">
-    {% if application_plan and application_plan.apply_url %}
-    <a href="{{ application_plan.apply_url }}" target="_blank" rel="noopener" class="primary">
-        {{ application_plan.action_label }} →
-    </a>
-    {% endif %}
-    <form method="post" action="/api/jobs/{{ job.id }}/applied" style="margin: 0;">
-        <button type="submit">我投了 → 进备战包</button>
-    </form>
-    <a href="/pipeline">回 Pipeline</a>
 </div>
 
 <script>
-// Copy button handler
-document.querySelectorAll('.copy-btn:not([data-copy-bound])').forEach(btn => {
-    btn.dataset.copyBound = '1';
-    btn.addEventListener('click', async () => {
-        const target = document.getElementById(btn.dataset.target);
+document.querySelectorAll('[data-copy-target]').forEach((button) => {
+    button.addEventListener('click', async () => {
+        const target = document.getElementById(button.dataset.copyTarget);
         if (!target) return;
-        const text = target.textContent.trim();
+        const original = button.textContent;
         try {
-            await navigator.clipboard.writeText(text);
-            const orig = btn.textContent;
-            btn.textContent = '✓ 已复制';
-            setTimeout(() => { btn.textContent = orig; }, 1500);
-        } catch (e) {
-            btn.textContent = '复制失败 — 手动选中';
+            await navigator.clipboard.writeText(target.textContent.trim());
+            button.textContent = '已复制';
+        } catch (_error) {
+            button.textContent = '复制失败';
         }
+        window.setTimeout(() => { button.textContent = original; }, 1400);
     });
 });
-// Form submit redirect to post-apply-pack
-document.querySelectorAll('form[action*="/applied"]').forEach(form => {
-    form.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const r = await fetch(form.action, {method: 'POST', headers: {'Content-Type': 'application/json'}});
-        if (r.ok) {
-            window.location.href = '/jobs/{{ job.id }}/post-apply-pack';
-        } else {
-            alert('标记失败: ' + r.status);
+
+document.querySelectorAll('.js-workspace-action').forEach((form) => {
+    form.addEventListener('submit', async (event) => {
+        if (form.classList.contains('js-submit-application') &&
+            !window.confirm('确认已经在招聘平台实际提交了这份简历？')) {
+            event.preventDefault();
+            return;
         }
-    });
-});
-</script>
-
-{% endif %}
-
-<script>
-document.querySelectorAll('.copy-btn:not([data-copy-bound])').forEach(btn => {
-    btn.dataset.copyBound = '1';
-    btn.addEventListener('click', async () => {
-        const target = document.getElementById(btn.dataset.target);
-        if (!target) return;
-        const text = target.textContent.trim();
+        event.preventDefault();
+        const button = event.submitter || form.querySelector('button[type="submit"]');
+        const errorBox = form.querySelector('.action-error');
+        const original = button ? button.textContent : '';
+        if (button) {
+            button.disabled = true;
+            button.textContent = button.dataset.pendingLabel || '处理中…';
+        }
+        if (errorBox) {
+            errorBox.classList.remove('visible');
+            errorBox.textContent = '';
+        }
         try {
-            await navigator.clipboard.writeText(text);
-            const orig = btn.textContent;
-            btn.textContent = '✓ 已复制';
-            setTimeout(() => { btn.textContent = orig; }, 1500);
-        } catch (e) {
-            btn.textContent = '复制失败 — 手动选中';
+            const response = await fetch(form.action, {
+                method: 'POST',
+                body: new FormData(form),
+                headers: {'X-Requested-With': 'XMLHttpRequest'},
+            });
+            if (!response.ok) {
+                let message = `请求失败 (${response.status})`;
+                try {
+                    const payload = await response.json();
+                    message = payload.detail || payload.error || message;
+                } catch (_error) {}
+                throw new Error(message);
+            }
+            if (form.dataset.successUrl) {
+                window.location.href = form.dataset.successUrl;
+            } else if (response.redirected) {
+                window.location.href = response.url;
+            } else {
+                window.location.reload();
+            }
+        } catch (error) {
+            if (errorBox) {
+                errorBox.textContent = error.message || '操作失败';
+                errorBox.classList.add('visible');
+            } else {
+                window.alert(error.message || '操作失败');
+            }
+            if (button) {
+                button.disabled = false;
+                button.textContent = original;
+            }
         }
     });
 });

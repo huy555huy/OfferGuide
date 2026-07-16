@@ -1,5 +1,5 @@
-"""apply_assistant SKILL — 投递包生成器 (W13.4)."""
+"""Job-specific application message and form-answer generation."""
 
-from .helpers import ApplyPackage, QATemplate, SelfIntroSnippet, SubmissionStrategy
+from .helpers import ApplyPackage, FormAnswer
 
-__all__ = ["ApplyPackage", "QATemplate", "SelfIntroSnippet", "SubmissionStrategy"]
+__all__ = ["ApplyPackage", "FormAnswer"]

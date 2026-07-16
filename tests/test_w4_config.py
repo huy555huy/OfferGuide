@@ -4,33 +4,60 @@ from __future__ import annotations
 
 import pytest
 
-from offerguide.config import Settings, _load_dotenv_if_present
+from offerguide.config import (
+    DEFAULT_INTERVIEW_RESEARCH_MODEL,
+    Settings,
+    _load_dotenv_if_present,
+)
+from offerguide.llm import DEFAULT_DEEPSEEK_BASE, DEFAULT_MODEL
 
 
 def test_defaults_when_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in (
         "DEEPSEEK_API_KEY",
+        "OFFERGUIDE_LLM_API_KEY",
+        "OFFERGUIDE_LLM_BASE_URL",
+        "OFFERGUIDE_LLM_MODEL",
+        "OFFERGUIDE_DEFAULT_MODEL",
+        "OFFERGUIDE_INTERVIEW_RESEARCH_MODEL",
+        "MODEL",
+        "TOKEN",
+        "OPENAI_API_KEY",
         "FEISHU_WEBHOOK_URL",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHAT_ID",
         "OFFERGUIDE_NOTIFY",
         "OFFERGUIDE_RESUME_PDF",
-        "OFFERGUIDE_NO_AMBIENT",
-        "OFFERGUIDE_NO_SCHEDULER",
+        "OFFERGUIDE_NO_BACKGROUND_AGENTS",
     ):
         monkeypatch.delenv(var, raising=False)
     s = Settings.from_env()
     assert s.deepseek_api_key is None
+    assert s.deepseek_base_url == DEFAULT_DEEPSEEK_BASE
+    assert s.default_model == DEFAULT_MODEL
+    assert s.interview_research_model == DEFAULT_INTERVIEW_RESEARCH_MODEL
     assert s.feishu_webhook_url is None
     assert s.notify_channel == "console"
     assert s.notify_ready() is True  # console always ready
-    assert s.disable_ambient_crawl is False
+    assert s.disable_background_agents is False
 
 
 def test_picks_up_deepseek_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     s = Settings.from_env()
     assert s.deepseek_api_key == "sk-test"
+
+
+def test_custom_provider_defaults_research_to_its_configured_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OFFERGUIDE_LLM_BASE_URL", "https://provider.example/v1")
+    monkeypatch.setenv("OFFERGUIDE_LLM_MODEL", "provider-best")
+    monkeypatch.delenv("OFFERGUIDE_INTERVIEW_RESEARCH_MODEL", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.interview_research_model == "provider-best"
 
 
 def test_notify_ready_for_each_channel(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,16 +84,10 @@ def test_notify_channel_falls_back_on_garbage_value(monkeypatch: pytest.MonkeyPa
     assert s.notify_channel == "console"
 
 
-def test_no_scheduler_also_disables_ambient_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OFFERGUIDE_NO_SCHEDULER", "1")
+def test_background_agents_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OFFERGUIDE_NO_BACKGROUND_AGENTS", "1")
     s = Settings.from_env()
-    assert s.disable_ambient_crawl is True
-
-
-def test_no_ambient_disables_ambient_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OFFERGUIDE_NO_AMBIENT", "1")
-    s = Settings.from_env()
-    assert s.disable_ambient_crawl is True
+    assert s.disable_background_agents is True
 
 
 # ────────── W14.10 dotenv autoload ──────────

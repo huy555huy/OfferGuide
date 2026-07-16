@@ -1,7 +1,7 @@
-"""W12-fix(b) — Bing CN + Tavily + ChainedSearch + /api/search/test.
+"""Bing CN + Tavily + ChainedSearch + /api/search/test.
 
-Audit 残留: corpus_collector 默认 search backend 是 DDG, 国内大概率不通。
-修复: 加 Bing CN (零配置) + Tavily (有 key 升级) + ChainedSearch fallback。
+Search uses Bing CN (零配置) + Tavily (有 key 升级) + ChainedSearch fallback，
+so callers are not tied to a single backend that may be unavailable locally.
 本组测试不依赖网络 (用 stub backend 验证 chain 行为 + helper 函数)。
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -17,6 +18,7 @@ from offerguide.agentic.search import (
     BingCNSearch,
     ChainedSearch,
     DuckDuckGoSearch,
+    SearchBackendError,
     SearchHit,
     StubSearch,
     TavilySearch,
@@ -25,7 +27,6 @@ from offerguide.agentic.search import (
     health_check,
 )
 from offerguide.config import Settings
-from offerguide.profile import UserProfile
 from offerguide.skills import discover_skills
 from offerguide.ui.notify import ConsoleNotifier
 from offerguide.ui.web import _search_guidance_message, create_app
@@ -81,6 +82,55 @@ class TestBingHTMLParser:
         )
         hits = _parse_bing_html(big, max_results=10)
         assert len(hits[0].snippet) <= 300
+
+
+class TestSearchPageValidation:
+    @staticmethod
+    def _bing(html: str) -> BingCNSearch:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=html, request=request)
+
+        backend = BingCNSearch()
+        backend._http.close()
+        backend._http = httpx.Client(transport=httpx.MockTransport(handler))
+        return backend
+
+    def test_bing_current_turnstile_captcha_is_a_failed_search(self) -> None:
+        html = """
+        <html><script>
+        var challengeConfig = {
+          "verifyUrl":"https://www.bing.com/challenge/verify?partner=7",
+          "captchaSuccessPostMessage":"verificationComplete"
+        };
+        </script><body>
+        <div class="captcha"><div class="captcha_header">最后一步</div>
+        <div class="captcha_text">请解决以下难题以继续</div></div>
+        <script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>
+        </body></html>
+        """
+        backend = self._bing(html)
+        try:
+            with pytest.raises(SearchBackendError, match="CAPTCHA/challenge"):
+                backend.search("Agent 岗位")
+        finally:
+            backend.close()
+
+    def test_bing_structurally_invalid_http_200_is_not_a_zero_result(self) -> None:
+        backend = self._bing("<html><body>Bing home page</body></html>")
+        try:
+            with pytest.raises(SearchBackendError, match="structurally invalid"):
+                backend.search("Agent 岗位")
+        finally:
+            backend.close()
+
+    def test_bing_explicit_no_results_serp_remains_a_successful_empty_search(self) -> None:
+        backend = self._bing(
+            '<html><ol id="b_results"><li class="b_no">没有匹配结果</li></ol></html>'
+        )
+        try:
+            assert backend.search("impossible query") == []
+        finally:
+            backend.close()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -144,6 +194,14 @@ class TestChainedSearch:
             _FakeBackend("b", hits=[]),
         ])
         assert chain.search("test") == []
+
+    def test_all_failed_raises_instead_of_becoming_empty(self) -> None:
+        chain = ChainedSearch([
+            _FakeBackend("a", raises=True),
+            _FakeBackend("b", raises=True),
+        ])
+        with pytest.raises(SearchBackendError, match="all search backends failed"):
+            chain.search("test")
 
     def test_requires_at_least_one_backend(self) -> None:
         with pytest.raises(ValueError, match="≥1 backend"):
@@ -219,13 +277,13 @@ class TestHealthCheck:
 
 
 @pytest.fixture
-def app_setup(tmp_path: Path):
+def app_setup(tmp_path: Path, master_resume_source_factory):
     store = offerguide.Store(tmp_path / "ui.db")
     store.init_schema()
-    profile = UserProfile(raw_resume_text="x")
+    profile = master_resume_source_factory("x")
     skills = discover_skills(SKILLS_ROOT)
     app = create_app(
-        settings=Settings(), store=store, profile=profile,
+        settings=Settings(), store=store, master_source=profile,
         skills=skills, runtime=None, notifier=ConsoleNotifier(),
     )
     return app, store

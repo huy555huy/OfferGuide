@@ -25,11 +25,11 @@ def store(tmp_path):
 class TestRecordCritic:
     def test_basic_insert(self, store):
         sid = record_critic_signal(
-            store, skill_name="score_match", skill_version="0.1.0",
+            store, skill_name="example_skill", skill_version="0.1.0",
             skill_run_id=42, score=0.85, notes="trajectory clean",
         )
         assert sid is not None and sid > 0
-        recs = fetch_signals(store, skill_name="score_match")
+        recs = fetch_signals(store, skill_name="example_skill")
         assert len(recs) == 1
         assert recs[0].signal_kind == "critic"
         assert recs[0].signal_value == 0.85
@@ -64,7 +64,7 @@ class TestRecordUserThumbs:
     def test_invalid_thumbs_raises(self, store):
         with pytest.raises(ValueError):
             record_user_thumbs(store, skill_name="x", skill_version="v",
-                               skill_run_id=None, thumbs=0)
+                               skill_run_id=None, thumbs=0)  # type: ignore[arg-type]
 
 
 class TestRecordAppOutcome:
@@ -86,7 +86,7 @@ class TestRecordAppOutcome:
     def test_unknown_outcome_raises(self, store):
         with pytest.raises(ValueError, match="unknown outcome"):
             record_app_outcome(store, skill_name="x", skill_version="v",
-                               skill_run_id=None, outcome="invalid")
+                               skill_run_id=None, outcome="invalid")  # type: ignore[arg-type]
 
     def test_custom_weight(self, store):
         record_app_outcome(store, skill_name="x", skill_version="v",
@@ -108,10 +108,10 @@ class TestRecordFollowThrough:
 
 class TestRecordSyntheticEval:
     def test_for_candidate_variant(self, store):
-        record_synthetic_eval(store, skill_name="score_match",
+        record_synthetic_eval(store, skill_name="example_skill",
                               skill_version="0.2.0-shadow", score=0.78,
                               notes="meta_evolve_skill iter 3 of 5")
-        recs = fetch_signals(store, skill_name="score_match")
+        recs = fetch_signals(store, skill_name="example_skill")
         assert len(recs) == 1
         assert recs[0].signal_kind == "eval_synthetic"
         assert recs[0].skill_version == "0.2.0-shadow"

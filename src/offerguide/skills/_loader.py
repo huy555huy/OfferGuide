@@ -3,7 +3,7 @@
 Format (borrowed from Hermes Agent — see ATTRIBUTION.md):
 
     ---
-    name: score_match
+    name: example_skill
     description: ...
     version: 0.1.0
     triggers: [...]

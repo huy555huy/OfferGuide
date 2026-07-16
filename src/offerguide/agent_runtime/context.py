@@ -1,4 +1,4 @@
-"""Context assembly + self-implemented compaction & tool-result clearing.
+"""Context assembly, compaction, and tool-result clearing.
 
 Anthropic API natively supports `context_management` (compaction at 150K,
 ``clear_tool_uses_20250919`` at 30K). We use DeepSeek (OpenAI-compatible)
@@ -14,9 +14,8 @@ which doesn't — so we implement the same **idea** at the harness layer.
    it ran the tool; *output* is dropped (re-fetch if needed).
 3. **Memory tool** for cross-session knowledge — implemented in memory.py.
 
-Plus: every wake auto-injects ``MEMORY.md`` first 200 lines and
-``agenda.md`` into the system context, so the agent always sees both its
-home page and open-loop ledger without having to call ``view`` explicitly.
+Saved goals, work items, agenda, and memory are injected only when they contain
+useful state. Missing internal state does not create a new maintenance task.
 """
 
 from __future__ import annotations
@@ -54,9 +53,7 @@ COMPACTION_TRIGGER_TOKENS = DEFAULT_CONTEXT_POLICY.compaction_trigger_tokens
 """Above this estimated input_tokens, run compaction (model summarizes
 older messages). Tuned for DeepSeek's ~64K window."""
 
-CLEAR_TOOL_RESULTS_TRIGGER_TOKENS = (
-    DEFAULT_CONTEXT_POLICY.clear_tool_results_trigger_tokens
-)
+CLEAR_TOOL_RESULTS_TRIGGER_TOKENS = DEFAULT_CONTEXT_POLICY.clear_tool_results_trigger_tokens
 """Above this, replace old tool output blocks with placeholders.
 Cheaper than compaction (no LLM call) so tries this first. Below the
 compaction threshold so the cheap path runs FIRST and may obviate compaction."""
@@ -64,9 +61,7 @@ compaction threshold so the cheap path runs FIRST and may obviate compaction."""
 KEEP_RECENT_TOOL_RESULTS = DEFAULT_CONTEXT_POLICY.keep_recent_tool_results
 """How many most-recent tool results to keep after clearing."""
 
-KEEP_RECENT_MESSAGES_AFTER_COMPACT = (
-    DEFAULT_CONTEXT_POLICY.keep_recent_messages_after_compact
-)
+KEEP_RECENT_MESSAGES_AFTER_COMPACT = DEFAULT_CONTEXT_POLICY.keep_recent_messages_after_compact
 """After compaction, keep N most-recent messages alongside the summary
 (to preserve immediate working context)."""
 
@@ -125,12 +120,12 @@ class SystemFacts:
 
     def to_block(self) -> MarkdownBlock:
         """Return the facts as a reusable markdown block."""
+        lines = [f"- 今天: {self.today.isoformat()} ({_weekday_zh(self.today)})"]
+        if self.calendar_phase:
+            lines.append(f"- 用户确认的招聘阶段: {self.calendar_phase}")
         return render_block(
-            "系统事实 (每次 wake 注入)",
-            lines=(
-                f"- 今天: {self.today.isoformat()} ({_weekday_zh(self.today)})",
-                f"- 校招阶段: {self.calendar_phase or _infer_phase(self.today)}",
-            ),
+            "系统事实",
+            lines=tuple(lines),
         )
 
 
@@ -156,14 +151,16 @@ class ContextManager:
 
     llm: LLMClient
     memory: MemoryStore
-    store: "Store | None" = None
+    store: Store | None = None
     policy: ContextPolicy = field(default_factory=ContextPolicy)
     last_prompt_tokens: int = 0
     """Updated after each LLM response. Best estimate of next call's
     input_tokens (which equals previous input_tokens + new content)."""
 
     def build_initial_system(
-        self, *, system_facts: SystemFacts | None = None,
+        self,
+        *,
+        system_facts: SystemFacts | None = None,
     ) -> str:
         """Assemble the system message: instructions + facts + MEMORY.md."""
         blocks: list[MarkdownBlock | str] = [
@@ -181,74 +178,50 @@ class ContextManager:
         if work_snapshot:
             blocks.append(work_snapshot)
 
-        blocks.append(self._build_agenda_block())
+        agenda_snapshot = self._build_agenda_block()
+        if agenda_snapshot:
+            blocks.append(agenda_snapshot)
 
         memory_dump = self.memory.auto_load_text(max_lines=200)
         if memory_dump.strip():
             blocks.append(
                 render_block(
-                    "你脑子里的当前状态 (worldview/MEMORY.md 前 200 行)",
+                    "已确认的长期求职上下文",
                     body=memory_dump,
                     lines=(
                         "---",
-                        "想看 worldview 其它文件 → 调 memory(command='view', path='...').",
-                        "想更新 → memory(command='str_replace' / 'insert' / 'create').",
+                        "仅在当前任务确实需要时读取或更新其它记忆文件。",
                     ),
                 )
             )
         else:
             blocks.append(
                 render_block(
-                    "你的 worldview 是空的",
-                    body=(
-                        "这是你第一次 wake (或者 .offerguide/worldview/ 被清过). "
-                        "应该先 ask_user 拿基础信息 (cv / 偏好 / 雷区), 写进 candidate.md."
-                    ),
+                    "已保存的用户记忆",
+                    body="当前没有可用的长期记忆；直接处理这次用户请求，不要为填充记忆而追问。",
                 )
             )
         return render_markdown_document(*blocks)
 
-    def _build_agenda_block(self) -> MarkdownBlock:
-        """Render the agent's persistent open-loop ledger every wake.
-
-        The runtime does not decide the next action. It only keeps the
-        responsibility ledger in view so the model can reason from its own
-        commitments instead of treating each wake as a one-shot request.
-        """
+    def _build_agenda_block(self) -> MarkdownBlock | None:
+        """Render a non-empty persistent agenda when one already exists."""
         path = self.memory.root / "agenda.md"
         if path.exists():
             try:
                 lines = path.read_text(encoding="utf-8").splitlines()
             except OSError as e:
-                return render_block(
-                    "Agent Agenda (开放回路与责任账本)",
-                    lines=(
-                        "agenda.md 读取失败; 这不是没有开放回路。",
-                        f"ERROR: {type(e).__name__}: {e}",
-                    ),
-                )
+                log.warning("context: failed to read agenda: %s", e)
+                return None
             kept = lines[:120]
             if len(lines) > 120:
                 kept.append(f"... (truncated; {len(lines) - 120} more lines)")
             body = "\n".join(kept).strip()
             if body:
                 return render_block(
-                    "Agent Agenda (开放回路与责任账本)",
+                    "已有开放事项（仅在仍与当前求职阶段相关时使用）",
                     body=body,
-                    lines=(
-                        "---",
-                        "每次 wake 先用它判断 act / ask / notify / sleep; "
-                        "收束前更新关闭/新增的开放回路。",
-                    ),
                 )
-
-        return render_block(
-            "Agent Agenda (开放回路与责任账本)",
-            body=(
-                "agenda.md 不存在。先创建它, 记录开放回路、阻塞、机会和安静等待项; "
-                "不要把这次 wake 当成一次性请求。"
-            ),
-        )
+        return None
 
     def _build_work_item_snapshot(self) -> MarkdownBlock | None:
         """Render durable agent-owned work items into every wake."""
@@ -266,21 +239,14 @@ class ContextManager:
                 ),
             )
         if not items:
-            return render_block(
-                "Agent Work Items (真实开放工作)",
-                lines=(
-                    "- 当前没有 open/in_progress/blocked/waiting 工作项。",
-                    "- 如果这次 trigger 是用户输入或事件, runtime 会先创建对应工作项。",
-                ),
-            )
+            return None
 
         lines: list[str] = []
         for item in items:
             due = f"; due_at={item.due_at}" if item.due_at is not None else ""
             job = f"; job_id={item.job_id}" if item.job_id is not None else ""
             lines.append(
-                f"- WorkItem #{item.id} [{item.status}; p={item.priority}{job}{due}] "
-                f"{item.title}"
+                f"- WorkItem #{item.id} [{item.status}; p={item.priority}{job}{due}] {item.title}"
             )
             if item.summary:
                 lines.append(f"  summary: {item.summary[:220]}")
@@ -307,56 +273,36 @@ class ContextManager:
             from .. import goals as _goals
 
             active = _goals.list_active_goals(self.store)
+            if not active:
+                return None
             lines: list[str] = []
-            if active:
-                for goal in active[:5]:
-                    progress = _goals.compute_progress(self.store, goal)
-                    assessment = progress.assess()
-                    target = goal.target_date.isoformat() if goal.target_date else "未设置"
-                    lines.extend((
+            for goal in active[:5]:
+                progress = _goals.compute_progress(self.store, goal)
+                target = goal.target_date.isoformat() if goal.target_date else "未设置"
+                lines.extend(
+                    (
                         f"- Goal #{goal.id}: {goal.title}",
-                        f"  target_date: {target}; target_metric: {goal.target_metric or '未设置'}",
+                        f"  target_date: {target}",
                         (
-                            "  funnel: "
-                            f"active_apps={progress.apps_active}, "
-                            f"interviews_scheduled={progress.interviews_scheduled}, "
-                            f"offers={progress.offers}, rejects={progress.rejects}"
+                            "  当前事实: "
+                            f"进行中申请={progress.apps_active}, "
+                            f"已排面试={progress.interviews_scheduled}, "
+                            f"offer={progress.offers}, 拒绝={progress.rejects}"
                         ),
-                        (
-                            "  heuristic: "
-                            f"{assessment.state} / {assessment.summary} "
-                            f"(confidence={assessment.confidence:.2f}; 这是启发式判断, 不是事实)"
-                        ),
-                    ))
-                if len(active) > 5:
-                    lines.append(f"- 还有 {len(active) - 5} 个 active goals 未展开; 需要时查数据库/页面。")
-            else:
-                lines.append("- 当前没有 active goals。若 worldview/用户输入也没有明确目标, 先问用户确认。")
-
-            observations = _goals.list_active_self_observations(self.store, limit=5)
-            if observations:
-                lines.append("- Agent 自我观察:")
-                for obs in observations:
-                    lines.append(
-                        f"  - [{obs.pattern_kind}] {obs.observation}"
                     )
+                )
 
             return render_block(
-                "活跃目标与进度快照 (事实 + 明示启发式)",
+                "用户明确保存的目标与申请事实",
                 lines=tuple(lines),
             )
         except Exception as e:
             log.warning("context: failed to build goal snapshot: %s", e)
-            return render_block(
-                "活跃目标与进度快照",
-                lines=(
-                    "目标快照读取失败; 这不是没有目标。",
-                    f"ERROR: {type(e).__name__}: {e}",
-                ),
-            )
+            return None
 
     def estimate_input_tokens(
-        self, messages: list[dict[str, Any]],
+        self,
+        messages: list[dict[str, Any]],
     ) -> int:
         """Rough estimate of input_tokens for next LLM call.
 
@@ -374,7 +320,8 @@ class ContextManager:
         return max(self.last_prompt_tokens, chars // 4)
 
     def maybe_clear_tool_results(
-        self, messages: list[dict[str, Any]],
+        self,
+        messages: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], int]:
         """Replace old tool result content with placeholders if over budget.
 
@@ -389,9 +336,7 @@ class ContextManager:
             return messages, 0
 
         # Find indices of all tool result messages
-        tool_indices = [
-            i for i, m in enumerate(messages) if m.get("role") == "tool"
-        ]
+        tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
         if len(tool_indices) <= self.policy.keep_recent_tool_results:
             return messages, 0
 
@@ -406,22 +351,27 @@ class ContextManager:
                     "(tool result cleared by harness — re-call the tool "
                     "if you need to see this output again)"
                 )
-                new_messages.append({
-                    "role": "tool",
-                    "tool_call_id": m.get("tool_call_id"),
-                    "content": placeholder,
-                })
+                new_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": m.get("tool_call_id"),
+                        "content": placeholder,
+                    }
+                )
                 cleared += 1
             else:
                 new_messages.append(m)
         log.info(
             "context: cleared %d old tool results (est_tokens %d > %d trigger)",
-            cleared, est, self.policy.clear_tool_results_trigger_tokens,
+            cleared,
+            est,
+            self.policy.clear_tool_results_trigger_tokens,
         )
         return new_messages, cleared
 
     def maybe_compact(
-        self, messages: list[dict[str, Any]],
+        self,
+        messages: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], bool]:
         """Run compaction if over the COMPACTION trigger.
 
@@ -440,8 +390,8 @@ class ContextManager:
 
         # System at index 0; compact middle; keep last K
         system_msg = messages[0]
-        tail = messages[-self.policy.keep_recent_messages_after_compact:]
-        middle = messages[1:-self.policy.keep_recent_messages_after_compact]
+        tail = messages[-self.policy.keep_recent_messages_after_compact :]
+        middle = messages[1 : -self.policy.keep_recent_messages_after_compact]
         if not middle:
             return messages, False
 
@@ -484,7 +434,9 @@ class ContextManager:
         log.info(
             "context: compacted %d middle messages (est_tokens %d > %d trigger) "
             "→ kept system + summary + last %d",
-            len(middle), est, self.policy.compaction_trigger_tokens,
+            len(middle),
+            est,
+            self.policy.compaction_trigger_tokens,
             self.policy.keep_recent_messages_after_compact,
         )
         # Reset anchor since the conversation is now smaller
@@ -500,29 +452,6 @@ _WEEKDAYS_ZH = ["周一", "周二", "周三", "周四", "周五", "周六", "周
 
 def _weekday_zh(d: _dt.date) -> str:
     return _WEEKDAYS_ZH[d.weekday()]
-
-
-def _infer_phase(today: _dt.date) -> str:
-    """Heuristic: where in the 国内校招 calendar are we?
-
-    This is a *fact* injection, not a rule. Agent reads it, reasons.
-    """
-    m = today.month
-    if m in (4, 5):
-        return "暑期实习投递高峰末期 / 部分公司面试季已开始"
-    if m == 6:
-        return "暑期实习面试季 + 6 月底前出 offer 高峰"
-    if m == 7:
-        return "暑期 offer 季 + 实习入职窗口"
-    if m == 8:
-        return "暑期实习进行中 + 秋招提前批开始"
-    if m in (9, 10, 11):
-        return f"秋招正式批 ({m} 月)"
-    if m == 12:
-        return "秋招收尾 / 春招准备"
-    if m in (1, 2, 3):
-        return "春招 + 暑期实习提前批 (1-3 月)"
-    return ""
 
 
 def _char_count_of_message(msg: dict[str, Any]) -> int:
@@ -561,9 +490,11 @@ def _render_messages_for_summary(messages: list[dict[str, Any]]) -> str:
             body = str(content)
         if "tool_calls" in m:
             tcs = m["tool_calls"]
-            body += "\n[tool_calls: " + ", ".join(
-                tc.get("function", {}).get("name", "?") for tc in tcs
-            ) + "]"
+            body += (
+                "\n[tool_calls: "
+                + ", ".join(tc.get("function", {}).get("name", "?") for tc in tcs)
+                + "]"
+            )
         # Truncate per-message to keep summary input tractable
         if len(body) > 1500:
             body = body[:1500] + " ...[truncated]"

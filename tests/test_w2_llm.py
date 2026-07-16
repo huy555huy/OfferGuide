@@ -7,7 +7,7 @@ import json
 import httpx
 import pytest
 
-from offerguide.llm import LLMClient, LLMError
+from offerguide.llm import DEFAULT_MODEL, LLMClient, LLMError
 
 
 def _client_with_transport(handler) -> LLMClient:
@@ -41,7 +41,7 @@ def test_chat_posts_to_chat_completions_with_correct_shape() -> None:
     assert captured["method"] == "POST"
     assert captured["url"] == "https://api.deepseek.com/chat/completions"
     assert captured["auth"] == "Bearer test-key"
-    assert captured["body"]["model"] == "deepseek-v4-flash"  # default
+    assert captured["body"]["model"] == DEFAULT_MODEL
     assert captured["body"]["temperature"] == 0.5
     assert captured["body"]["stream"] is False
     assert "response_format" not in captured["body"]  # json_mode defaults False
@@ -137,13 +137,32 @@ def test_chat_raises_on_missing_choices() -> None:
 
 
 def test_chat_raises_when_no_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OFFERGUIDE_LLM_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     c = LLMClient()
     with pytest.raises(LLMError, match="No API key"):
         c.chat([{"role": "user", "content": "hi"}])
 
 
 def test_default_model_overridable_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OFFERGUIDE_LLM_MODEL", raising=False)
     monkeypatch.setenv("OFFERGUIDE_DEFAULT_MODEL", "deepseek-v4-pro")
     c = LLMClient(api_key="x")
+    assert c.default_model == "deepseek-v4-pro"
+
+
+def test_offerguide_llm_env_takes_priority(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OFFERGUIDE_LLM_API_KEY", "new-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "old-key")
+    monkeypatch.setenv("OFFERGUIDE_LLM_BASE_URL", "https://proxy.example.com")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("OFFERGUIDE_LLM_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("OFFERGUIDE_DEFAULT_MODEL", "older-model")
+
+    c = LLMClient()
+
+    assert c.api_key == "new-key"
+    assert c.base_url == "https://proxy.example.com/v1"
     assert c.default_model == "deepseek-v4-pro"

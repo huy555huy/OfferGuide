@@ -65,19 +65,6 @@ The observation-action-feedback structure of our autonomous jobs is inspired by:
 None of these projects' code lives in our tree. We borrow design patterns + cite
 each here per their MIT licenses' attribution requirements.
 
-## Anthropic CWC long-running harness primitives
-
-**[anthropics/cwc-long-running-agents](https://github.com/anthropics/cwc-long-running-agents)**
-(Apache 2.0) provides the concrete Claude Code harness primitives we adapt in
-`.claude/`: default-fail contract (`test-results.json` + evidence gate),
-fresh-context evaluator (`.claude/agents/evaluator.md`), agent-maintained
-handoff (`PROGRESS.md`), plus `AGENT_STOP` and `STEER.md` operator controls.
-
-The files under `.claude/` retain Anthropic's copyright/SPDX headers where the
-shell hook or evaluator structure is directly adapted. OfferGuide-specific
-changes add job-search truthfulness rules and a project-specific smoke-test
-convention.
-
 ## Web search backend
 
 **[DuckDuckGo HTML SERP](https://html.duckduckgo.com)** (no license needed for
@@ -87,41 +74,21 @@ HTML scraping, but ToS-fragile) is the no-API-key default in
 search API. The ``SearchBackend`` Protocol abstraction means switching
 backends is a one-class change.
 
-## Career-Ops — STAR+Reflection story bank + cover letter framework (W8 +2)
+## Career-Ops — STAR+Reflection story bank (W8 +2)
 
 **[Career-Ops](https://github.com/santifer/career-ops)** (MIT, by santifer,
-13.3k★) — an open-source Claude-Code-driven job-hunt agent. We adopt two
-high-leverage patterns:
+13.3k★) — an open-source Claude-Code-driven job-hunt agent. We adopt its
+STAR + Reflection story-bank pattern:
 
-1. **STAR + Reflection story bank** — Career-Ops' insight that 5-10 master
-   behavioral narratives accumulated across interview evaluations beats
-   regenerating answers each time. We implement this in
-   ``src/offerguide/story_bank.py`` with the ``behavioral_stories`` SQLite
-   table; ``prepare_interview`` and ``deep_project_prep`` SKILLs query by
-   tag at retrieval time. The ``+R`` (Reflection) extension to STAR is
-   directly from Career-Ops' methodology.
-
-2. **6-block evaluation framework for cover letters** — Career-Ops grades
-   cover letters across opening_hook / narrative / customization / ATS-keyword
-   density / closing-CTA / personalization-score. We adopt the six-block
-   schema in ``src/offerguide/skills/write_cover_letter/helpers.py``
-   (``CoverLetterResult`` Pydantic model). The ``ai_risk_warnings`` self-audit
-   field is our addition addressing the 49% AI-detection auto-dismiss rate.
+Career-Ops' insight is that reusable behavioral narratives accumulated across
+interview evaluations beat regenerating answers each time. We implement this in
+``src/offerguide/story_bank.py`` with the ``behavioral_stories`` SQLite table;
+``prepare_interview`` and ``deep_project_prep`` SKILLs query by tag at retrieval
+time. The ``+R`` (Reflection) extension to STAR is directly from Career-Ops'
+methodology.
 
 We do **not** vendor Career-Ops code; we adopt patterns and cite per its MIT
 license attribution requirement.
-
-## Resume-Matcher — cover letter + multi-provider LLM inspiration (W8 +2)
-
-**[Resume-Matcher](https://github.com/srbhr/Resume-Matcher)** (Apache 2.0,
-by srbhr) — open-source ATS resume matcher. We adopt:
-
-- **Cover letter generation as a primary feature** — confirmed our decision
-  to add ``write_cover_letter`` SKILL.
-- **Multi-provider LLM (LiteLLM)** — validates our DeepSeek-V4 default;
-  the abstraction we'd swap to if multi-provider became important.
-
-No code vendored. Pattern + product-decision references only.
 
 ## Pytai / GPTInterviewer — interview question dynamics (W8 +2)
 
@@ -174,16 +141,6 @@ Our addition over Pytai: the ``calibration_score()`` helper computes
 mean abs error between ``predicted_likelihood`` and 1-if-matched-else-0
 across all matched_predictions, surfacing prompt miscalibration as a
 direct GEPA optimization target.
-
-## Career-Ops PDF / Playwright export (W8 +3)
-
-We adopt Career-Ops' "render HTML with print-optimized CSS, let user
-⌘P → Save as PDF" pattern in ``src/offerguide/ui/templates/cover_letter_print.html``
-+ ``GET /cover-letter/{run_id}.html`` route. We skip the Playwright
-dependency: a standalone HTML page with ``@page`` rules and a
-``no-print`` audit panel hits the same UX without the 200MB Chromium
-download. Career-Ops' typography choice (Source Serif 4 for headers
-+ system sans for body) carried over directly.
 
 ## namewyf/Campus2026 — 校招清单数据源 (W10)
 

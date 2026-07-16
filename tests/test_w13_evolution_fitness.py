@@ -227,6 +227,7 @@ class TestDetectCandidates:
             )
         candidates = detect_evolution_candidates(store, cooldown_days=7.0)
         assert len(candidates) == 1
+        assert candidates[0].days_since_last_evolution is not None
         assert candidates[0].days_since_last_evolution > 7.0
 
 
@@ -257,6 +258,7 @@ class TestCompareVersions:
                                 min_signals_per_side=5)
         assert out["winner"] == "b"
         assert out["decisive"] is True
+        assert out["delta"] is not None
         assert out["delta"] > 0.4
 
     def test_a_clearly_wins_returns_a(self, store):
@@ -269,6 +271,7 @@ class TestCompareVersions:
         out = compare_versions(store, skill_name="x", version_a="v1", version_b="v2",
                                 min_signals_per_side=5)
         assert out["winner"] == "a"
+        assert out["delta"] is not None
         assert out["delta"] < -0.5
 
     def test_close_call_no_winner(self, store):

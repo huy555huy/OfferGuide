@@ -2,7 +2,7 @@
 
 Why this source:
 - 实习僧是国内最大实习专用聚合, 主流大学生找暑期/日常实习的入口.
-- 用户当前最高优先级是 2026 暑期实习 (CLAUDE.md 第 2 节).
+- 该来源用于补充实习岗位覆盖。
 - W19+ 0voice repo 主打校招混实习 (75% 校招), nowcoder sitemap 实习占比也低,
   baidu_intern 只 10 个百度自己的. 实习专用源缺口明显.
 
@@ -39,7 +39,6 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
 
 import httpx
 
@@ -104,23 +103,6 @@ class ParsedDetail:
     refresh_date: str | None
     body: str
     """Full JD body (岗位职责 + 任职要求 + 学历 + 实习要求 stripped of HTML)."""
-
-
-@dataclass
-class FetchResult:
-    listed_total: int = 0
-    fetched: int = 0
-    parsed: int = 0
-    inserted: int = 0
-    duplicate: int = 0
-    errors: list[str] = None  # type: ignore[assignment]
-    by_company: dict[str, int] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.errors is None:
-            self.errors = []
-        if self.by_company is None:
-            self.by_company = {}
 
 
 def fetch_list_tokens(
@@ -274,66 +256,6 @@ def to_raw_job(parsed: ParsedDetail, *, discovered_keyword: str) -> RawJob:
             "evidence_url": EVIDENCE_URL_LIST.replace("<kw>", discovered_keyword),
         },
     )
-
-
-def crawl_shixiseng(
-    store: Any, *, keyword: str, max_jobs: int = 20,
-) -> FetchResult:
-    """One-shot crawl: list page + N detail pages → ingest.
-
-    Defensive about partial failure — ``errors`` list collects what failed
-    so a single broken JD doesn't kill the whole batch.
-    """
-    from ..workers import scout
-    result = FetchResult()
-    # Single shared client for connection reuse
-    try:
-        with httpx.Client(
-            timeout=20.0, headers={"User-Agent": USER_AGENT},
-            follow_redirects=True,
-        ) as client:
-            try:
-                tokens = fetch_list_tokens(keyword, page=1, client=client)
-            except Exception as e:
-                result.errors.append(
-                    f"list fetch failed: {type(e).__name__}: {e}"
-                )
-                return result
-
-            result.listed_total = len(tokens)
-            tokens = tokens[: max(0, max_jobs)]
-
-            for tok in tokens:
-                try:
-                    parsed = fetch_detail(tok, client=client)
-                    result.fetched += 1
-                except Exception as e:
-                    result.errors.append(
-                        f"detail {tok}: {type(e).__name__}: {e}"
-                    )
-                    continue
-                if parsed is None:
-                    result.errors.append(f"detail {tok}: parse returned None")
-                    continue
-                result.parsed += 1
-                try:
-                    rj = to_raw_job(parsed, discovered_keyword=keyword)
-                    was_new, _ = scout.ingest(store, rj)
-                    if was_new:
-                        result.inserted += 1
-                        if parsed.company:
-                            result.by_company[parsed.company] = (
-                                result.by_company.get(parsed.company, 0) + 1
-                            )
-                    else:
-                        result.duplicate += 1
-                except Exception as e:
-                    result.errors.append(
-                        f"ingest {tok}: {type(e).__name__}: {e}"
-                    )
-    except Exception as e:
-        result.errors.append(f"client setup failed: {type(e).__name__}: {e}")
-    return result
 
 
 # ── helpers ─────────────────────────────────────────────────────────────

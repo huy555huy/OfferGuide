@@ -61,10 +61,7 @@ def render_markdown_document(
             rendered.append(f"# {cleaned_title}")
 
     for block in blocks:
-        if isinstance(block, MarkdownBlock):
-            text = block.render()
-        else:
-            text = str(block).strip()
+        text = block.render() if isinstance(block, MarkdownBlock) else str(block).strip()
         if text:
             rendered.append(text)
 

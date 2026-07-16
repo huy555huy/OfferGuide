@@ -1,31 +1,18 @@
 {
   "manifest_version": 3,
   "name": "OfferGuide Helper (安全辅助)",
-  "version": "0.1.0",
-  "description": "在 Boss直聘 / 牛客网把 OfferGuide 给你准备好的投递包内容一键复制到剪贴板。永不替你点击发送或提交。",
-  "permissions": ["activeTab", "clipboardWrite", "storage"],
+  "version": "0.2.0",
+  "description": "复制 OfferGuide 投递包，并在本地 Agent 请求时用当前登录会话只读保存岗位或面经页面。永不点击发送或提交。",
+  "permissions": ["activeTab", "alarms", "clipboardWrite", "scripting", "storage", "tabs"],
   "host_permissions": [
-    "https://www.zhipin.com/*",
-    "https://m.zhipin.com/*",
-    "https://www.nowcoder.com/*",
+    "http://*/*",
+    "https://*/*",
     "http://localhost:8000/*",
     "http://127.0.0.1:8000/*"
   ],
   "action": {
     "default_popup": "src/popup.html",
-    "default_title": "OfferGuide Helper",
-    "default_icon": {
-      "16": "icons/icon-16.png",
-      "32": "icons/icon-32.png",
-      "48": "icons/icon-48.png",
-      "128": "icons/icon-128.png"
-    }
-  },
-  "icons": {
-    "16": "icons/icon-16.png",
-    "32": "icons/icon-32.png",
-    "48": "icons/icon-48.png",
-    "128": "icons/icon-128.png"
+    "default_title": "OfferGuide Helper"
   },
   "content_scripts": [
     {

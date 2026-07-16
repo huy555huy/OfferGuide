@@ -2,20 +2,19 @@
 
 Tables (additional vector tables in `vec.py`):
 
-- `profile` — single-row JSON blob with the user's preferences and parsed resume
+- `master_resume` — the current PDF evidence and user-confirmed semantic master
 - `jobs` — every JD ever scouted; raw_text is LLM-facing only, structured platform
   fields live in extras_json
 - `applications` — one row per JD-the-user-actually-decided-to-pursue. The status
   field is now denormalized; source of truth is the latest application_events row.
-- `application_events` — append-only event log (submitted/viewed/replied/...). Lets
-  silence (no event for N days) be queried, and gives us t0/event timing for any
-  future survival analysis.
+- `resume_workspaces` — the one current semantic resume and PDF per application
+- `application_events` — append-only event log (submitted/viewed/replied/...)
+  preserving the actual application history and timing.
 - `skill_runs` — every SKILL invocation (input/output/cost). The trainset for GEPA evolution.
 - `feedback` — generic signals from reality (HR replied, suggestion accepted, ...).
 - `interviews` — scheduled interviews, with prep notes and reflection
 - `evolution_log` — one row per GEPA evolution run
 - `inbox_items` — HITL queue (W4)
-- `interview_experiences` — 面经 corpus for prepare_interview RAG
 - `project_records` — user's truthful project fact vault for resume/interview grounding
 """
 
@@ -26,12 +25,43 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse
+
+_RETIRED_TABLES = (
+    "post_apply_materials",
+    "interview_experiences",
+    "company_briefs",
+    "user_keywords",
+)
+
+_RETIRED_TRIGGERS = (
+    "trg_post_apply_requires_submitted_workspace_insert",
+    "trg_post_apply_requires_submitted_workspace_update",
+)
+
+_RETIRED_DERIVED_TABLES = ("daemon_runs",)
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS profile (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    data_json TEXT NOT NULL,
-    updated_at REAL DEFAULT (julianday('now'))
+-- The one current master resume. The PDF text is immutable evidence; the
+-- semantic document is the user-reviewable interpretation reused by resume
+-- workspaces. A failed/empty extraction is rejected before it reaches here.
+CREATE TABLE IF NOT EXISTS master_resume (
+    id                       INTEGER PRIMARY KEY CHECK (id = 1),
+    source_path              TEXT NOT NULL,
+    source_sha256            TEXT NOT NULL CHECK (length(source_sha256) = 64),
+    extracted_text           TEXT NOT NULL CHECK (length(trim(extracted_text)) > 0),
+    semantic_document_json   TEXT NOT NULL DEFAULT '{}'
+                                 CHECK (json_valid(semantic_document_json)
+                                    AND json_type(semantic_document_json) = 'object'),
+    semantic_status          TEXT NOT NULL DEFAULT 'draft'
+                                 CHECK (semantic_status IN ('draft', 'confirmed')),
+    created_at               REAL NOT NULL DEFAULT (julianday('now')),
+    updated_at               REAL NOT NULL DEFAULT (julianday('now')),
+    confirmed_at             REAL,
+    CHECK (
+        (semantic_status = 'draft' AND confirmed_at IS NULL)
+        OR (semantic_status = 'confirmed' AND confirmed_at IS NOT NULL)
+    )
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -68,10 +98,10 @@ CREATE TABLE IF NOT EXISTS applications (
     notes              TEXT
 );
 
+
 -- Append-only event log for application lifecycles. Status is derived from the
 -- latest event of an application, not stored as a single mutable field. This is
--- what makes silence (no event for N days) a queryable concept and gives us the
--- t0/event timing needed for any future survival analysis.
+-- It preserves actual lifecycle timing without synthetic reminder events.
 CREATE TABLE IF NOT EXISTS application_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     application_id  INTEGER NOT NULL REFERENCES applications(id),
@@ -84,11 +114,77 @@ CREATE TABLE IF NOT EXISTS application_events (
         -- 'rejected'    explicit rejection
         -- 'offer'       offer extended
         -- 'withdrawn'   user withdrew
-        -- 'silent_check' synthetic event written when N-day silence is detected
     occurred_at     REAL NOT NULL DEFAULT (julianday('now')),
     source          TEXT NOT NULL,    -- 'manual'|'email'|'platform'|'calendar'|'inferred'
     payload_json    TEXT NOT NULL DEFAULT '{}'
 );
+
+-- One mutable resume workspace per application. It contains the exact context
+-- used for editing, one semantic ResumeDocument, and its matching PDF. Drafts
+-- are updated in place. The explicit submit transaction changes status once;
+-- SQLite then prevents any further mutation or deletion of employer-received
+-- material. Post-application research is owned by the research-agent schema.
+CREATE TABLE IF NOT EXISTS resume_workspaces (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    application_id           INTEGER NOT NULL UNIQUE REFERENCES applications(id),
+    status                   TEXT NOT NULL DEFAULT 'draft'
+                                 CHECK (status IN ('draft', 'submitted')),
+    job_snapshot_json        TEXT NOT NULL
+                                 CHECK (json_valid(job_snapshot_json)
+                                    AND json_type(job_snapshot_json) = 'object'),
+    master_source_sha256     TEXT NOT NULL CHECK (length(master_source_sha256) = 64),
+    context_json             TEXT NOT NULL DEFAULT '{}'
+                                 CHECK (json_valid(context_json)
+                                    AND json_type(context_json) = 'object'),
+    resume_document_json     TEXT NOT NULL DEFAULT '{}'
+                                 CHECK (json_valid(resume_document_json)
+                                    AND json_type(resume_document_json) = 'object'),
+    pdf_path                 TEXT,
+    pdf_sha256               TEXT CHECK (pdf_sha256 IS NULL OR length(pdf_sha256) = 64),
+    apply_pack_json          TEXT NOT NULL DEFAULT '{}'
+                                 CHECK (json_valid(apply_pack_json)
+                                    AND json_type(apply_pack_json) = 'object'),
+    created_at               REAL NOT NULL DEFAULT (julianday('now')),
+    updated_at               REAL NOT NULL DEFAULT (julianday('now')),
+    submitted_at             REAL,
+    CHECK ((pdf_path IS NULL) = (pdf_sha256 IS NULL)),
+    CHECK (
+        (status = 'draft' AND submitted_at IS NULL)
+        OR (status = 'submitted' AND submitted_at IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_resume_workspaces_status
+    ON resume_workspaces(status, updated_at DESC);
+
+CREATE TRIGGER IF NOT EXISTS trg_resume_workspaces_one_per_job
+BEFORE INSERT ON resume_workspaces
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1
+    FROM resume_workspaces existing
+    JOIN applications existing_app ON existing_app.id = existing.application_id
+    JOIN applications new_app ON new_app.id = NEW.application_id
+    WHERE existing_app.job_id = new_app.job_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'a job can have only one resume workspace');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_resume_workspaces_submitted_immutable
+BEFORE UPDATE ON resume_workspaces
+FOR EACH ROW
+WHEN OLD.status = 'submitted'
+BEGIN
+    SELECT RAISE(ABORT, 'submitted resume workspace is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_resume_workspaces_submitted_no_delete
+BEFORE DELETE ON resume_workspaces
+FOR EACH ROW
+WHEN OLD.status = 'submitted'
+BEGIN
+    SELECT RAISE(ABORT, 'submitted resume workspace is immutable');
+END;
 
 CREATE TABLE IF NOT EXISTS skill_runs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,55 +249,18 @@ CREATE TABLE IF NOT EXISTS inbox_items (
     source_agent_run_id    INTEGER,                          -- FK soft-link to agent_runs.id
     source_skill_name      TEXT,
     source_skill_version   TEXT,
-    proposed_action_json   TEXT,      -- {"tool": "tailor_resume", "args": {...}} (optional)
+    proposed_action_json   TEXT,      -- optional agent action payload
     -- W14.20 — for kind='question' items, the multi-choice options the user
     -- picks from. JSON list of {id, label}. NULL for non-question kinds.
     question_options_json  TEXT
 );
 
--- ``interview_experiences`` is the umbrella corpus table for ANY high-signal
--- evidence about a company: 面经, offer 复盘, 项目分享, 一面挂经验, etc.
--- The name is historical (W4 only stored 面经); ``content_kind`` distinguishes
--- the modern entries while old rows default to 'interview'.
---
--- Quality columns (W11+) carry the classifier verdict so successful-profile
--- synthesis can filter out 卖课 / 引流 / fake content. quality_score is
--- 0..1; >= 0.6 = trustworthy, < 0.4 = drop. quality_signals_json captures the
--- evidence (e.g. {has_specific_timeline: true, has_marketer_signals: false}).
-CREATE TABLE IF NOT EXISTS interview_experiences (
-    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
-    company                TEXT NOT NULL,
-    role_hint              TEXT,             -- 岗位线索（"AI 算法"/"前端"/...）— 可空
-    raw_text               TEXT NOT NULL,
-    source                 TEXT NOT NULL,    -- 'nowcoder_discuss'|'manual_paste'|'1point3acres'|...
-    source_url             TEXT,
-    content_hash           TEXT NOT NULL,
-    content_kind           TEXT NOT NULL DEFAULT 'interview',  -- 'interview'|'offer_post'|'reflection'|'project_share'|'other'
-    quality_score          REAL NOT NULL DEFAULT 0.5,           -- 0..1, agent-classified trustworthiness
-    quality_signals_json   TEXT NOT NULL DEFAULT '{}',          -- structured evidence
-    quality_classified_at  REAL,                                -- NULL = not yet classified
-    created_at             REAL DEFAULT (julianday('now')),
-    UNIQUE(source, content_hash)
-);
-
--- Per-company brief maintained by the autonomous agent.
--- The agent reads recent interview_experiences + application_events
--- + skill_runs and produces a compact JSON brief that overrides
--- hardcoded heuristics (COMPANY_APPLICATION_LIMITS) when newer signal
--- says the policy changed.
-CREATE TABLE IF NOT EXISTS company_briefs (
-    company           TEXT PRIMARY KEY,
-    brief_json        TEXT NOT NULL,    -- {summary, current_app_limit, interview_style, recent_signals[], hiring_trend, confidence}
-    last_updated_at   REAL DEFAULT (julianday('now')),
-    update_count      INTEGER NOT NULL DEFAULT 1
-);
-
 -- STAR + Reflection story bank — behavioral interview answers the user
 -- has rehearsed. Borrowed pattern from Career-Ops (MIT, santifer):
 -- accumulate 5-10 master narratives across evaluations rather than
--- regenerating every time. Tagged so prepare_interview /
--- deep_project_prep can pull thematically relevant ones at retrieval
--- time. Theme tags: 'collaboration' | 'conflict' | 'failure' |
+-- regenerating every time. The user can review these stories or explicitly
+-- add them to a submitted application's interview context. Theme tags:
+-- 'collaboration' | 'conflict' | 'failure' |
 -- 'learning' | 'leadership' | 'ambiguity' | 'tradeoff' | etc.
 CREATE TABLE IF NOT EXISTS behavioral_stories (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -274,21 +333,6 @@ CREATE INDEX IF NOT EXISTS idx_project_records_direction
     ON project_records(mainstream_direction);
 CREATE INDEX IF NOT EXISTS idx_project_records_confidence
     ON project_records(confidence, updated_at);
-
--- ``daemon_runs`` records each scheduled-job execution so the UI can show
--- "is the autonomous daemon actually running, and what did each job do
--- last night". Without this, users have no signal between "daemon
--- crashed silently" and "daemon is humming".
-CREATE TABLE IF NOT EXISTS daemon_runs (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_name     TEXT NOT NULL,
-    started_at   REAL NOT NULL DEFAULT (julianday('now')),
-    ended_at     REAL,
-    status       TEXT NOT NULL,        -- 'running' | 'ok' | 'error'
-    summary_json TEXT NOT NULL DEFAULT '{}',
-    error_text   TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_daemon_runs_job ON daemon_runs(job_name, started_at);
 
 -- ``user_facts`` is the long-term memory layer (W12, mem0 v3-style).
 -- Single-pass ADD-only: new facts append, never UPDATE/DELETE — accumulation
@@ -413,44 +457,6 @@ CREATE TABLE IF NOT EXISTS agent_self_observations (
 CREATE INDEX IF NOT EXISTS idx_agent_self_obs_validity
     ON agent_self_observations(valid_until, created_at);
 
--- ──────────── W14.20 agent self-notes (working memory) ────────────────
--- The cron heartbeat wakes the agent every hour but the agent has no
--- memory of "what I was about to do last wake but didn't get to". Without
--- this, the agent re-derives priorities from snapshot every wake — wastes
--- LLM cost + may forget multi-step plans (e.g. "kicked off discover, will
--- score next time once new JDs land").
---
--- Each note is a **plain text reminder the agent wrote to its future self**.
--- Different from agent_self_observations (which is meta-cognition about the
--- agent's pattern); this is operational ("next wake: score the 4 jobs that
--- just landed").
---
--- Notes are surfaced in the snapshot at the top of each wake — the agent
--- sees them and decides whether to act on or clear them.
-CREATE TABLE IF NOT EXISTS agent_self_notes (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    body            TEXT NOT NULL,
-        -- One paragraph the agent wrote to itself, in its own voice
-    note_kind       TEXT NOT NULL DEFAULT 'todo',
-        -- 'todo'          — concrete next action ("score 4 new JDs")
-        -- 'observation'   — passive note ("user_facts mention 字节 application is silent")
-        -- 'context'       — session continuity ("we are in mid-iteration on tailoring resume for X")
-    valid_until     REAL,
-        -- After this julianday, the note is auto-stale and not surfaced
-    cleared_at      REAL,
-        -- When the agent decided this todo is done; clears it from snapshot
-    cleared_reason  TEXT,
-        -- "did it" / "no longer relevant" / "user said no"
-    related_run_id  INTEGER,
-        -- (soft FK to agent_runs.id) The agent_run that created this note,
-        -- for audit trail. Not enforced because: (a) the note may outlive
-        -- the run row in long-term cleanup; (b) tests want to write notes
-        -- without first creating an agent_runs row.
-    created_at      REAL DEFAULT (julianday('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_self_notes_active
-    ON agent_self_notes(cleared_at, valid_until, created_at DESC);
-
 -- ``skill_variants`` is the version registry for any SKILL that's been evolved.
 -- The original SKILL.md on disk is always implicitly version 0 (the seed).
 -- meta_evolve_skill writes new rows here as 'shadow'; the gray-release loop
@@ -516,7 +522,6 @@ CREATE INDEX IF NOT EXISTS idx_runs_skill          ON skill_runs(skill_name, cre
 CREATE INDEX IF NOT EXISTS idx_feedback_target     ON feedback(target_kind, target_id);
 CREATE INDEX IF NOT EXISTS idx_evolution_skill     ON evolution_log(skill_name, created_at);
 CREATE INDEX IF NOT EXISTS idx_inbox_status        ON inbox_items(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_interview_company   ON interview_experiences(company, created_at);
 CREATE INDEX IF NOT EXISTS idx_app_events_app      ON application_events(application_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_app_events_kind     ON application_events(kind, occurred_at);
 """
@@ -574,34 +579,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "ALTER TABLE inbox_items ADD COLUMN question_options_json TEXT"
             )
 
-    # interview_experiences quality + content_kind columns (W11)
-    ie_cols = {
-        row[1] for row in conn.execute(
-            "PRAGMA table_info(interview_experiences)"
-        ).fetchall()
-    }
-    if ie_cols:  # only if the table exists
-        if "content_kind" not in ie_cols:
-            conn.execute(
-                "ALTER TABLE interview_experiences "
-                "ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'interview'"
-            )
-        if "quality_score" not in ie_cols:
-            conn.execute(
-                "ALTER TABLE interview_experiences "
-                "ADD COLUMN quality_score REAL NOT NULL DEFAULT 0.5"
-            )
-        if "quality_signals_json" not in ie_cols:
-            conn.execute(
-                "ALTER TABLE interview_experiences "
-                "ADD COLUMN quality_signals_json TEXT NOT NULL DEFAULT '{}'"
-            )
-        if "quality_classified_at" not in ie_cols:
-            conn.execute(
-                "ALTER TABLE interview_experiences "
-                "ADD COLUMN quality_classified_at REAL"
-            )
-
     project_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(project_records)").fetchall()
     }
@@ -611,22 +588,50 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if "reference_sources" not in project_cols:
             conn.execute("ALTER TABLE project_records ADD COLUMN reference_sources TEXT")
 
+    _migrate_draft_resume_workspaces(conn)
+
+
+    # A retired discovery experiment duplicated the current domain Agent state.
+    # These tables only contain derived control-plane data;
+    # jobs, applications, skill runs, and submitted artifacts remain intact.
+    for table in (
+        "agent_self_notes",
+        "discovery_attempts",
+        "discovery_outcomes",
+        "discovery_misses",
+        "coverage_snapshots",
+        "company_watchlist",
+        "source_health",
+        "source_probes",
+        "discovery_queries",
+        "discovery_runs",
+        "job_intelligence",
+    ):
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+
 
 def _migrate_known_job_urls(conn: sqlite3.Connection) -> None:
     """Repair known stale URLs in existing local stores."""
-    try:
-        from ..job_quality import normalize_known_job_url
-    except Exception:
-        return
-
     rows = conn.execute(
         "SELECT id, source, source_id, url, extras_json FROM jobs "
         "WHERE source = 'tencent_campus' AND url LIKE 'https://join.qq.com/jobdesc.html?postId=%'"
     ).fetchall()
     for jid, source, source_id, url, extras_json in rows:
-        new_url = normalize_known_job_url(source=source, url=url, source_id=source_id)
-        if not new_url or new_url == url:
+        parsed = urlparse(str(url or ""))
+        values = parse_qs(parsed.query)
+        post_id = next(
+            (
+                items[0].strip()
+                for key in ("postid", "postId")
+                if (items := values.get(key)) and items[0].strip()
+            ),
+            str(source_id or "").strip(),
+        )
+        if source != "tencent_campus" or not post_id:
             continue
+        new_url = "https://join.qq.com/post_detail.html?" + urlencode(
+            {"postid": post_id}
+        )
         extras = _loads_obj(extras_json)
         migrations = extras.setdefault("migrations", [])
         if isinstance(migrations, list):
@@ -641,6 +646,87 @@ def _migrate_known_job_urls(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_draft_resume_workspaces(conn: sqlite3.Connection) -> None:
+    """Remove deleted context/package concepts from mutable drafts."""
+    rows = conn.execute(
+        "SELECT id, context_json, apply_pack_json FROM resume_workspaces WHERE status = 'draft'"
+    ).fetchall()
+    for workspace_id, raw_context, raw_pack in rows:
+        context = _loads_obj(raw_context)
+        context_changed = False
+        for field in ("user_supplements", "references", "omitted_materials"):
+            if field in context:
+                context.pop(field)
+                context_changed = True
+
+        saved = _loads_obj(raw_pack)
+        assistant = saved.get("assistant")
+        pack_changed = False
+        if isinstance(assistant, dict) and "message" not in assistant:
+            intro = assistant.get("self_intro_snippet")
+            message = intro.get("text") if isinstance(intro, dict) else None
+            old_answers = assistant.get("qa_templates")
+            form_answers: list[dict[str, str]] = []
+            if isinstance(old_answers, list):
+                for item in old_answers:
+                    if not isinstance(item, dict):
+                        continue
+                    question = str(item.get("question") or "").strip()
+                    answer = str(item.get("answer") or "").strip()
+                    if question and answer:
+                        form_answers.append({"question": question, "answer": answer})
+            checks = assistant.get("pre_submit_checklist")
+            pre_submit_checks = (
+                [str(item).strip() for item in checks if str(item).strip()]
+                if isinstance(checks, list)
+                else []
+            )
+            if (isinstance(message, str) and message.strip()) or form_answers:
+                saved["assistant"] = {
+                    "message": (
+                        message.strip() if isinstance(message, str) and message.strip() else None
+                    ),
+                    "form_answers": form_answers,
+                    "pre_submit_checks": pre_submit_checks,
+                }
+                pack_changed = True
+
+        current_assistant = saved.get("assistant")
+        if isinstance(current_assistant, dict):
+            checks = current_assistant.get("pre_submit_checks")
+            if isinstance(checks, list):
+                cleaned_checks = [
+                    item
+                    for item in checks
+                    if not any(
+                        deleted_field in str(item)
+                        for deleted_field in (
+                            "self_intro_snippet",
+                            "qa_templates",
+                            "pre_submit_checklist",
+                        )
+                    )
+                ]
+                if cleaned_checks != checks:
+                    saved["assistant"] = {
+                        **current_assistant,
+                        "pre_submit_checks": cleaned_checks,
+                    }
+                    pack_changed = True
+        if not context_changed and not pack_changed:
+            continue
+        conn.execute(
+            "UPDATE resume_workspaces SET context_json = ?, apply_pack_json = ?, "
+            "updated_at = julianday('now') "
+            "WHERE id = ? AND status = 'draft'",
+            (
+                json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                json.dumps(saved, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                workspace_id,
+            ),
+        )
+
+
 def _loads_obj(raw: str | None) -> dict:
     if not raw:
         return {}
@@ -649,6 +735,36 @@ def _loads_obj(raw: str | None) -> dict:
     except (json.JSONDecodeError, TypeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _drop_retired_tables(conn: sqlite3.Connection) -> None:
+    """Remove obsolete empty tables without silently discarding user data."""
+    existing = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+        if str(row[0]) in _RETIRED_TABLES
+    }
+    populated = {
+        table: int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+        for table in _RETIRED_TABLES
+        if table in existing
+    }
+    populated = {table: count for table, count in populated.items() if count > 0}
+    if populated:
+        details = ", ".join(f"{table}={count}" for table, count in populated.items())
+        raise RuntimeError(
+            "refusing to drop retired tables with saved rows; export or migrate "
+            f"their data before retrying: {details}"
+        )
+
+    for trigger in _RETIRED_TRIGGERS:
+        conn.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+    for table in _RETIRED_TABLES:
+        conn.execute(f'DROP TABLE IF EXISTS "{table}"')
+    for table in _RETIRED_DERIVED_TABLES:
+        conn.execute(f'DROP TABLE IF EXISTS "{table}"')
 
 
 class Store:
@@ -682,6 +798,7 @@ class Store:
         idempotently.
         """
         with self.connect() as conn:
+            _drop_retired_tables(conn)
             conn.executescript(_SCHEMA)
             _migrate(conn)
 
@@ -689,17 +806,16 @@ class Store:
         """Return row counts per table — useful for the example script."""
         with self.connect() as conn:
             tables = [
-                "profile",
+                "master_resume",
                 "jobs",
                 "applications",
                 "application_events",
+                "resume_workspaces",
                 "skill_runs",
                 "feedback",
                 "interviews",
                 "evolution_log",
                 "inbox_items",
-                "interview_experiences",
-                "company_briefs",
                 "behavioral_stories",
                 "project_records",
             ]

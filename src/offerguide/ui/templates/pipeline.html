@@ -154,6 +154,7 @@
         background: rgba(255,255,255,0.35);
     }
     .kcard {
+        position: relative;
         background: var(--bg-elev);
         border: 1px solid var(--line);
         border-radius: var(--r-sm);
@@ -164,6 +165,22 @@
     .kcard:hover {
         border-color: rgba(22, 54, 92, 0.45);
         transform: translateY(-1px);
+    }
+    .kcard .card-primary-hit {
+        display: block;
+        color: inherit;
+        text-decoration: none;
+    }
+    .kcard .card-primary-hit::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+    }
+    .kcard .card-primary-hit:focus-visible { outline: none; }
+    .kcard .card-primary-hit:focus-visible::after {
+        outline: 2px solid var(--signal);
+        outline-offset: 2px;
     }
     .kcard .company {
         font-size: 13px;
@@ -193,17 +210,43 @@
         color: var(--ink-3);
     }
     .kcard .age.urgent { color: var(--bad); font-weight: 600; }
+    .kcard .card-links,
     .kcard .menu {
+        position: relative;
+        z-index: 1;
         margin-top: 8px;
         padding-top: 7px;
         border-top: 1px dashed var(--line);
         display: flex;
         gap: 5px;
         flex-wrap: wrap;
-        opacity: 0;
-        transition: opacity 0.15s;
     }
-    .kcard:hover .menu, .kcard:focus-within .menu { opacity: 1; }
+    .kcard .card-links:empty { display: none; }
+    .kcard .resource-link {
+        flex: 1 1 100%;
+        min-width: 0;
+        padding: 5px 8px;
+        font-size: 11px;
+        line-height: 1.25;
+        white-space: normal;
+    }
+    .kcard .card-unavailable,
+    .kcard .resource-state {
+        flex: 1 1 100%;
+        color: var(--ink-3);
+        font-size: 10.5px;
+        line-height: 1.4;
+    }
+    .kcard .card-unavailable { font-style: italic; }
+    .kcard .resource-state {
+        font-family: var(--font-mono);
+        font-style: normal;
+    }
+    .kcard .transition-menu {
+        margin-top: 6px;
+        padding-top: 6px;
+        border-top-color: var(--line-soft);
+    }
     .kcard .menu form { display: inline-flex; }
     .kcard .menu button,
     .kcard .menu .btn {
@@ -283,10 +326,10 @@
 
     <details class="card manual-jd">
         <summary>+ 偶尔手动粘一条 JD · agent 没找到的才从这里补</summary>
-        <form method="post" action="/api/pipeline/jobs/manual">
+        <form id="pipeline-manual-job-form" action="/api/jobs/manual">
             <label class="field">
                 <span class="label-text">JD 原文</span>
-                <textarea name="raw_text" required minlength="50" rows="7"
+                <textarea name="raw_text" required minlength="200" rows="7"
                           placeholder="工作内容: 1. 设计并开发 ...&#10;岗位要求: 1. 计算机/软件相关专业 ..."></textarea>
             </label>
             <div class="form-grid">
@@ -308,9 +351,10 @@
                 <input type="text" name="url" placeholder="https://www.zhipin.com/...">
             </label>
             <div class="actions" style="margin-top: 12px;">
-                <button class="signal" type="submit">添加并生成投递包</button>
-                <span class="muted small">添加后跳到 /apply，agent 立刻能基于这条 JD 工作。</span>
+                <button id="pipeline-manual-job-submit" class="signal" type="submit">保存并查看投递包</button>
+                <span class="muted small">完整原文会被保存；进入投递包后再决定是否生成定制简历。</span>
             </div>
+            <div id="pipeline-manual-job-result" class="muted small" role="status" hidden></div>
         </form>
     </details>
 
@@ -318,7 +362,7 @@
     <div class="empty" style="margin-bottom: 14px;">
         <div class="empty-title">Pipeline 空，agent 第一轮搜索还没跑</div>
         <div class="empty-hint">
-            scheduler 会用已验证官方源、搜索和扩展入口找符合 north star 的 JD；遇到登录墙会如实记录限制。
+            找岗 Agent 会根据当前求职意图主动搜索并核验完整 JD；遇到登录墙会如实记录限制。
         </div>
     </div>
     {% endif %}
@@ -349,10 +393,47 @@
 
     <div class="narrate">
         <div class="av">O</div>
-        <span>Agent 会把 <em>scanned</em> 里的岗位继续评分；你只需要推进真正投了的卡片。</span>
+        <span>这里只跟踪你实际选择和提交的岗位；找岗与排序都来自同一个当前选择集。</span>
         <div class="grow"></div>
         <span class="right">source of truth · application_events</span>
     </div>
 </div>
+
+<script>
+const pipelineManualJobForm = document.getElementById("pipeline-manual-job-form");
+if (pipelineManualJobForm) {
+    pipelineManualJobForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const form = new FormData(pipelineManualJobForm);
+        const button = document.getElementById("pipeline-manual-job-submit");
+        const result = document.getElementById("pipeline-manual-job-result");
+        button.disabled = true;
+        result.hidden = false;
+        result.textContent = "正在保存完整 JD...";
+        try {
+            const response = await fetch("/api/jobs/manual", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    url_or_text: String(form.get("raw_text") || "").trim(),
+                    company_hint: String(form.get("company") || "").trim(),
+                    title_hint: String(form.get("title") || "").trim(),
+                    location_hint: String(form.get("location") || "").trim(),
+                    source_url: String(form.get("url") || "").trim(),
+                }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.detail || "岗位保存失败");
+            }
+            window.location.assign(data.apply_pack_url);
+        } catch (error) {
+            result.textContent = error.message || String(error);
+            button.disabled = false;
+        }
+    });
+}
+
+</script>
 
 {% endblock %}

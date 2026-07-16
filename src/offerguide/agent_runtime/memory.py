@@ -1,4 +1,4 @@
-"""Memory tool — file-based persistent storage for the agent.
+"""Optional file-based notes for facts useful across job-search sessions.
 
 Implementation of Anthropic-spec memory tool with 6 commands:
 - view, create, str_replace, insert, delete, rename
@@ -6,19 +6,9 @@ Implementation of Anthropic-spec memory tool with 6 commands:
 All operations are scoped to ``.offerguide/worldview/`` (path traversal
 blocked at the runtime boundary).
 
-The agent treats this as its **own brain on disk** — markdown files that
-it writes/reads/restructures itself. The runtime only provides the file I/O
-primitives + safety (path scoping, atomic writes); it never decides what
-goes in or imposes schema beyond the bootstrap template.
-
-Anthropic reference (from research):
-> Each session injects first 200 lines of MEMORY.md into system context.
-> Agent calls memory tool during session to read/write specific topics.
-> Memory survives context compaction (it's not in the message history).
-
-W15: replaces W14.20's ``agent_self_notes`` SQL table. Markdown files
-are the natural medium for an agent to think in (vs SQL rows that
-require schema discipline).
+The runtime provides scoped, atomic file operations. Notes are useful only when
+they preserve confirmed user preferences, application state, or future events;
+the agent is not required to maintain a diary or internal identity.
 """
 
 from __future__ import annotations
@@ -34,86 +24,28 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-# Smell 8 fix: default view truncation limit. Big enough for typical
-# worldview files (under 200 lines each), small enough that a runaway
-# file (e.g. agent appended to reflections.md without bound) doesn't
-# torpedo a single context.
+# Default view truncation keeps an accidentally large note from consuming the
+# whole model context.
 DEFAULT_VIEW_LIMIT = 500
 
 
-# Bootstrap files written when worldview/ is empty. The agent owns these
-# files after creation — feel free to restructure / add new files.
+# Small optional note set written when the directory is empty.
 _BOOTSTRAP_FILES: dict[str, str] = {
-    "MEMORY.md": """# 你的主页 (auto-injected first 200 lines each wake)
+    "MEMORY.md": """# 已确认的求职上下文
 
-## 我对用户的理解 (摘要)
-[启动时为空 — 你 ask_user 后回填到 candidate.md, 这里写摘要]
-
-## 当前阶段
-[校招日历位置 + 用户当前节奏]
-
-## 当前策略
-[你自己定的, 可改]
-
-## 紧急事
-[deadline 临近 / sleep N 天的应用 / pending question 等]
-
-## 你给自己的备忘
-[跨 wake 的小事]
+只记录用户明确确认、且会影响后续找岗、投递或面试的信息。
 """,
-    "agenda.md": """# Agent Agenda
+    "candidate.md": """# 用户偏好与边界
 
-## 开放回路
-[你还欠用户什么 / 哪些事需要未来检查]
-
-## 阻塞
-[缺什么事实 / 等谁回答 / 哪些工具结果不足]
-
-## 机会
-[值得主动推进但还没做的事]
-
-## 安静等待
-[不该打扰用户的事项 / 已有 schedule 的事项]
+尚无额外记录。主简历仍以配置的原始文件为准。
 """,
-    "candidate.md": """# 用户全貌
+    "tracked-jobs.md": """# 需要跨会话跟进的岗位
 
-## CV 摘要
-[空 — 启动时 ask_user 拿 cv]
-
-## 偏好
-[职能 / 公司类型 / 地点 / 薪资]
-
-## 雷区
-[绝对不去的]
-
-## 目标演化
-[用户的目标随时间变化的痕迹]
+暂无。
 """,
-    "tracked-jobs.md": """# 跟进中的岗位
+    "upcoming-events.md": """# 已确认的面试与截止时间
 
-[每个岗位一段, 包含: 公司 / 职位 / 状态 / 你的判断 / 关键日期]
-
-例:
-- **字节跳动 / Algo Intern (NLP)**
-  状态: 投了 5 天 (2026-04-30 投)
-  我的判断: 高匹配, 但简历定向不够
-  下一步: 7 天没回应建议 followup
-""",
-    "upcoming-events.md": """# 即将到来的事件
-
-[面试 / deadline / 每个一行]
-""",
-    "reflections.md": """# 复盘
-
-[每次 wake 结束前简单写: 我做了啥 / 用户反应 / 我学到啥]
-""",
-    "strategy.md": """# 当前策略
-
-## 这周聚焦
-[你自己定]
-
-## 未解疑问
-[你想找时机问 user 的事]
+暂无。
 """,
 }
 
@@ -125,8 +57,8 @@ MEMORY_TOOL_SCHEMA: dict[str, Any] = {
     "function": {
         "name": "memory",
         "description": (
-            "Read/write your worldview markdown files in `.offerguide/worldview/`. "
-            "This is your persistent brain — files survive across wakes. "
+            "Read/write optional persistent job-search notes in `.offerguide/worldview/`. "
+            "Store only confirmed preferences, tracked applications, and future events. "
             "6 commands: view (read file or list dir), create (new file or overwrite), "
             "str_replace (find/replace text), insert (insert at line N), "
             "delete (remove file), rename (move file)."
@@ -137,8 +69,12 @@ MEMORY_TOOL_SCHEMA: dict[str, Any] = {
                 "command": {
                     "type": "string",
                     "enum": [
-                        "view", "create", "str_replace",
-                        "insert", "delete", "rename",
+                        "view",
+                        "create",
+                        "str_replace",
+                        "insert",
+                        "delete",
+                        "rename",
                     ],
                 },
                 "path": {
@@ -154,8 +90,7 @@ MEMORY_TOOL_SCHEMA: dict[str, Any] = {
                     "type": "array",
                     "items": {"type": "integer"},
                     "description": (
-                        "[start, end] 1-indexed lines for view. "
-                        "Optional; default = whole file."
+                        "[start, end] 1-indexed lines for view. Optional; default = whole file."
                     ),
                 },
                 # create-specific
@@ -231,20 +166,7 @@ class MemoryStore:
     # ── Cross-wake helpers (used by Context assembly) ────────────────
 
     def auto_load_text(self, max_lines: int = 200) -> str:
-        """Return first ``max_lines`` of MEMORY.md + worldview file index.
-
-        Empty string if MEMORY.md is missing. Injected into the system
-        context every wake so the agent always sees its 'home page'
-        without needing to call view explicitly.
-
-        Smell 1 fix (W15.12 review): also append a one-line-per-file
-        worldview index showing line count + first non-empty header. With
-        just MEMORY.md auto-loaded, the agent didn't know if other files
-        had content or were empty placeholders, so it would defensively
-        ``view`` every file every wake (~6 wasted iter). The index lets
-        agent skip a ``view`` when the heading hasn't changed since
-        bootstrap.
-        """
+        """Return the first ``max_lines`` of MEMORY.md, or an empty string."""
         memory_md = self.root / "MEMORY.md"
         if not memory_md.exists():
             return ""
@@ -257,22 +179,11 @@ class MemoryStore:
         if len(lines) > max_lines:
             kept.append(f"... (truncated; {len(lines) - max_lines} more lines)")
 
-        # Append index of other worldview files
-        index = self._build_file_index(skip="MEMORY.md")
-        if index:
-            kept.append("")
-            kept.append("---")
-            kept.append("# worldview/ 文件索引 (其它文件状态)")
-            kept.extend(index)
-
         return "\n".join(kept)
 
     def list_files(self) -> list[str]:
         """List all .md files in worldview, sorted."""
-        return sorted(
-            p.relative_to(self.root).as_posix()
-            for p in self.root.rglob("*.md")
-        )
+        return sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*.md"))
 
     def _build_file_index(self, *, skip: str | None = None) -> list[str]:
         """One line per non-skipped .md file: ``- name (N lines): first heading``.
@@ -396,9 +307,7 @@ class MemoryStore:
         text = full.read_text(encoding="utf-8")
         lines = text.splitlines(keepends=True)
         if line_no > len(lines):
-            return (
-                f"ERROR: insert_line {line_no} > file length {len(lines)}"
-            )
+            return f"ERROR: insert_line {line_no} > file length {len(lines)}"
         new_block = str(insert_text)
         if not new_block.endswith("\n"):
             new_block += "\n"

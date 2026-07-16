@@ -1,7 +1,7 @@
 """Inbox — the agent's HITL queue.
 
 Every action that touches the world (sending a notification, marking a job as
-"considered", saving an analyze_gaps suggestion as an applied edit) goes
+"considered", saving a model suggestion as an applied edit) goes
 through here. The agent enqueues; the user decides via the web UI; the
 decision unblocks downstream automation.
 
@@ -106,7 +106,7 @@ def enqueue_agent_suggestion(
     back into evolution_signals correctly.
 
     ``proposed_action`` shape:
-        {"tool": "tailor_resume", "args": {"job_id": 42}}
+        {"tool": "score_job", "args": {"job_id": 42}}
 
     The route handler that processes user-approved suggestions can read this
     and either show a "do it now" button or auto-execute on approve.

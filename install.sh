@@ -170,11 +170,11 @@ else
         ok "从 .env.example 复制了 .env"
         hint "下一步: 编辑 .env 填:"
         hint "  OFFERGUIDE_LLM_API_KEY=\"sk-...\"  (DeepSeek 等 OpenAI compat key)"
-        hint "  OFFERGUIDE_RESUME_PDF=\"/path/to/简历.docx\""
+        hint "  OFFERGUIDE_RESUME_PDF=\"/path/to/简历.pdf\""
     else
         warn ".env.example 不存在 — 你需要手写 .env, 至少:"
         hint 'OFFERGUIDE_LLM_API_KEY="sk-..."'
-        hint 'OFFERGUIDE_RESUME_PDF="/path/to/简历.docx"'
+        hint 'OFFERGUIDE_RESUME_PDF="/path/to/简历.pdf"'
     fi
 fi
 
@@ -213,7 +213,8 @@ echo ""
 echo "${BOLD}然后浏览器打开:${RESET} ${GREEN}http://127.0.0.1:8000${RESET}"
 echo ""
 echo "${BOLD}首次使用:${RESET}"
-echo "  • 顶部 hero 粘 1 个 JD → 10-20s 出评估报告"
-echo "  • 装 BOSS 浏览器扩展 (browser_extension/) → 在 BOSS 推荐页一键 sync"
+echo "  • 在推荐页确认当前求职意图，然后运行找岗 Agent"
+echo "  • Agent 没找到的岗位，可手动粘贴完整 JD 后进入唯一投递包"
+echo "  • 可选安装浏览器扩展 (extension/)：复制投递包，并让 Agent 只读获取登录态页面"
 echo ""
 hint "出问题: 跑 doctor + LLM 检查: $DOCTOR_CMD --probe-llm"

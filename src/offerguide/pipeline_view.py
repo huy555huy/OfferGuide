@@ -20,12 +20,11 @@ the page renders.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from .memory import Store
 
 KANBAN_STAGES: list[tuple[str, str]] = [
-    ("scanned",   "已扫描"),
+    ("scanned",   "待投递"),
     ("applied",   "已投递"),
     ("contacted", "HR 已联系"),
     ("interview", "面试中"),
@@ -54,11 +53,6 @@ class KanbanCard:
     silence_days: float | None
     """Days since latest non-inferred event. None if no events yet."""
 
-    has_score: bool
-    """Whether score_match has been run on this JD. Drives the 'score?'
-    badge on scanned/applied cards."""
-
-
 @dataclass
 class PipelineView:
     """Full kanban payload — one bucket per stage."""
@@ -72,16 +66,21 @@ class PipelineView:
     """Cards in any non-terminal stage. Surfaced as the page-level stat."""
 
 
-def build(store: Store) -> PipelineView:
+def build(
+    store: Store,
+    *,
+    pending_job_ids: list[int] | tuple[int, ...] | None = None,
+) -> PipelineView:
     """Build the kanban view from the DB.
 
     Two-source aggregation:
     1. Every applications row → bucketed by derived status
-    2. Every jobs row not yet in applications → 'scanned'
+    2. The caller's ordered current candidates not yet in applications → 'scanned'
 
-    'scanned' is intentionally noisy — it captures JDs the user dropped
-    in but hasn't decided on. Once they hit "submit application", the
-    row moves to 'applied' and disappears from 'scanned'.
+    ``pending_job_ids`` lets the product UI bind this first column to the
+    current published selection instead of treating the entire historical
+    crawl corpus as actionable jobs.  ``None`` preserves the low-level legacy
+    view for callers that explicitly need every stored JD.
     """
     columns: dict[str, list[KanbanCard]] = {k: [] for k, _ in KANBAN_STAGES}
 
@@ -126,19 +125,6 @@ def build(store: Store) -> PipelineView:
             """
         ).fetchall()
 
-        # Score lookup — for the 'has_score' badge
-        score_rows = conn.execute(
-            """
-            SELECT DISTINCT json_extract(input_json, '$.job_id') AS jid
-            FROM skill_runs
-            WHERE skill_name = 'score_match'
-              AND json_extract(input_json, '$.job_id') IS NOT NULL
-            """
-        ).fetchall()
-    scored_job_ids: set[int] = {
-        int(r[0]) for r in score_rows if r[0] is not None
-    }
-
     # Place each application
     for r in app_rows:
         app_id = int(r[0])
@@ -163,12 +149,23 @@ def build(store: Store) -> PipelineView:
                 status=status,
                 latest_event_kind=latest_kind,
                 silence_days=silence_days,
-                has_score=job_id in scored_job_ids,
             )
         )
 
-    # Place each scanned-only job
-    for r in scanned_rows:
+    if pending_job_ids is None:
+        ordered_scanned_rows = scanned_rows
+    else:
+        scanned_by_id = {int(row[0]): row for row in scanned_rows}
+        # Dict insertion order removes duplicate ids without disturbing the
+        # model-published ranking supplied by the caller.
+        ordered_scanned_rows = [
+            scanned_by_id[job_id]
+            for job_id in dict.fromkeys(pending_job_ids)
+            if job_id in scanned_by_id
+        ]
+
+    # Place each current candidate that does not yet have an application.
+    for r in ordered_scanned_rows:
         job_id = int(r[0])
         columns["scanned"].append(
             KanbanCard(
@@ -181,7 +178,6 @@ def build(store: Store) -> PipelineView:
                 status="scanned",
                 latest_event_kind=None,
                 silence_days=None,
-                has_score=job_id in scored_job_ids,
             )
         )
 
@@ -263,7 +259,7 @@ def transition_options(stage_key: str) -> list[tuple[str, str]]:
 
 
 _TRANSITIONS: dict[str, list[tuple[str, str]]] = {
-    "scanned":   [("submitted", "标记已投递")],
+    "scanned":   [],
     "applied":   [
         ("viewed", "HR 看了"),
         ("replied", "HR 回复"),
@@ -282,5 +278,3 @@ _TRANSITIONS: dict[str, list[tuple[str, str]]] = {
     ],
     "terminal":  [],
 }
-
-_ = Any  # keep typing import for downstream extension

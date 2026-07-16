@@ -6,7 +6,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/redesign/tokens/a.css">
+<link rel="stylesheet" href="/static/app.css">
 <style>
   body { overflow: hidden; }
   .app {
@@ -260,12 +260,6 @@
   .pool .row .src.bs { background: #00bfa5; color: #fff; }
   .pool .row .ttl { font-size: 13px; }
   .pool .row .ttl small { color: var(--ink-3); font-size: 11.5px; }
-  .pool .row .sc {
-    font-family: var(--font-mono); font-size: 12px; font-weight: 600;
-    color: var(--ink-2);
-  }
-  .pool .row .sc.hi { color: var(--ok); }
-  .pool .row .sc.lo { color: var(--bad); }
   .result-box {
     margin: 12px 16px 16px;
     padding: 12px;
@@ -454,14 +448,8 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="5" height="16" rx="1"></rect><rect x="10" y="4" width="5" height="10" rx="1"></rect><rect x="17" y="4" width="4" height="6" rx="1"></rect></svg>
       <span class="dot-badge"></span>
     </a>
-    <a class="item" href="/tailor" title="Tailor / 简历" aria-label="Tailor">
+    <a class="item" href="/project-vault" title="项目事实" aria-label="项目事实">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 4h12l4 4v12H4z"></path><path d="M8 8h6M8 12h8M8 16h5"></path></svg>
-    </a>
-    <a class="item" href="/interviews" title="Interview / 面经" aria-label="Interview">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 5h16v10H8l-4 4z"></path><circle cx="9" cy="10" r="0.8" fill="currentColor"></circle><circle cx="12" cy="10" r="0.8" fill="currentColor"></circle><circle cx="15" cy="10" r="0.8" fill="currentColor"></circle></svg>
-    </a>
-    <a class="item" href="/evolution" title="Lab / SKILL 进化" aria-label="Lab">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 3v6L4 19a2 2 0 0 0 1.7 3h12.6A2 2 0 0 0 20 19L15 9V3"></path><path d="M8 3h8"></path></svg>
     </a>
     <div class="spacer"></div>
     <a class="item" href="/debug" title="Settings / Debug" aria-label="Settings">
@@ -480,13 +468,11 @@
       <span class="bracket-tag signal"><span>{{ interrupts_count }} interrupts</span></span>
       <div class="grow"></div>
       <div class="uptime">
-        <span class="seg"><span>uptime</span> <span class="v">{{ uptime_str }}</span></span>
+        <span class="seg"><span>当前岗位</span> <span class="v">{{ jobs_today_count }}</span></span>
         <span class="sep">·</span>
-        <span class="seg"><span>wake</span> <span class="v">#{{ wake_count }}</span></span>
+        <span class="seg"><span>投递</span> <span class="v">{{ application_count }}</span></span>
         <span class="sep">·</span>
-        <span class="seg"><span>budget</span> <span class="v">${{ "%.2f"|format(today_cost_usd) }} / {{ "%.0f"|format(budget_cap_usd) }}</span></span>
-        <span class="sep">·</span>
-        <span class="live">running</span>
+        <span class="live">{{ agent_overall_label }}</span>
       </div>
       <div class="search">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
@@ -557,46 +543,52 @@
       <!-- work area -->
       <div class="work">
 
-        <!-- paste JD -->
+        <!-- manual JD fallback -->
         <div class="panel">
           <header>
-            <h3>快速评估 · 粘 JD</h3>
-            <span class="tag">10-20s</span>
+            <h3>手动补充 JD</h3>
+            <span class="tag">fallback</span>
             <div class="grow"></div>
-            <span class="more">历史评估 →</span>
           </header>
-          <form class="paste-jd" id="evaluate-form">
-            <textarea class="ta" id="evaluate-input" required minlength="200" {% if not runtime_ready %}disabled{% endif %}
+          <form class="paste-jd" id="manual-job-form">
+            <textarea class="ta" id="manual-job-input" required minlength="200"
               placeholder="把岗位描述粘到这里 · 支持 BOSS / 牛客 / 招聘官网格式 · 至少 200 字"></textarea>
             <div class="footer">
               <span class="kbd">⌘ V</span>
-              <span class="hint">{% if runtime_ready %}粘贴后点评估；会写入候选池和事件日志{% else %}未配置 LLM key，暂时不能在线评估{% endif %}</span>
+              <span class="hint">仅在 Agent 没找到岗位时补充；保存完整原文后进入投递包</span>
               <div class="grow"></div>
-              <button class="btn signal" id="evaluate-submit" type="submit" {% if not runtime_ready %}disabled{% endif %}>评估</button>
+              <button class="btn signal" id="manual-job-submit" type="submit">保存岗位</button>
             </div>
           </form>
-          <div class="result-box" id="evaluate-result"></div>
+          <div class="result-box" id="manual-job-result"></div>
         </div>
 
         <!-- recent pool -->
         <div class="panel pool">
           <header>
             <h3>新进候选</h3>
-            <span class="tag">今日 +{{ jobs_today_count }}</span>
+            <span class="tag">当前 {{ jobs_today_count }}</span>
             <div class="grow"></div>
-            <a class="more" href="/pipeline">Pipeline →</a>
+            <a class="more" href="/recommended">查看全部候选 →</a>
           </header>
           {% for j in recent_jobs %}
-          <a class="row" href="/jobs/{{ j.id }}/apply-pack" style="text-decoration:none;color:inherit;">
+          {% if j.apply_pack_url %}
+          <a class="row" href="{{ j.apply_pack_url }}" style="text-decoration:none;color:inherit;">
             <div class="src {{ j.src_cls }}">{{ j.src_label }}</div>
             <div class="ttl">{{ j.title|truncate(28) }}<br><small>{{ j.subtitle }}</small></div>
-            <div class="sc{% if j.score and j.score >= 70 %} hi{% elif j.score and j.score < 50 %} lo{% endif %}">{{ j.score|default("—", true) }}</div>
             <span class="tag {{ j.tag_cls }}">{{ j.tag_label }}</span>
           </a>
+          {% else %}
+          <div class="row" aria-disabled="true">
+            <div class="src {{ j.src_cls }}">{{ j.src_label }}</div>
+            <div class="ttl">{{ j.title|truncate(28) }}<br><small>{{ j.subtitle }}</small></div>
+            <span class="tag {{ j.tag_cls }}">{{ j.tag_label }}</span>
+          </div>
+          {% endif %}
           {% endfor %}
           {% if not recent_jobs %}
           <div style="padding:24px 18px; text-align:center; color:var(--ink-3); font-size:12.5px;">
-            还没找到岗位 — 等 ambient 跑一轮 (~6h cron) 或粘 JD 评估。
+            当前还没有岗位。可以立即运行找岗 Agent，或手动补充一份完整 JD。
           </div>
           {% endif %}
         </div>
@@ -608,7 +600,7 @@
           <h3>最近产物</h3>
           <span class="tag">artifacts</span>
           <div class="grow"></div>
-          <a class="more" href="/project-vault">项目事实档案 →</a>
+          <a class="more" href="/pipeline">投递进度 →</a>
         </header>
         <div style="padding: 0 16px;">
         {% for a in recent_artifacts %}
@@ -618,7 +610,7 @@
           </a>
         {% endfor %}
         {% if not recent_artifacts %}
-          <div style="padding:16px 0; color:var(--ink-3); font-size:12.5px;">暂无新产物。agent 保存项目档案、投递包或面试准备后会出现在这里。</div>
+          <div style="padding:16px 0; color:var(--ink-3); font-size:12.5px;">暂无新产物。agent 保存项目档案、投递包或真实面经问答后会出现在这里。</div>
         {% endif %}
         </div>
       </div>
@@ -632,17 +624,19 @@
       <div class="av">O</div>
       <div class="who">
         <div class="name">Offer Agent</div>
-        <div class="state"><span class="dot {{ agent_state_dot }}"></span> {{ agent_state_label }} · 第 {{ wake_count }} 次唤醒</div>
+        <div class="state"><span class="dot {{ agent_state_dot }}"></span> {{ agent_state_label }} · {{ recent_events|length }} 项近期活动</div>
       </div>
       <div class="menu">⋯</div>
     </div>
 
     <div class="agent-now">
       <div class="label">NOW</div>
-      <div class="task">{{ agent_now_task }}</div>
+      <div class="task" id="agent-now-task">
+        {% if agent_now_href %}<a href="{{ agent_now_href }}">{{ agent_now_task }} →</a>{% else %}{{ agent_now_task }}{% endif %}
+      </div>
       <form id="agent-chat-form" style="margin-top:12px;">
         <textarea id="agent-chat-input" rows="3" {% if not runtime_ready %}disabled{% endif %}
-          placeholder="和 Agent 对话：帮我找岗位 / 明天面试准备 / 调简历"
+          placeholder="和 Agent 对话：帮我找岗位 / 准备明天的面试 / 修改当前岗位简历"
           style="width:100%;resize:vertical;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--bg-elev);padding:8px;font-family:inherit;font-size:12.5px;"></textarea>
         <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
           <span class="kbd">Enter</span>
@@ -668,13 +662,13 @@
         <span class="dim" style="text-transform:none; letter-spacing:0">{{ next_wake_label }}</span>
       </div>
       {% for ev in recent_events %}
-      <div class="log-item{% if ev.kind == 'ask' %} evt-ask{% endif %}">
+      {% if ev.href %}<a class="log-item{% if ev.kind == 'ask' %} evt-ask{% endif %}" href="{{ ev.href }}">{% else %}<div class="log-item{% if ev.kind == 'ask' %} evt-ask{% endif %}">{% endif %}
         <div class="t">{{ ev.time }}</div>
         <div class="what">
           {% if ev.kind == 'ask' %}<span class="ask">{{ ev.text }}</span>
           {% else %}<span class="verb">{{ ev.verb }}</span>{% if ev.obj %} <span class="obj">{{ ev.obj }}</span>{% endif %}{% if ev.tail %} · {{ ev.tail }}{% endif %}{% endif %}
         </div>
-      </div>
+      {% if ev.href %}</a>{% else %}</div>{% endif %}
       {% endfor %}
       {% if not recent_events %}
       <div style="text-align:center; padding:24px 0; color:var(--ink-4); font-size:12px;">
@@ -684,54 +678,60 @@
     </div>
 
     <div class="agent-foot">
-      <span class="stat">今日 LLM <span class="v">${{ "%.2f"|format(today_cost_usd) }}</span></span>
+      <a class="stat" href="/recommended">当前岗位</a>
       <span class="sep">·</span>
-      <span class="stat">预算 <span class="v">${{ "%.0f"|format(budget_cap_usd) }}</span></span>
+      <a class="stat" href="/pipeline">投递进度</a>
       <span class="sep">·</span>
-      <span class="stat">DeepSeek V4</span>
+      <span class="stat">结果已保存</span>
     </div>
   </aside>
 
 </div>
 <script>
-const evaluateForm = document.getElementById("evaluate-form");
-const evaluateInput = document.getElementById("evaluate-input");
-const evaluateResult = document.getElementById("evaluate-result");
-if (evaluateForm) {
-  evaluateForm.addEventListener("submit", async (event) => {
+function escapeHtml(value) {
+  return String(value == null ? "" : value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+const manualJobForm = document.getElementById("manual-job-form");
+const manualJobInput = document.getElementById("manual-job-input");
+const manualJobResult = document.getElementById("manual-job-result");
+if (manualJobForm) {
+  manualJobForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const text = evaluateInput.value.trim();
+    const text = manualJobInput.value.trim();
     if (text.length < 200) {
-      evaluateResult.className = "result-box visible";
-      evaluateResult.textContent = "JD 文本太短，至少粘完整 200 字。";
+      manualJobResult.className = "result-box visible";
+      manualJobResult.textContent = "JD 文本太短，请粘贴至少 200 字的完整岗位描述。";
       return;
     }
-    const button = document.getElementById("evaluate-submit");
+    const button = document.getElementById("manual-job-submit");
     button.disabled = true;
-    evaluateResult.className = "result-box visible";
-    evaluateResult.textContent = "评估中...";
+    manualJobResult.className = "result-box visible";
+    manualJobResult.textContent = "正在保存完整 JD...";
     try {
-      const response = await fetch("/api/evaluate-job", {
+      const response = await fetch("/api/jobs/manual", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({url_or_text: text}),
       });
       const data = await response.json();
-      if (!response.ok || data.user_facing_error) {
-        throw new Error(data.user_facing_error || data.detail || "评估失败");
+      if (!response.ok) {
+        throw new Error(data.detail || "岗位保存失败");
       }
-      const score = data.score == null ? "未评分" : Math.round(data.score) + " 分";
-      evaluateResult.innerHTML = `
-        <strong>${data.company || "未指定公司"} · ${data.title || "粘贴的 JD"}</strong><br>
-        匹配度：${score} · job#${data.job_id}<br>
-        <span class="dim">${data.score_reasoning || "已入库，可继续生成投递包或微调简历。"}</span>
+      const jobId = encodeURIComponent(data.job_id);
+      manualJobResult.innerHTML = `
+        <strong>${escapeHtml(data.company || "未指定公司")} · ${escapeHtml(data.title || "粘贴的 JD")}</strong><br>
+        已保存完整 JD · job#${escapeHtml(data.job_id)}
         <div class="actions">
-          <a class="btn signal" href="/jobs/${data.job_id}/apply-pack">准备投递</a>
-          <a class="btn" href="/tailor?job_id=${data.job_id}">调简历</a>
-          <a class="btn ghost" href="/pipeline">看 Pipeline</a>
+          <a class="btn signal" href="/jobs/${jobId}/apply-pack">准备投递</a>
         </div>`;
     } catch (error) {
-      evaluateResult.textContent = error.message || String(error);
+      manualJobResult.textContent = error.message || String(error);
     } finally {
       button.disabled = false;
     }
@@ -758,7 +758,16 @@ if (chatForm) {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Agent 处理失败");
-      chatResult.innerHTML = `<strong>执行记录 #${data.run_id}</strong><br>${data.final_text || "完成。"}`;
+      const runId = encodeURIComponent(String(data.run_id || ""));
+      const finalText = escapeHtml(data.final_text || "完成。").replaceAll("\n", "<br>");
+      const invocation = data.research_invocation;
+      const followup = invocation && invocation.result_url
+        ? `<div class="actions"><a class="btn signal" href="${escapeHtml(invocation.result_url)}">${invocation.terminal ? "查看结果" : "查看 Agent 进度"}</a></div>`
+        : "";
+      chatResult.innerHTML = `<strong><a href="/agent/runs/${runId}">执行记录 #${escapeHtml(data.run_id)}</a></strong><br>${finalText}${followup}`;
+      if (invocation && !invocation.terminal) {
+        watchResearchInvocation(invocation.id);
+      }
       chatInput.value = "";
     } catch (error) {
       chatResult.textContent = error.message || String(error);
@@ -767,6 +776,44 @@ if (chatForm) {
     }
   });
 }
+
+let researchPollGeneration = 0;
+function watchResearchInvocation(invocationId) {
+  const generation = ++researchPollGeneration;
+  const url = `/api/research-agent-invocations/${encodeURIComponent(invocationId)}`;
+  let delay = 2500;
+  let stopped = false;
+  const poll = async () => {
+    if (stopped || generation !== researchPollGeneration) return;
+    try {
+      const response = await fetch(url, {headers: {"Accept": "application/json"}, cache: "no-store"});
+      if (!response.ok) throw new Error(String(response.status));
+      const payload = await response.json();
+      delay = 2500;
+      const task = document.getElementById("agent-now-task");
+      if (task && payload.message) {
+        task.innerHTML = payload.result_url
+          ? `<a href="${escapeHtml(payload.result_url)}">${escapeHtml(payload.message)} →</a>`
+          : escapeHtml(payload.message);
+      }
+      if (payload.terminal) {
+        stopped = true;
+        window.location.reload();
+        return;
+      }
+    } catch (_error) {
+      delay = Math.min(delay * 2, 30000);
+    }
+    if (!stopped && generation === researchPollGeneration) {
+      window.setTimeout(poll, delay);
+    }
+  };
+  window.setTimeout(poll, 1200);
+  window.addEventListener("pagehide", () => { stopped = true; }, {once: true});
+}
+{% if agent_poll_invocation_id %}
+watchResearchInvocation("{{ agent_poll_invocation_id }}");
+{% endif %}
 </script>
 </body>
 </html>
